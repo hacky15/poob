@@ -1,0 +1,100 @@
+"""Repository for WatchItem CRUD operations."""
+
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import datetime
+
+import aiosqlite
+
+from agentic_scraper.storage.models import WatchItem
+
+
+class WatchlistRepository:
+    """CRUD operations for watch items (user's saved searches)."""
+
+    def __init__(self, conn: aiosqlite.Connection) -> None:
+        self._conn = conn
+
+    async def save(self, item: WatchItem) -> WatchItem:
+        """Insert a watch item. Assigns an ID if not set."""
+        if item.id is None:
+            item.id = str(uuid.uuid4())
+
+        await self._conn.execute(
+            """
+            INSERT INTO watch_items
+                (id, keywords, max_price, location, radius_miles, category,
+                 sites, is_active, created_at, discord_user_id, discord_channel_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item.id,
+                item.keywords,
+                item.max_price,
+                item.location,
+                item.radius_miles,
+                item.category,
+                json.dumps(item.sites),
+                int(item.is_active),
+                item.created_at.isoformat(),
+                item.discord_user_id,
+                item.discord_channel_id,
+            ),
+        )
+        await self._conn.commit()
+        return item
+
+    async def get(self, item_id: str) -> WatchItem | None:
+        """Fetch a watch item by ID."""
+        cursor = await self._conn.execute(
+            "SELECT * FROM watch_items WHERE id = ?", (item_id,)
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._row_to_watch_item(row)
+
+    async def list_for_user(self, discord_user_id: str) -> list[WatchItem]:
+        """List all watch items for a specific Discord user."""
+        cursor = await self._conn.execute(
+            "SELECT * FROM watch_items WHERE discord_user_id = ? ORDER BY created_at DESC",
+            (discord_user_id,),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_watch_item(row) for row in rows]
+
+    async def list_active(self) -> list[WatchItem]:
+        """List all active watch items across all users."""
+        cursor = await self._conn.execute(
+            "SELECT * FROM watch_items WHERE is_active = 1 ORDER BY created_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_watch_item(row) for row in rows]
+
+    async def delete(self, item_id: str, discord_user_id: str) -> bool:
+        """Delete a watch item. Only the owning user can delete. Returns True if deleted."""
+        cursor = await self._conn.execute(
+            "DELETE FROM watch_items WHERE id = ? AND discord_user_id = ?",
+            (item_id, discord_user_id),
+        )
+        await self._conn.commit()
+        return cursor.rowcount > 0
+
+    @staticmethod
+    def _row_to_watch_item(row: aiosqlite.Row) -> WatchItem:
+        """Convert a database row to a WatchItem dataclass."""
+        return WatchItem(
+            id=row["id"],
+            keywords=row["keywords"],
+            max_price=row["max_price"],
+            location=row["location"],
+            radius_miles=row["radius_miles"],
+            category=row["category"],
+            sites=json.loads(row["sites"]),
+            is_active=bool(row["is_active"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            discord_user_id=row["discord_user_id"],
+            discord_channel_id=row["discord_channel_id"],
+        )
