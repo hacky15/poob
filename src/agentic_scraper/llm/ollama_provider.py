@@ -8,16 +8,38 @@ from langchain_ollama import ChatOllama
 
 
 class OllamaProvider:
-    """LLM provider backed by a local Ollama instance."""
+    """LLM provider backed by a local Ollama instance.
 
-    def __init__(self, model: str, base_url: str, temperature: float) -> None:
+    Args:
+        model: Ollama model name (e.g. 'qwen3:8b').
+        base_url: Ollama API base URL.
+        temperature: Sampling temperature.
+        format: Output format constraint (e.g. 'json'). None for free-form.
+        num_ctx: Context window size. None uses Ollama default.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        base_url: str,
+        temperature: float,
+        format: str | None = None,
+        num_ctx: int | None = None,
+    ) -> None:
         self._model_name = model
         self._base_url = base_url
-        self._chat_model = ChatOllama(
-            model=model,
-            base_url=base_url,
-            temperature=temperature,
-        )
+
+        kwargs: dict[str, object] = {
+            "model": model,
+            "base_url": base_url,
+            "temperature": temperature,
+        }
+        if format is not None:
+            kwargs["format"] = format
+        if num_ctx is not None:
+            kwargs["num_ctx"] = num_ctx
+
+        self._chat_model = ChatOllama(**kwargs)
 
     @property
     def chat_model(self) -> BaseChatModel:

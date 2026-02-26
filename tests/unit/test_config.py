@@ -17,8 +17,19 @@ class TestAppConfigDefaults:
         """LLM defaults to Ollama with standard settings."""
         assert app_config.llm_provider == "ollama"
         assert app_config.ollama_base_url == "http://localhost:11434"
-        assert app_config.ollama_model == "llama3.1:8b"
+        assert app_config.ollama_model == "qwen3:8b"
         assert app_config.llm_temperature == 0.3
+        assert app_config.ollama_num_ctx == 12000
+        assert app_config.ollama_json_temperature == 0.0
+
+    def test_cloud_llm_defaults(self, app_config):
+        """Cloud LLM defaults to empty key (local-only mode)."""
+        assert app_config.google_api_key == ""
+        assert app_config.google_model == "gemini-2.5-flash"
+
+    def test_vision_model_default(self, app_config):
+        """Vision model defaults to qwen3-vl:8b."""
+        assert app_config.vision_model == "qwen3-vl:8b"
 
     def test_browser_defaults(self, app_config):
         """Browser defaults to non-headless with vision enabled."""

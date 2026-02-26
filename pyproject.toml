@@ -13,6 +13,7 @@ dependencies = [
     # LLM
     "langchain-core>=0.3.0",
     "langchain-ollama>=0.3.0",
+    "langchain-google-genai>=2.1.0",
 
     # Discord
     "discord.py>=2.3.0",

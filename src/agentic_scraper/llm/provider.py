@@ -1,4 +1,4 @@
-"""LLM provider protocol and factory function."""
+"""LLM provider protocol and factory functions."""
 
 from __future__ import annotations
 
@@ -33,7 +33,10 @@ class LLMProvider(Protocol):
 
 
 def create_llm_provider(config: AppConfig) -> LLMProvider:
-    """Factory: reads config.llm_provider and returns the right implementation."""
+    """Factory: reads config.llm_provider and returns the right implementation.
+
+    This creates the *browser* LLM (no format constraint, used for browser-use agents).
+    """
     if config.llm_provider == "ollama":
         from .ollama_provider import OllamaProvider
 
@@ -42,4 +45,30 @@ def create_llm_provider(config: AppConfig) -> LLMProvider:
             base_url=config.ollama_base_url,
             temperature=config.llm_temperature,
         )
+    if config.llm_provider == "gemini":
+        from .gemini_provider import GeminiProvider
+
+        return GeminiProvider(
+            api_key=config.google_api_key,
+            model=config.google_model,
+            temperature=config.llm_temperature,
+        )
     raise ValueError(f"Unknown LLM provider: {config.llm_provider}")
+
+
+def create_cloud_provider(config: AppConfig) -> LLMProvider | None:
+    """Create a cloud LLM provider for world-knowledge tasks.
+
+    Returns None if no Google API key is configured, allowing
+    graceful fallback to local models.
+    """
+    if not config.google_api_key:
+        return None
+
+    from .gemini_provider import GeminiProvider
+
+    return GeminiProvider(
+        api_key=config.google_api_key,
+        model=config.google_model,
+        temperature=config.llm_temperature,
+    )

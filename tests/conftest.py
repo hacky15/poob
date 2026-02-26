@@ -18,12 +18,13 @@ def app_config(tmp_path: Path):
     from agentic_scraper.config import AppConfig
 
     return AppConfig(
+        _env_file=None,
         discord_bot_token="test-token-123",
         discord_deals_channel_id=123456789,
         database_path=tmp_path / "test.db",
         log_dir=tmp_path / "logs",
         ollama_base_url="http://localhost:11434",
-        ollama_model="llama3.1:8b",
+        ollama_model="qwen3:8b",
     )
 
 

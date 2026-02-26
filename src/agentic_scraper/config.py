@@ -23,8 +23,14 @@ class AppConfig(BaseSettings):
     # --- LLM ---
     llm_provider: str = "ollama"
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "llama3.1:8b"
+    ollama_model: str = "qwen3:8b"
+    ollama_num_ctx: int = 12000
+    ollama_json_temperature: float = 0.0
     llm_temperature: float = 0.3
+
+    # --- Cloud LLM ---
+    google_api_key: str = ""
+    google_model: str = "gemini-2.5-flash"
 
     # --- Browser ---
     browser_headless: bool = False
@@ -40,6 +46,13 @@ class AppConfig(BaseSettings):
     # --- Deal Radar ---
     deal_radar_enabled: bool = True
     deal_radar_min_score: str = "good"
+    deal_radar_version: str = "v2"  # "v1" (LLM-only) or "v2" (skill-based)
+    vision_model: str = "qwen3-vl:8b"  # Vision-capable model for image identification
+    ebay_lookup_enabled: bool = True
+    ebay_http_timeout_seconds: int = 10
+    ebay_min_samples: int = 3
+    deal_radar_max_evaluations: int = 10
+    deal_radar_scam_threshold_pct: float = 80.0
 
     # --- Storage ---
     database_path: Path = Path("data/scraper.db")

@@ -1,0 +1,163 @@
+"""Tests for IdentifyItemTool - text-based item identification."""
+
+from __future__ import annotations
+
+import json
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from agentic_scraper.skills.models import ItemIdentification
+
+
+def _make_llm_response(data: dict) -> MagicMock:
+    """Helper to create a mock LLM response with structured JSON."""
+    resp = MagicMock()
+    resp.content = json.dumps(data)
+    return resp
+
+
+class TestIdentifyItemTool:
+    """Tests for the identify_item skill."""
+
+    async def test_identifies_specific_product(self):
+        """Should extract brand, model, and category from clear title."""
+        from agentic_scraper.skills.identify import IdentifyItemTool
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=_make_llm_response({
+            "item_name": "PlayStation 5 Disc Edition",
+            "brand": "Sony",
+            "model": "CFI-1215A",
+            "category": "electronics/gaming/console",
+            "condition": "like new",
+            "confidence": 0.95,
+            "needs_visual": False,
+        }))
+
+        tool = IdentifyItemTool(llm)
+        result = await tool.run("PS5 Disc Edition - barely used", "Like new, barely used")
+
+        assert isinstance(result, ItemIdentification)
+        assert result.item_name == "PlayStation 5 Disc Edition"
+        assert result.brand == "Sony"
+        assert result.category == "electronics/gaming/console"
+        assert result.confidence >= 0.9
+        assert result.needs_visual is False
+
+    async def test_vague_title_flags_needs_visual(self):
+        """Vague titles should have low confidence and needs_visual=True."""
+        from agentic_scraper.skills.identify import IdentifyItemTool
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=_make_llm_response({
+            "item_name": "table",
+            "brand": None,
+            "model": None,
+            "category": "furniture/table",
+            "condition": None,
+            "confidence": 0.2,
+            "needs_visual": True,
+        }))
+
+        tool = IdentifyItemTool(llm)
+        result = await tool.run("Nice table $50", "")
+
+        assert result.confidence < 0.5
+        assert result.needs_visual is True
+        assert result.category == "furniture/table"
+
+    async def test_detects_condition_from_text(self):
+        """Should extract condition keywords like 'broken', 'for parts'."""
+        from agentic_scraper.skills.identify import IdentifyItemTool
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=_make_llm_response({
+            "item_name": "iPhone 13",
+            "brand": "Apple",
+            "model": "iPhone 13",
+            "category": "electronics/phone",
+            "condition": "parts",
+            "confidence": 0.8,
+            "needs_visual": False,
+        }))
+
+        tool = IdentifyItemTool(llm)
+        result = await tool.run(
+            "iPhone 13 - FOR PARTS", "Screen cracked, doesn't turn on"
+        )
+
+        assert result.condition == "parts"
+
+    async def test_handles_llm_error_gracefully(self):
+        """Should return low-confidence result when LLM fails."""
+        from agentic_scraper.skills.identify import IdentifyItemTool
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(side_effect=RuntimeError("LLM timeout"))
+
+        tool = IdentifyItemTool(llm)
+        result = await tool.run("PS5 Disc Edition", "Like new")
+
+        assert isinstance(result, ItemIdentification)
+        assert result.confidence == 0.0
+        assert result.needs_visual is True
+
+    async def test_handles_malformed_json(self):
+        """Should return low-confidence result when LLM returns bad JSON."""
+        from agentic_scraper.skills.identify import IdentifyItemTool
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=_make_llm_response({}))
+        # Override with non-JSON text
+        llm.ainvoke.return_value.content = "I think this is a table"
+
+        tool = IdentifyItemTool(llm)
+        result = await tool.run("Nice table", "")
+
+        assert result.confidence == 0.0
+        assert result.needs_visual is True
+
+    async def test_passes_title_and_description_to_llm(self):
+        """The LLM prompt should contain both title and description."""
+        from agentic_scraper.skills.identify import IdentifyItemTool
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=_make_llm_response({
+            "item_name": "test",
+            "brand": None,
+            "model": None,
+            "category": "other",
+            "condition": None,
+            "confidence": 0.5,
+            "needs_visual": False,
+        }))
+
+        tool = IdentifyItemTool(llm)
+        await tool.run("Xbox Series X", "Barely used, comes with controller")
+
+        call_args = llm.ainvoke.call_args[0][0]
+        prompt_text = str(call_args)
+        assert "Xbox Series X" in prompt_text
+        assert "Barely used" in prompt_text
+
+    async def test_distinguishes_accessory_from_main_item(self):
+        """Should correctly identify 'PS5 controller' as controller, not console."""
+        from agentic_scraper.skills.identify import IdentifyItemTool
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=_make_llm_response({
+            "item_name": "PS5 DualSense Controller",
+            "brand": "Sony",
+            "model": "DualSense",
+            "category": "electronics/gaming/accessory",
+            "condition": "good",
+            "confidence": 0.9,
+            "needs_visual": False,
+        }))
+
+        tool = IdentifyItemTool(llm)
+        result = await tool.run("PS5 controller", "White DualSense, works great")
+
+        assert "controller" in result.item_name.lower() or "dualsense" in result.item_name.lower()
+        assert "accessory" in result.category
