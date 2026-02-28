@@ -95,13 +95,26 @@ class ScanScheduler:
             interval_seconds = add_jitter(self._interval_minutes * 60)
             self._trigger_event.clear()
 
+            self._next_scan_time = datetime.now(timezone.utc).replace(
+                microsecond=0
+            )
+            # Add interval unless this is a triggered scan
+            from datetime import timedelta
+
+            self._next_scan_time += timedelta(seconds=interval_seconds)
+            log.info(
+                "Waiting for next scan",
+                next_in_minutes=round(interval_seconds / 60, 1),
+            )
+
             try:
                 await asyncio.wait_for(
                     self._trigger_event.wait(),
                     timeout=interval_seconds,
                 )
+                log.info("Scan triggered manually")
             except asyncio.TimeoutError:
-                pass  # Normal timeout, time to scan
+                log.info("Scheduled scan starting")
 
             if not self._is_running:
                 break
@@ -112,5 +125,6 @@ class ScanScheduler:
             try:
                 await self._engine.run_scan_cycle()
                 self._last_scan_time = datetime.now(timezone.utc)
+                log.info("Scan cycle finished, scheduling next")
             except Exception as exc:
                 log.error("Scan cycle error in scheduler", error=str(exc))

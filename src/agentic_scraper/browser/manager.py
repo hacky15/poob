@@ -5,12 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from browser_use import Agent, Browser, BrowserConfig, BrowserContextConfig
+from browser_use import Agent, BrowserProfile, BrowserSession
 
 from agentic_scraper.utils.logging import get_logger
 
 if TYPE_CHECKING:
-    from langchain_core.language_models.chat_models import BaseChatModel
+    from typing import Any
+
+    BaseChatModel = Any  # browser-use 0.12+ uses its own LLM Protocol, not LangChain's
 
 log = get_logger("browser.manager")
 
@@ -18,7 +20,7 @@ log = get_logger("browser.manager")
 class BrowserManager:
     """Manages browser lifecycle and creates ephemeral browser-use Agents.
 
-    The browser instance is long-lived (one per session). Agents are
+    The browser session is long-lived (one per session). Agents are
     ephemeral (one per scan task) since they accumulate action history
     and should be discarded after each task completes.
 
@@ -44,35 +46,37 @@ class BrowserManager:
         self._use_vision = use_vision
         self._stealth_min_delay_ms = stealth_min_delay_ms
         self._stealth_max_delay_ms = stealth_max_delay_ms
-        self._browser: Browser | None = None
+        self._browser: BrowserSession | None = None
 
     async def start(self, cookies_file: str | None = None) -> None:
         """Launch the browser with persistent profile config.
 
         Args:
             cookies_file: Optional path to a cookies JSON file relative to profiles_dir.
+                          Used as user_data_dir for persistent login state.
         """
-        cookies_path = None
+        user_data_dir = None
         if cookies_file:
-            cookies_path = str(self._profiles_dir / cookies_file)
+            # Use the directory containing the cookies file as user data dir
+            profile_path = self._profiles_dir / Path(cookies_file).parent
+            profile_path.mkdir(parents=True, exist_ok=True)
+            user_data_dir = str(profile_path)
 
-        context_config = BrowserContextConfig(
-            cookies_file=cookies_path,
-            browser_window_size={"width": 1280, "height": 1100},
+        profile = BrowserProfile(
+            headless=self._headless,
+            user_data_dir=user_data_dir,
+            window_size={"width": 1280, "height": 1100},
+            wait_between_actions=self._stealth_min_delay_ms / 1000.0,
         )
 
-        self._browser = Browser(
-            config=BrowserConfig(
-                headless=self._headless,
-                new_context_config=context_config,
-            )
-        )
+        self._browser = BrowserSession(browser_profile=profile)
+        await self._browser.start()
         log.info("Browser started", headless=self._headless)
 
     async def stop(self) -> None:
         """Gracefully close the browser."""
         if self._browser:
-            await self._browser.close()
+            await self._browser.stop()
             self._browser = None
             log.info("Browser stopped")
 
@@ -108,11 +112,31 @@ class BrowserManager:
         return Agent(
             task=task,
             llm=llm,
-            browser=self._browser,
+            browser_session=self._browser,
             use_vision=vision,
             max_actions_per_step=max_actions_per_step,
             max_failures=max_failures,
         )
+
+    async def get_page(self) -> object:
+        """Get the current CDP Page for direct browser control.
+
+        Returns the browser-use Page object from the active BrowserSession,
+        enabling direct navigation, JS evaluation, and content extraction
+        without creating an LLM Agent.
+
+        Returns:
+            A browser-use Page instance.
+
+        Raises:
+            RuntimeError: If browser has not been started or no page is active.
+        """
+        if self._browser is None:
+            raise RuntimeError("Browser not started. Call start() first.")
+        page = await self._browser.get_current_page()
+        if page is None:
+            raise RuntimeError("No active page in browser session.")
+        return page
 
     @property
     def is_running(self) -> bool:

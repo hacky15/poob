@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from agentic_scraper.scanner.watchlist import WatchlistMatcher
+from agentic_scraper.sites.base import ScanQuery
 from agentic_scraper.storage.models import Listing, ScanLog
 from agentic_scraper.utils.logging import get_logger
 
@@ -63,6 +64,7 @@ class ScanEngine:
         notifier: DealNotifier,
         smart_deal_radar: SmartDealRadar | None = None,
         deal_radar_max_evaluations: int = 10,
+        browse_enabled: bool = False,
     ) -> None:
         self._registry = registry
         self._browser = browser_manager
@@ -75,80 +77,82 @@ class ScanEngine:
         self._notifier = notifier
         self._smart_deal_radar = smart_deal_radar
         self._deal_radar_max_evaluations = deal_radar_max_evaluations
+        self._browse_enabled = browse_enabled
 
     async def run_scan_cycle(self) -> None:
-        """Execute one full scan cycle across all sites and queries."""
+        """Execute one full scan cycle across all sites and queries.
+
+        Collects all new listings first, then evaluates them for deals
+        with a single per-cycle budget (not per-query).
+        """
         log.info("Starting scan cycle")
 
         watch_items = await self._watchlist_repo.list_active()
-        if not watch_items:
+        if not watch_items and not self._browse_enabled:
             log.info("No active watch items, skipping scan")
             return
 
-        queries = self._matcher.build_queries(watch_items)
+        queries = self._matcher.build_queries(watch_items) if watch_items else []
 
+        # Append a browse query to scan the latest local listings
+        if self._browse_enabled:
+            queries.append(ScanQuery(keywords=""))
+            log.info("Browse query appended to scan cycle")
+
+        # Phase 1: Scrape all queries and collect new listings
+        all_new_listings: list[Listing] = []
         for site_name in self._registry.list_sites():
             adapter = self._registry.get(site_name)
             if adapter is None:
                 continue
 
             for query in queries:
-                await self._run_single_scan(adapter, query, watch_items)
+                new_listings = await self._scrape_query(adapter, query)
+                all_new_listings.extend(new_listings)
+
+        log.info("Scrape phase complete", total_new=len(all_new_listings))
+
+        # Phase 2: Evaluate deals with a per-cycle budget
+        if all_new_listings:
+            if self._smart_deal_radar:
+                deals = await self._run_deal_radar(all_new_listings)
+            else:
+                deals = self._matcher.match(all_new_listings, watch_items)
+
+            for deal in deals:
+                await self._deal_repo.save(deal)
+                listing = next(
+                    (l for l in all_new_listings if l.id == deal.listing_id),
+                    None,
+                )
+                if listing:
+                    await self._notifier.send_deal(deal, listing)
+
+            log.info("Deal evaluation complete", deals_found=len(deals))
 
         log.info("Scan cycle complete")
 
-    async def _run_single_scan(
-        self, adapter: object, query: object, watch_items: list
-    ) -> None:
-        """Run a single scan for one (adapter, query) pair.
+    async def _scrape_query(
+        self, adapter: object, query: object
+    ) -> list[Listing]:
+        """Scrape a single query and return new (deduped) listings.
 
         Args:
             adapter: The site adapter to use.
             query: The scan query to execute.
-            watch_items: Active watch items for matching.
+
+        Returns:
+            List of newly-seen listings from this query.
         """
         start_time = time.monotonic()
         started_at = datetime.now(timezone.utc)
         errors: list[str] = []
 
         try:
-            # Get the LLM chat model
-            llm = getattr(self._llm, "chat_model", self._llm)
-
+            llm = self._llm
             result = await adapter.scan(query, self._browser, llm)
-
-            # Deduplicate and save new listings
             new_listings = await self._dedup_and_save(result.listings)
             errors.extend(result.errors)
-
-            # Match against watch items
-            if new_listings:
-                deals = self._matcher.match(new_listings, watch_items)
-                matched_ids = {d.listing_id for d in deals}
-
-                # Run SmartDealRadar on unmatched listings
-                if self._smart_deal_radar:
-                    unmatched = [
-                        l for l in new_listings if l.id not in matched_ids
-                    ]
-                    radar_deals = await self._run_deal_radar(unmatched)
-                    deals.extend(radar_deals)
-
-                # Save and notify for each deal
-                for deal in deals:
-                    await self._deal_repo.save(deal)
-                    # Find the listing for this deal
-                    listing = next(
-                        (l for l in new_listings if l.id == deal.listing_id),
-                        None,
-                    )
-                    if listing:
-                        await self._notifier.send_deal(deal, listing)
-
-                deals_found = len(deals)
-            else:
-                deals_found = 0
-
         except Exception as exc:
             log.error(
                 "Scan failed",
@@ -158,7 +162,6 @@ class ScanEngine:
             )
             errors.append(str(exc))
             new_listings = []
-            deals_found = 0
 
         # Log the scan
         duration = time.monotonic() - start_time
@@ -166,13 +169,14 @@ class ScanEngine:
             site=adapter.site_name,
             query_keywords=query.keywords,
             listings_found=len(new_listings),
-            deals_found=deals_found,
+            deals_found=0,  # Deals scored later at cycle level
             errors=errors,
             duration_seconds=duration,
             started_at=started_at,
             completed_at=datetime.now(timezone.utc),
         )
         await self._scan_log_repo.save(scan_log)
+        return new_listings
 
     async def _run_deal_radar(self, listings: list[Listing]) -> list:
         """Run SmartDealRadar on a batch of listings.
@@ -220,11 +224,20 @@ class ScanEngine:
             Only the newly saved listings.
         """
         new_listings: list[Listing] = []
+        already_seen = 0
         for listing in listings:
             if listing.external_id and await self._listing_repo.exists(
                 listing.site, listing.external_id
             ):
+                already_seen += 1
                 continue
             saved = await self._listing_repo.save(listing)
             new_listings.append(saved)
+
+        log.info(
+            "Dedup results",
+            total_scraped=len(listings),
+            new=len(new_listings),
+            already_seen=already_seen,
+        )
         return new_listings

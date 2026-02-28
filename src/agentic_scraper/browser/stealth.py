@@ -40,6 +40,22 @@ def random_scroll_pattern(steps: int = 5) -> list[tuple[str, int, int]]:
     return pattern
 
 
+async def apply_scroll_pattern(page: object, steps: int = 5) -> None:
+    """Execute a human-like scroll pattern on a browser-use Page.
+
+    Generates a random scroll pattern and applies it using page.evaluate()
+    with JavaScript window.scrollBy() calls, pausing between each step.
+
+    Args:
+        page: A browser-use Page instance with evaluate() method.
+        steps: Number of scroll actions.
+    """
+    from agentic_scraper.browser.page_actions import scroll_page
+
+    pattern = random_scroll_pattern(steps)
+    await scroll_page(page, pattern)
+
+
 def add_jitter(seconds: float, pct: float = 0.15) -> float:
     """Add random jitter to a target duration.
 

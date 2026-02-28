@@ -10,6 +10,7 @@ from discord.ext import commands
 from agentic_scraper.utils.logging import get_logger
 
 if TYPE_CHECKING:
+    from agentic_scraper.agent.runner import AgentRunner
     from agentic_scraper.config import AppConfig
     from agentic_scraper.discord_bot.notifier import DealNotifier
     from agentic_scraper.scanner.engine import ScanEngine
@@ -45,6 +46,7 @@ class ScraperBot(commands.Bot):
         self.notifier: DealNotifier | None = None
         self.site_registry: SiteRegistry | None = None
         self.watchlist_repo: WatchlistRepository | None = None
+        self.agent_runner: AgentRunner | None = None
 
     async def setup_hook(self) -> None:
         """Load all cog extensions when the bot starts."""
@@ -68,8 +70,25 @@ class ScraperBot(commands.Bot):
 
         await self.add_cog(SearchCog(bot=self))
 
+        if self.agent_runner:
+            from agentic_scraper.discord_bot.agent_handler import AgentMessageHandler
+
+            await self.add_cog(AgentMessageHandler(bot=self, agent_runner=self.agent_runner))
+
         log.info("All cogs loaded")
 
     async def on_ready(self) -> None:
         """Called when the bot has connected to Discord."""
         log.info("Bot is ready", user=str(self.user), guilds=len(self.guilds))
+
+        # Wire the deals notification channel now that we're connected
+        if self.notifier and self.config.discord_deals_channel_id:
+            channel = self.get_channel(self.config.discord_deals_channel_id)
+            if channel is not None:
+                self.notifier.set_channel(channel)
+                log.info("Deals notification channel set", channel=channel.name)
+            else:
+                log.warning(
+                    "Deals channel not found — deal notifications will be skipped",
+                    channel_id=self.config.discord_deals_channel_id,
+                )

@@ -18,7 +18,11 @@ class ListingRepository:
         self._conn = conn
 
     async def save(self, listing: Listing) -> Listing:
-        """Insert a listing. Assigns an ID if not set."""
+        """Insert or update a listing. Assigns an ID if not set.
+
+        Uses ON CONFLICT to update existing listings (matched by site + external_id)
+        with fresh data from a new scan.
+        """
         if listing.id is None:
             listing.id = str(uuid.uuid4())
 
@@ -29,6 +33,15 @@ class ListingRepository:
                  location, seller_name, image_urls, listing_url, posted_at,
                  scraped_at, raw_data)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(site, external_id) DO UPDATE SET
+                title = excluded.title,
+                price = excluded.price,
+                location = excluded.location,
+                seller_name = excluded.seller_name,
+                image_urls = excluded.image_urls,
+                listing_url = excluded.listing_url,
+                scraped_at = excluded.scraped_at,
+                raw_data = excluded.raw_data
             """,
             (
                 listing.id,

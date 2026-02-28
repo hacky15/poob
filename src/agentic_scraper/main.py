@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from agentic_scraper.config import AppConfig
-from agentic_scraper.llm.provider import create_cloud_provider, create_llm_provider
+from agentic_scraper.llm.provider import create_knowledge_provider, create_llm_provider
 from agentic_scraper.storage.database import init_database
 from agentic_scraper.utils.logging import get_logger, setup_logging
 
@@ -23,6 +23,10 @@ async def startup() -> None:
     from agentic_scraper.storage.repositories.listing_repo import ListingRepository
     from agentic_scraper.storage.repositories.scan_log_repo import ScanLogRepository
     from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
+
+    from agentic_scraper.agent.runner import AgentRunner
+    from agentic_scraper.storage.repositories.conversation_repo import ConversationRepository
+    from agentic_scraper.storage.repositories.preferences_repo import UserPreferencesRepository
 
     config = AppConfig()
 
@@ -43,17 +47,45 @@ async def startup() -> None:
     scan_log_repo = ScanLogRepository(conn)
 
     # --- Initialize LLM providers ---
-    # 1. Browser LLM: free-form text output (NO format="json")
+    # 1. Browser LLM: browser-use's own ChatOllama (required by browser-use 0.12+)
     log.info("Initializing browser LLM", provider=config.llm_provider)
-    browser_llm = create_llm_provider(config)
-    if browser_llm.is_available():
-        log.info("Browser LLM available", model=browser_llm.model_name)
+    langchain_llm_provider = create_llm_provider(config)
+    if langchain_llm_provider.is_available():
+        log.info("Browser LLM available", model=langchain_llm_provider.model_name)
     else:
         log.warning(
             "Browser LLM not reachable - scanning will fail until it's available",
-            model=browser_llm.model_name,
+            model=langchain_llm_provider.model_name,
             url=config.ollama_base_url,
         )
+
+    # browser-use 0.12+ requires its own LLM wrapper, not LangChain's
+    if config.browser_llm_provider == "nvidia" and config.nvidia_api_key:
+        from browser_use import ChatOpenAI as BrowserUseChatOpenAI
+
+        browser_llm = BrowserUseChatOpenAI(
+            model=config.nvidia_model,
+            api_key=config.nvidia_api_key,
+            base_url=config.nvidia_base_url,
+            max_completion_tokens=8192,
+        )
+        log.info("Browser LLM using NVIDIA NIM", model=config.nvidia_model)
+    elif config.browser_llm_provider == "gemini" and config.google_api_key:
+        from browser_use import ChatGoogle as BrowserUseChatGoogle
+
+        browser_llm = BrowserUseChatGoogle(
+            model=config.browser_google_model,
+            api_key=config.google_api_key,
+        )
+        log.info("Browser LLM using Gemini", model=config.browser_google_model)
+    else:
+        from browser_use import ChatOllama as BrowserUseChatOllama
+
+        browser_llm = BrowserUseChatOllama(
+            model=config.ollama_model,
+            host=config.ollama_base_url,
+        )
+        log.info("Browser LLM using Ollama", model=config.ollama_model)
 
     # 2. JSON LLM: structured JSON output for skill extraction
     from agentic_scraper.llm.ollama_provider import OllamaProvider
@@ -68,7 +100,23 @@ async def startup() -> None:
     json_llm = json_llm_provider.chat_model
     log.info("JSON LLM initialized", model=config.ollama_model, format="json")
 
-    # 3. Vision LLM: image-based identification
+    # 3. Knowledge LLM: world-knowledge tasks (retail price, category estimation)
+    # Cerebras free tier (235B model, 1M tokens/day) > Gemini > Ollama fallback
+    knowledge_llm_provider = create_knowledge_provider(config)
+    if knowledge_llm_provider and knowledge_llm_provider.is_available():
+        knowledge_llm = knowledge_llm_provider.chat_model
+        log.info("Knowledge LLM initialized", model=knowledge_llm_provider.model_name)
+    else:
+        knowledge_llm = json_llm  # fallback to local Ollama
+        if knowledge_llm_provider:
+            log.warning(
+                "Knowledge LLM not reachable, falling back to local Ollama",
+                model=knowledge_llm_provider.model_name,
+            )
+        else:
+            log.info("No cloud API key configured, using local Ollama for knowledge tasks")
+
+    # 4. Vision LLM: image-based identification
     vision_llm = json_llm  # fallback if no vision model configured
     if config.vision_model:
         from langchain_ollama import ChatOllama
@@ -80,19 +128,6 @@ async def startup() -> None:
             format="json",
         )
         log.info("Vision LLM initialized", model=config.vision_model)
-
-    # 4. Cloud LLM: world-knowledge tasks (retail lookup, category estimate)
-    # Falls back to json_llm if no Google API key is set
-    cloud_provider = create_cloud_provider(config)
-    if cloud_provider and cloud_provider.is_available():
-        cloud_llm = cloud_provider.chat_model
-        log.info("Cloud LLM available", model=cloud_provider.model_name)
-    else:
-        cloud_llm = json_llm
-        if config.google_api_key:
-            log.warning("Cloud LLM not reachable, falling back to local")
-        else:
-            log.info("No Google API key configured, using local LLM for all tasks")
 
     # Initialize browser manager
     browser_manager = BrowserManager(
@@ -107,6 +142,17 @@ async def startup() -> None:
     registry = SiteRegistry()
     registry.discover()
     log.info("Site adapters discovered", sites=registry.list_sites())
+
+    # Configure Facebook adapter: scan mode, credentials, extraction LLM
+    fb_adapter = registry.get("facebook_marketplace")
+    if fb_adapter:
+        fb_adapter.set_max_listings(config.scan_max_listings_per_query)
+        fb_adapter.set_scan_mode(config.scan_mode)
+        fb_adapter.set_json_llm(json_llm)
+        if config.facebook_email:
+            fb_adapter.set_credentials(config.facebook_email, config.facebook_password)
+            log.info("Facebook credentials injected into adapter")
+        log.info("Facebook adapter configured", scan_mode=config.scan_mode)
 
     # Initialize Discord notifier and bot
     notifier = DealNotifier()
@@ -125,8 +171,8 @@ async def startup() -> None:
         identify_tool = IdentifyItemTool(json_llm)
         visual_tool = VisualIdentifyTool(vision_llm)
         ebay_tool = EbayLookupTool(timeout_seconds=config.ebay_http_timeout_seconds)
-        retail_tool = RetailLookupTool(cloud_llm)
-        category_tool = CategoryEstimateTool(cloud_llm)
+        retail_tool = RetailLookupTool(knowledge_llm)
+        category_tool = CategoryEstimateTool(knowledge_llm)
 
         min_score = DealScore(config.deal_radar_min_score)
 
@@ -155,10 +201,52 @@ async def startup() -> None:
         notifier=notifier,
         smart_deal_radar=smart_deal_radar,
         deal_radar_max_evaluations=config.deal_radar_max_evaluations,
+        browse_enabled=config.scan_browse_enabled,
     )
 
     # Build scheduler
     scheduler = ScanScheduler(engine, interval_minutes=config.scan_interval_minutes)
+
+    # --- Conversational Agent ---
+    prefs_repo = UserPreferencesRepository(conn)
+    conversation_repo = ConversationRepository(conn)
+
+    # Agent brain LLM: default Ollama (free forever, unlimited).
+    # Override via AGENT_LLM_PROVIDER env var to "nvidia" or "gemini" if desired.
+    if config.agent_llm_provider == "nvidia" and config.nvidia_api_key:
+        from langchain_openai import ChatOpenAI as LangChainChatOpenAI
+
+        agent_brain_llm = LangChainChatOpenAI(
+            model=config.agent_nvidia_model,
+            api_key=config.nvidia_api_key,
+            base_url=config.nvidia_base_url,
+            temperature=config.llm_temperature,
+        )
+        log.info("Agent brain using NVIDIA NIM", model=config.agent_nvidia_model)
+    elif config.agent_llm_provider == "gemini" and config.google_api_key:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        agent_brain_llm = ChatGoogleGenerativeAI(
+            model=config.agent_google_model,
+            google_api_key=config.google_api_key,
+            temperature=config.llm_temperature,
+        )
+        log.info("Agent brain using Gemini", model=config.agent_google_model)
+    else:
+        agent_brain_llm = langchain_llm_provider.chat_model
+        log.info("Agent brain using local LLM", model=langchain_llm_provider.model_name)
+
+    agent_runner = AgentRunner(
+        llm=agent_brain_llm,
+        prefs_repo=prefs_repo,
+        watchlist_repo=watchlist_repo,
+        conversation_repo=conversation_repo,
+        deal_repo=deal_repo,
+        listing_repo=listing_repo,
+        scheduler=scheduler,
+        max_iterations=config.agent_max_tool_iterations,
+    )
+    log.info("AgentRunner initialized")
 
     # Build Discord bot
     bot = ScraperBot(config)
@@ -167,6 +255,7 @@ async def startup() -> None:
     bot.notifier = notifier
     bot.site_registry = registry
     bot.watchlist_repo = watchlist_repo
+    bot.agent_runner = agent_runner
 
     log.info("Startup complete. Launching bot and scheduler.")
 

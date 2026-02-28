@@ -72,3 +72,34 @@ def create_cloud_provider(config: AppConfig) -> LLMProvider | None:
         model=config.google_model,
         temperature=config.llm_temperature,
     )
+
+
+def create_knowledge_provider(config: AppConfig) -> LLMProvider | None:
+    """Create a cloud LLM provider for world-knowledge tasks.
+
+    Priority: Cerebras (free, 235B model) > Gemini > None (falls back to Ollama).
+
+    Cerebras free tier: 30 RPM, 60K TPM, 1M tokens/day — more than enough
+    for retail price lookups and category estimation.
+
+    Returns None if no cloud API key is configured.
+    """
+    if config.cerebras_api_key:
+        from .cerebras_provider import CerebrasProvider
+
+        return CerebrasProvider(
+            api_key=config.cerebras_api_key,
+            model=config.cerebras_model,
+            temperature=config.llm_temperature,
+        )
+
+    if config.google_api_key:
+        from .gemini_provider import GeminiProvider
+
+        return GeminiProvider(
+            api_key=config.google_api_key,
+            model=config.google_model,
+            temperature=config.llm_temperature,
+        )
+
+    return None

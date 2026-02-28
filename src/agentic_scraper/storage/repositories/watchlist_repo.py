@@ -73,6 +73,15 @@ class WatchlistRepository:
         rows = await cursor.fetchall()
         return [self._row_to_watch_item(row) for row in rows]
 
+    async def deactivate(self, item_id: str) -> bool:
+        """Deactivate a watch item (set is_active=0). Returns True if updated."""
+        cursor = await self._conn.execute(
+            "UPDATE watch_items SET is_active = 0 WHERE id = ?",
+            (item_id,),
+        )
+        await self._conn.commit()
+        return cursor.rowcount > 0
+
     async def delete(self, item_id: str, discord_user_id: str) -> bool:
         """Delete a watch item. Only the owning user can delete. Returns True if deleted."""
         cursor = await self._conn.execute(

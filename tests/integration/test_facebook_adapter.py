@@ -175,16 +175,16 @@ class TestFacebookAdapter:
         assert adapter.requires_login is True
 
     async def test_scan_returns_scan_result(self):
-        """scan() should return a ScanResult with parsed listings."""
+        """scan() should return a ScanResult with parsed listings (agent mode)."""
         from agentic_scraper.sites.base import ScanQuery, ScanResult
         from agentic_scraper.sites.facebook.adapter import FacebookMarketplaceAdapter
 
         adapter = FacebookMarketplaceAdapter()
+        adapter.set_scan_mode("agent")
         query = ScanQuery(keywords="PS5", max_price=300.0)
 
         # Mock the browser manager and agent
-        mock_history = MagicMock()
-        mock_history.final_result.return_value = json.dumps([
+        listing_json = json.dumps([
             {
                 "title": "PS5 Console",
                 "price": 250.0,
@@ -193,6 +193,9 @@ class TestFacebookAdapter:
                 "listing_url": "https://facebook.com/marketplace/item/999",
             }
         ])
+        mock_history = MagicMock()
+        mock_history.final_result.return_value = listing_json
+        mock_history.extracted_content.return_value = [listing_json]
         mock_history.is_successful.return_value = True
 
         mock_agent = MagicMock()
@@ -218,10 +221,12 @@ class TestFacebookAdapter:
         from agentic_scraper.sites.facebook.adapter import FacebookMarketplaceAdapter
 
         adapter = FacebookMarketplaceAdapter()
+        adapter.set_scan_mode("agent")
         query = ScanQuery(keywords="PS5")
 
         mock_history = MagicMock()
         mock_history.final_result.return_value = None
+        mock_history.extracted_content.return_value = []
         mock_history.is_successful.return_value = False
 
         mock_agent = MagicMock()

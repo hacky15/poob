@@ -338,3 +338,103 @@ class TestScanEngine:
 
         # Should not raise
         await engine.run_scan_cycle()
+
+    async def test_browse_enabled_adds_extra_query(
+        self, db_connection, mock_registry, mock_adapter, mock_notifier
+    ):
+        """With browse enabled, adapter.scan should be called with an extra browse query."""
+        from agentic_scraper.scanner.engine import ScanEngine
+        from agentic_scraper.scanner.watchlist import WatchlistMatcher
+        from agentic_scraper.storage.repositories.deal_repo import DealRepository
+        from agentic_scraper.storage.repositories.listing_repo import ListingRepository
+        from agentic_scraper.storage.repositories.scan_log_repo import ScanLogRepository
+        from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
+
+        watchlist_repo = WatchlistRepository(db_connection)
+        await watchlist_repo.save(WatchItem(
+            keywords="PS5", max_price=300.0,
+            discord_user_id="u1", discord_channel_id="c1",
+        ))
+
+        engine = ScanEngine(
+            registry=mock_registry,
+            browser_manager=MagicMock(),
+            llm_provider=MagicMock(),
+            matcher=WatchlistMatcher(),
+            listing_repo=ListingRepository(db_connection),
+            watchlist_repo=watchlist_repo,
+            deal_repo=DealRepository(db_connection),
+            scan_log_repo=ScanLogRepository(db_connection),
+            notifier=mock_notifier,
+            browse_enabled=True,
+        )
+
+        await engine.run_scan_cycle()
+        # 1 watch query + 1 browse query = 2 calls
+        assert mock_adapter.scan.call_count == 2
+        # The second call should have empty keywords (browse query)
+        browse_call = mock_adapter.scan.call_args_list[1]
+        assert browse_call[0][0].keywords == ""
+
+    async def test_browse_disabled_no_extra_query(
+        self, db_connection, mock_registry, mock_adapter, mock_notifier
+    ):
+        """With browse disabled, only watchlist queries run."""
+        from agentic_scraper.scanner.engine import ScanEngine
+        from agentic_scraper.scanner.watchlist import WatchlistMatcher
+        from agentic_scraper.storage.repositories.deal_repo import DealRepository
+        from agentic_scraper.storage.repositories.listing_repo import ListingRepository
+        from agentic_scraper.storage.repositories.scan_log_repo import ScanLogRepository
+        from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
+
+        watchlist_repo = WatchlistRepository(db_connection)
+        await watchlist_repo.save(WatchItem(
+            keywords="PS5", max_price=300.0,
+            discord_user_id="u1", discord_channel_id="c1",
+        ))
+
+        engine = ScanEngine(
+            registry=mock_registry,
+            browser_manager=MagicMock(),
+            llm_provider=MagicMock(),
+            matcher=WatchlistMatcher(),
+            listing_repo=ListingRepository(db_connection),
+            watchlist_repo=watchlist_repo,
+            deal_repo=DealRepository(db_connection),
+            scan_log_repo=ScanLogRepository(db_connection),
+            notifier=mock_notifier,
+            browse_enabled=False,
+        )
+
+        await engine.run_scan_cycle()
+        # Only 1 watch query, no browse
+        assert mock_adapter.scan.call_count == 1
+
+    async def test_browse_runs_even_with_no_watches(
+        self, db_connection, mock_registry, mock_adapter, mock_notifier
+    ):
+        """Browse should run even when there are no active watch items."""
+        from agentic_scraper.scanner.engine import ScanEngine
+        from agentic_scraper.scanner.watchlist import WatchlistMatcher
+        from agentic_scraper.storage.repositories.deal_repo import DealRepository
+        from agentic_scraper.storage.repositories.listing_repo import ListingRepository
+        from agentic_scraper.storage.repositories.scan_log_repo import ScanLogRepository
+        from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
+
+        engine = ScanEngine(
+            registry=mock_registry,
+            browser_manager=MagicMock(),
+            llm_provider=MagicMock(),
+            matcher=WatchlistMatcher(),
+            listing_repo=ListingRepository(db_connection),
+            watchlist_repo=WatchlistRepository(db_connection),
+            deal_repo=DealRepository(db_connection),
+            scan_log_repo=ScanLogRepository(db_connection),
+            notifier=mock_notifier,
+            browse_enabled=True,
+        )
+
+        await engine.run_scan_cycle()
+        # Should still call scan once for the browse query
+        assert mock_adapter.scan.call_count == 1
+        assert mock_adapter.scan.call_args[0][0].keywords == ""

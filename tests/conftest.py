@@ -49,17 +49,33 @@ def mock_llm():
 
 
 @pytest.fixture
-def mock_browser_manager():
+def mock_page():
+    """Mock browser-use CDP Page with standard methods."""
+    page = AsyncMock()
+    page.goto = AsyncMock()
+    page.evaluate = AsyncMock(return_value="")
+    page.screenshot = AsyncMock(return_value="base64data")
+    page._extract_clean_markdown = AsyncMock(return_value=("# Page content", {}))
+    return page
+
+
+@pytest.fixture
+def mock_browser_manager(mock_page):
     """Mock BrowserManager that doesn't launch a real browser."""
     manager = AsyncMock()
+    # Agent path (legacy browser-use)
     agent_mock = AsyncMock()
     agent_mock.run = AsyncMock(
         return_value=MagicMock(
             final_result=MagicMock(return_value="[]"),
             is_successful=MagicMock(return_value=True),
+            extracted_content=MagicMock(return_value=[]),
         )
     )
-    manager.create_agent.return_value = agent_mock
+    # create_agent is sync (not awaited in adapter), so use MagicMock explicitly
+    manager.create_agent = MagicMock(return_value=agent_mock)
+    # Direct path (CDP Page)
+    manager.get_page = AsyncMock(return_value=mock_page)
     return manager
 
 

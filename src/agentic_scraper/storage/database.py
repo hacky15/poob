@@ -89,6 +89,30 @@ async def init_schema(conn: aiosqlite.Connection) -> None:
             ON deals(created_at);
         CREATE INDEX IF NOT EXISTS idx_scan_logs_started
             ON scan_logs(started_at);
+
+        CREATE TABLE IF NOT EXISTS user_preferences (
+            id TEXT PRIMARY KEY,
+            discord_user_id TEXT NOT NULL,
+            preference_key TEXT NOT NULL,
+            preference_value TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL,
+            UNIQUE(discord_user_id, preference_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_user_prefs_user
+            ON user_preferences(discord_user_id);
+
+        CREATE TABLE IF NOT EXISTS conversation_messages (
+            id TEXT PRIMARY KEY,
+            discord_user_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            tool_call_id TEXT,
+            timestamp TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_conv_msgs_user_time
+            ON conversation_messages(discord_user_id, timestamp);
         """
     )
     await conn.commit()
