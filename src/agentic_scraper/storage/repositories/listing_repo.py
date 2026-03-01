@@ -81,11 +81,84 @@ class ListingRepository:
         )
         return await cursor.fetchone() is not None
 
+    async def filter_new_ids(self, site: str, external_ids: list[str]) -> set[str]:
+        """Return the subset of external_ids that do NOT exist in the database.
+
+        Uses a single SQL query with IN clause for batch efficiency.
+        Batches at 900 per query to stay under SQLite's variable limit.
+
+        Args:
+            site: Site identifier (e.g. 'facebook_marketplace').
+            external_ids: List of external IDs to check.
+
+        Returns:
+            Set of external_ids that are NOT already in the database.
+        """
+        if not external_ids:
+            return set()
+
+        all_ids = set(external_ids)
+        existing: set[str] = set()
+        batch_size = 900
+
+        for i in range(0, len(external_ids), batch_size):
+            batch = external_ids[i : i + batch_size]
+            placeholders = ",".join("?" * len(batch))
+            cursor = await self._conn.execute(
+                f"SELECT external_id FROM listings "
+                f"WHERE site = ? AND external_id IN ({placeholders})",
+                [site, *batch],
+            )
+            rows = await cursor.fetchall()
+            existing.update(row["external_id"] for row in rows)
+
+        return all_ids - existing
+
     async def list_recent(self, limit: int = 20) -> list[Listing]:
         """List the most recently scraped listings."""
         cursor = await self._conn.execute(
             "SELECT * FROM listings ORDER BY scraped_at DESC LIMIT ?", (limit,)
         )
+        rows = await cursor.fetchall()
+        return [self._row_to_listing(row) for row in rows]
+
+    async def search(
+        self,
+        *,
+        keyword: str | None = None,
+        max_price: float | None = None,
+        min_price: float | None = None,
+        limit: int = 20,
+    ) -> list[Listing]:
+        """Search listings by keyword and/or price range.
+
+        Args:
+            keyword: Search term matched against title (case-insensitive LIKE).
+            max_price: Maximum price filter.
+            min_price: Minimum price filter.
+            limit: Maximum results to return.
+
+        Returns:
+            Matching listings sorted by scraped_at DESC.
+        """
+        conditions: list[str] = []
+        params: list = []
+
+        if keyword:
+            conditions.append("title LIKE ?")
+            params.append(f"%{keyword}%")
+        if max_price is not None:
+            conditions.append("price <= ?")
+            params.append(max_price)
+        if min_price is not None:
+            conditions.append("price >= ?")
+            params.append(min_price)
+
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        query = f"SELECT * FROM listings{where} ORDER BY scraped_at DESC LIMIT ?"
+        params.append(limit)
+
+        cursor = await self._conn.execute(query, params)
         rows = await cursor.fetchall()
         return [self._row_to_listing(row) for row in rows]
 

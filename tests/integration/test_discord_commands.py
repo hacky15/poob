@@ -26,11 +26,11 @@ class TestWatchlistCog:
         ctx.channel.id = "channel_456"
         ctx.send = AsyncMock()
 
-        await cog._do_watch(ctx, keywords="PS5", max_price=300.0, location=None)
+        await cog._do_watch(ctx, interest="PS5", max_price=300.0, location=None)
 
         items = await repo.list_for_user("user_123")
         assert len(items) == 1
-        assert items[0].keywords == "PS5"
+        assert items[0].interest == "PS5"
         assert items[0].max_price == 300.0
         ctx.send.assert_called_once()
 
@@ -41,7 +41,7 @@ class TestWatchlistCog:
 
         repo = WatchlistRepository(db_connection)
         watch = await repo.save(WatchItem(
-            keywords="PS5", max_price=300.0,
+            interest="PS5", max_price=300.0,
             discord_user_id="user_123", discord_channel_id="channel_456",
         ))
 
@@ -64,11 +64,11 @@ class TestWatchlistCog:
 
         repo = WatchlistRepository(db_connection)
         await repo.save(WatchItem(
-            keywords="PS5", max_price=300.0,
+            interest="PS5", max_price=300.0,
             discord_user_id="user_123", discord_channel_id="c1",
         ))
         await repo.save(WatchItem(
-            keywords="Xbox", max_price=400.0,
+            interest="Xbox", max_price=400.0,
             discord_user_id="user_123", discord_channel_id="c1",
         ))
 

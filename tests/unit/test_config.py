@@ -65,6 +65,59 @@ class TestAppConfigDefaults:
         assert app_config.discord_command_prefix == "!"
 
 
+class TestPatrolConfig:
+    """Verify patrol-related default values."""
+
+    def test_patrol_enabled_by_default(self, app_config):
+        assert app_config.patrol_enabled is True
+
+    def test_patrol_categories_default(self, app_config):
+        assert "electronics" in app_config.patrol_categories
+        assert "furniture" in app_config.patrol_categories
+        assert "vehicles" in app_config.patrol_categories
+        assert len(app_config.patrol_categories) == 10
+
+    def test_patrol_radius_defaults(self, app_config):
+        assert app_config.patrol_base_radius_miles == 20
+        assert app_config.patrol_radius_jitter == 4
+
+    def test_patrol_timing_defaults(self, app_config):
+        assert app_config.patrol_peak_interval_seconds == 300
+        assert app_config.patrol_moderate_interval_seconds == 600
+        assert app_config.patrol_offpeak_interval_seconds == 900
+        assert app_config.patrol_dead_interval_seconds == 1800
+
+    def test_patrol_peak_hours_defaults(self, app_config):
+        assert app_config.patrol_peak_hours_start == 16
+        assert app_config.patrol_peak_hours_end == 21
+
+    def test_patrol_deep_inspect_enabled(self, app_config):
+        assert app_config.patrol_deep_inspect_enabled is True
+
+    def test_patrol_days_since_listed(self, app_config):
+        assert app_config.patrol_days_since_listed == 1
+
+    def test_patrol_sweep_mode_default(self, app_config):
+        assert app_config.patrol_sweep_mode == "unified"
+
+    def test_patrol_radius_oscillation_disabled(self, app_config):
+        assert app_config.patrol_radius_oscillation_enabled is False
+
+    def test_stealth_defaults(self, app_config):
+        assert app_config.stealth_viewport_randomize is True
+        assert app_config.stealth_mouse_movement is True
+        assert app_config.stealth_inject_scripts is True
+
+    def test_ebay_marketplace_deflator_default(self, app_config):
+        assert app_config.ebay_marketplace_deflator == 0.80
+
+    def test_vision_model_num_ctx_default(self, app_config):
+        assert app_config.vision_model_num_ctx == 8000
+
+    def test_vision_max_images_default(self, app_config):
+        assert app_config.vision_max_images == 3
+
+
 class TestAppConfigFromEnv:
     """Verify config loads from environment variables."""
 

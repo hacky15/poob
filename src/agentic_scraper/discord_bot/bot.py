@@ -13,9 +13,11 @@ if TYPE_CHECKING:
     from agentic_scraper.agent.runner import AgentRunner
     from agentic_scraper.config import AppConfig
     from agentic_scraper.discord_bot.notifier import DealNotifier
-    from agentic_scraper.scanner.engine import ScanEngine
-    from agentic_scraper.scanner.scheduler import ScanScheduler
+    from agentic_scraper.scanner.patrol_engine import PatrolEngine
+    from agentic_scraper.scanner.patrol_scheduler import PatrolScheduler
     from agentic_scraper.sites.registry import SiteRegistry
+    from agentic_scraper.storage.repositories.deal_repo import DealRepository
+    from agentic_scraper.storage.repositories.listing_repo import ListingRepository
     from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
 
 log = get_logger("discord.bot")
@@ -41,11 +43,13 @@ class ScraperBot(commands.Bot):
         )
 
         self.config = config
-        self.scan_engine: ScanEngine | None = None
-        self.scan_scheduler: ScanScheduler | None = None
+        self.patrol_engine: PatrolEngine | None = None
+        self.patrol_scheduler: PatrolScheduler | None = None
         self.notifier: DealNotifier | None = None
         self.site_registry: SiteRegistry | None = None
         self.watchlist_repo: WatchlistRepository | None = None
+        self.deal_repo: DealRepository | None = None
+        self.listing_repo: ListingRepository | None = None
         self.agent_runner: AgentRunner | None = None
 
     async def setup_hook(self) -> None:
@@ -58,17 +62,21 @@ class ScraperBot(commands.Bot):
         if self.watchlist_repo:
             await self.add_cog(WatchlistCog(bot=self, watchlist_repo=self.watchlist_repo))
 
-        if self.scan_scheduler and self.site_registry:
+        if self.patrol_scheduler and self.site_registry:
             await self.add_cog(ScanningCog(
                 bot=self,
-                scheduler=self.scan_scheduler,
+                scheduler=self.patrol_scheduler,
                 registry=self.site_registry,
             ))
 
         if self.site_registry:
             await self.add_cog(AdminCog(bot=self, registry=self.site_registry))
 
-        await self.add_cog(SearchCog(bot=self))
+        await self.add_cog(SearchCog(
+            bot=self,
+            deal_repo=self.deal_repo,
+            listing_repo=self.listing_repo,
+        ))
 
         if self.agent_runner:
             from agentic_scraper.discord_bot.agent_handler import AgentMessageHandler

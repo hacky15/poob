@@ -384,3 +384,358 @@ class TestSmartDealRadar:
         deal = await radar.evaluate(listing)
 
         retail.assert_called_once()
+
+    async def test_ebay_deflator_applied(self):
+        """eBay marketplace deflator should reduce market price."""
+        from agentic_scraper.skills.orchestrator import SmartDealRadar
+
+        identify = AsyncMock(return_value=ItemIdentification(
+            item_name="Nintendo Switch OLED",
+            brand="Nintendo",
+            category="electronics/gaming",
+            confidence=0.9,
+            needs_visual=False,
+        ))
+        ebay = AsyncMock(return_value=PriceLookupResult(
+            median_price=250.0,
+            average_price=245.0,
+            min_price=200.0,
+            max_price=280.0,
+            sample_count=10,
+            source="ebay_sold",
+            search_query="Nintendo Switch OLED",
+            confidence=0.9,
+        ))
+
+        radar = SmartDealRadar(
+            identify_tool=identify,
+            visual_identify_tool=AsyncMock(),
+            ebay_lookup_tool=ebay,
+            retail_lookup_tool=AsyncMock(),
+            category_estimate_tool=AsyncMock(),
+            ebay_marketplace_deflator=0.80,
+        )
+
+        listing = Listing(
+            id="l1",
+            title="Switch OLED",
+            price=100.0,
+            description="Like new",
+            site="facebook_marketplace",
+        )
+
+        deal = await radar.evaluate(listing)
+
+        assert deal is not None
+        # Market price should be 250 * 0.80 = 200
+        assert deal.estimated_market_price == pytest.approx(200.0, abs=1)
+
+    async def test_ebay_deflator_default_is_one(self):
+        """Default deflator of 1.0 should not change eBay prices."""
+        from agentic_scraper.skills.orchestrator import SmartDealRadar
+
+        identify = AsyncMock(return_value=ItemIdentification(
+            item_name="Widget",
+            brand="Acme",
+            category="misc",
+            confidence=0.9,
+            needs_visual=False,
+        ))
+        ebay = AsyncMock(return_value=PriceLookupResult(
+            median_price=100.0,
+            average_price=100.0,
+            min_price=80.0,
+            max_price=120.0,
+            sample_count=5,
+            source="ebay_sold",
+            search_query="Widget",
+            confidence=0.9,
+        ))
+
+        # Default deflator (1.0) — no reduction
+        radar = SmartDealRadar(
+            identify_tool=identify,
+            visual_identify_tool=AsyncMock(),
+            ebay_lookup_tool=ebay,
+            retail_lookup_tool=AsyncMock(),
+            category_estimate_tool=AsyncMock(),
+        )
+
+        listing = Listing(
+            id="l1",
+            title="Widget",
+            price=50.0,
+            site="facebook_marketplace",
+        )
+
+        deal = await radar.evaluate(listing)
+
+        assert deal is not None
+        assert deal.estimated_market_price == pytest.approx(100.0, abs=1)
+
+    async def test_free_listing_scores_incredible(self):
+        """FREE ($0) listings with known market value should score INCREDIBLE."""
+        from agentic_scraper.skills.orchestrator import SmartDealRadar
+
+        identify = AsyncMock(return_value=ItemIdentification(
+            item_name="Leather Sectional Sofa",
+            category="furniture/sofa",
+            confidence=0.8,
+            needs_visual=False,
+            urgency_signals=("free", "curb alert"),
+        ))
+        ebay = AsyncMock(return_value=PriceLookupResult(
+            median_price=500.0,
+            average_price=480.0,
+            min_price=300.0,
+            max_price=700.0,
+            sample_count=8,
+            source="ebay_sold",
+            search_query="Leather Sectional Sofa",
+            confidence=0.85,
+        ))
+
+        radar = SmartDealRadar(
+            identify_tool=identify,
+            visual_identify_tool=AsyncMock(),
+            ebay_lookup_tool=ebay,
+            retail_lookup_tool=AsyncMock(),
+            category_estimate_tool=AsyncMock(),
+        )
+
+        listing = Listing(
+            id="l1",
+            title="FREE leather sectional - curb alert",
+            price=0.0,
+            description="Come get it, on the curb",
+            site="facebook_marketplace",
+        )
+
+        deal = await radar.evaluate(listing)
+
+        assert deal is not None
+        assert deal.score == DealScore.INCREDIBLE
+        assert deal.discount_pct == 100.0
+        assert "FREE" in deal.llm_reasoning
+        assert "curb alert" in deal.llm_reasoning
+
+    async def test_free_listing_no_price_data_skipped(self):
+        """FREE listing with no market price data should return None."""
+        from agentic_scraper.skills.orchestrator import SmartDealRadar
+
+        identify = AsyncMock(return_value=ItemIdentification(
+            item_name="random stuff",
+            category="other",
+            confidence=0.3,
+            needs_visual=True,
+        ))
+        ebay = AsyncMock(return_value=PriceLookupResult(
+            sample_count=0, confidence=0.0,
+        ))
+        retail = AsyncMock(return_value=PriceLookupResult(
+            sample_count=0, confidence=0.0,
+        ))
+        category = AsyncMock(return_value=CategoryEstimate(
+            typical_price=0.0, confidence=0.0,
+        ))
+
+        radar = SmartDealRadar(
+            identify_tool=identify,
+            visual_identify_tool=AsyncMock(),
+            ebay_lookup_tool=ebay,
+            retail_lookup_tool=retail,
+            category_estimate_tool=category,
+        )
+
+        listing = Listing(
+            id="l1",
+            title="Free stuff",
+            price=0.0,
+            site="facebook_marketplace",
+        )
+
+        deal = await radar.evaluate(listing)
+        assert deal is None
+
+    async def test_urgency_signals_boost_score_one_tier(self):
+        """Urgency signals should boost the deal score by one tier."""
+        from agentic_scraper.skills.orchestrator import SmartDealRadar
+
+        identify = AsyncMock(return_value=ItemIdentification(
+            item_name="KitchenAid Stand Mixer",
+            brand="KitchenAid",
+            category="appliances/kitchen",
+            confidence=0.9,
+            needs_visual=False,
+            urgency_signals=("must sell", "moving sale"),
+        ))
+        ebay = AsyncMock(return_value=PriceLookupResult(
+            median_price=200.0,
+            average_price=195.0,
+            min_price=160.0,
+            max_price=240.0,
+            sample_count=10,
+            source="ebay_sold",
+            search_query="KitchenAid Stand Mixer",
+            confidence=0.9,
+        ))
+
+        radar = SmartDealRadar(
+            identify_tool=identify,
+            visual_identify_tool=AsyncMock(),
+            ebay_lookup_tool=ebay,
+            retail_lookup_tool=AsyncMock(),
+            category_estimate_tool=AsyncMock(),
+            min_score=DealScore.GOOD,
+        )
+
+        # Price at $140 = 30% off → normally GOOD, but urgency → GREAT
+        listing = Listing(
+            id="l1",
+            title="KitchenAid Mixer MUST SELL moving sale",
+            price=140.0,
+            description="Moving next week, need it gone",
+            site="facebook_marketplace",
+        )
+
+        deal = await radar.evaluate(listing)
+
+        assert deal is not None
+        assert deal.score == DealScore.GREAT  # Boosted from GOOD
+        assert "must sell" in deal.llm_reasoning
+        assert "moving sale" in deal.llm_reasoning
+
+    async def test_urgency_signals_in_reasoning(self):
+        """Urgency signals should appear in deal reasoning text."""
+        from agentic_scraper.skills.orchestrator import SmartDealRadar
+
+        identify = AsyncMock(return_value=ItemIdentification(
+            item_name="Dyson V15",
+            brand="Dyson",
+            category="appliances/vacuum",
+            confidence=0.9,
+            needs_visual=False,
+            urgency_signals=("need gone", "obo"),
+        ))
+        ebay = AsyncMock(return_value=PriceLookupResult(
+            median_price=400.0,
+            average_price=390.0,
+            min_price=350.0,
+            max_price=450.0,
+            sample_count=12,
+            source="ebay_sold",
+            search_query="Dyson V15",
+            confidence=0.9,
+        ))
+
+        radar = SmartDealRadar(
+            identify_tool=identify,
+            visual_identify_tool=AsyncMock(),
+            ebay_lookup_tool=ebay,
+            retail_lookup_tool=AsyncMock(),
+            category_estimate_tool=AsyncMock(),
+        )
+
+        listing = Listing(
+            id="l1",
+            title="Dyson V15 need gone OBO",
+            price=200.0,
+            description="Need it gone asap",
+            site="facebook_marketplace",
+        )
+
+        deal = await radar.evaluate(listing)
+
+        assert deal is not None
+        assert "Seller signals:" in deal.llm_reasoning
+        assert "need gone" in deal.llm_reasoning
+        assert "obo" in deal.llm_reasoning
+
+    async def test_no_urgency_boost_at_incredible(self):
+        """INCREDIBLE score should not be boosted further."""
+        from agentic_scraper.skills.orchestrator import SmartDealRadar
+
+        identify = AsyncMock(return_value=ItemIdentification(
+            item_name="PS5",
+            brand="Sony",
+            category="electronics/gaming",
+            confidence=0.9,
+            needs_visual=False,
+            urgency_signals=("must sell",),
+        ))
+        ebay = AsyncMock(return_value=PriceLookupResult(
+            median_price=400.0,
+            average_price=395.0,
+            min_price=350.0,
+            max_price=450.0,
+            sample_count=15,
+            source="ebay_sold",
+            search_query="PS5",
+            confidence=0.9,
+        ))
+
+        radar = SmartDealRadar(
+            identify_tool=identify,
+            visual_identify_tool=AsyncMock(),
+            ebay_lookup_tool=ebay,
+            retail_lookup_tool=AsyncMock(),
+            category_estimate_tool=AsyncMock(),
+        )
+
+        # 75% off → INCREDIBLE already
+        listing = Listing(
+            id="l1",
+            title="PS5 must sell",
+            price=100.0,
+            site="facebook_marketplace",
+        )
+
+        deal = await radar.evaluate(listing)
+
+        assert deal is not None
+        assert deal.score == DealScore.INCREDIBLE  # No higher tier exists
+
+    async def test_urgency_boost_rescues_below_threshold(self):
+        """Urgency boost should rescue a FAIR deal to GOOD when min_score is GOOD."""
+        from agentic_scraper.skills.orchestrator import SmartDealRadar
+
+        identify = AsyncMock(return_value=ItemIdentification(
+            item_name="Coffee Table",
+            category="furniture/table",
+            confidence=0.8,
+            needs_visual=False,
+            urgency_signals=("garage sale", "priced to sell"),
+        ))
+        ebay = AsyncMock(return_value=PriceLookupResult(
+            median_price=100.0,
+            average_price=95.0,
+            min_price=70.0,
+            max_price=130.0,
+            sample_count=6,
+            source="ebay_sold",
+            search_query="Coffee Table",
+            confidence=0.8,
+        ))
+
+        radar = SmartDealRadar(
+            identify_tool=identify,
+            visual_identify_tool=AsyncMock(),
+            ebay_lookup_tool=ebay,
+            retail_lookup_tool=AsyncMock(),
+            category_estimate_tool=AsyncMock(),
+            min_score=DealScore.GOOD,
+        )
+
+        # $85 = 15% off → FAIR (normally filtered out), but urgency boosts to GOOD
+        listing = Listing(
+            id="l1",
+            title="Coffee Table garage sale priced to sell",
+            price=85.0,
+            description="Garage sale this weekend",
+            site="facebook_marketplace",
+        )
+
+        deal = await radar.evaluate(listing)
+
+        assert deal is not None
+        assert deal.score == DealScore.GOOD  # Rescued from FAIR

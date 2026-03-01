@@ -73,6 +73,12 @@ class IdentifyItemTool:
         if not isinstance(data, dict):
             return ItemIdentification(confidence=0.0, needs_visual=True)
 
+        raw_signals = data.get("urgency_signals", [])
+        if isinstance(raw_signals, list):
+            signals = tuple(str(s) for s in raw_signals if s)
+        else:
+            signals = ()
+
         return ItemIdentification(
             item_name=str(data.get("item_name", "")),
             brand=data.get("brand"),
@@ -81,4 +87,5 @@ class IdentifyItemTool:
             condition=data.get("condition"),
             confidence=float(data.get("confidence", 0.0)),
             needs_visual=bool(data.get("needs_visual", False)),
+            urgency_signals=signals,
         )

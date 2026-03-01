@@ -13,7 +13,30 @@ async def init_database(path: Path) -> aiosqlite.Connection:
     conn = await aiosqlite.connect(str(path))
     conn.row_factory = aiosqlite.Row
     await init_schema(conn)
+    await migrate_schema(conn)
     return conn
+
+
+async def migrate_schema(conn: aiosqlite.Connection) -> None:
+    """Run incremental schema migrations for existing databases.
+
+    Called after init_schema() to rename columns from older schema versions.
+    Uses PRAGMA table_info() to detect old column names before attempting changes.
+    No-op on fresh databases that already have the new schema.
+    """
+    # Migrate watch_items: keywords -> interest
+    cursor = await conn.execute("PRAGMA table_info(watch_items)")
+    columns = [row[1] for row in await cursor.fetchall()]
+    if "keywords" in columns and "interest" not in columns:
+        await conn.execute("ALTER TABLE watch_items RENAME COLUMN keywords TO interest")
+        await conn.commit()
+
+    # Migrate scan_logs: query_keywords -> category
+    cursor = await conn.execute("PRAGMA table_info(scan_logs)")
+    columns = [row[1] for row in await cursor.fetchall()]
+    if "query_keywords" in columns and "category" not in columns:
+        await conn.execute("ALTER TABLE scan_logs RENAME COLUMN query_keywords TO category")
+        await conn.commit()
 
 
 async def init_schema(conn: aiosqlite.Connection) -> None:
@@ -40,7 +63,7 @@ async def init_schema(conn: aiosqlite.Connection) -> None:
 
         CREATE TABLE IF NOT EXISTS watch_items (
             id TEXT PRIMARY KEY,
-            keywords TEXT NOT NULL,
+            interest TEXT NOT NULL DEFAULT '',
             max_price REAL,
             location TEXT,
             radius_miles INTEGER,
@@ -68,7 +91,7 @@ async def init_schema(conn: aiosqlite.Connection) -> None:
         CREATE TABLE IF NOT EXISTS scan_logs (
             id TEXT PRIMARY KEY,
             site TEXT NOT NULL,
-            query_keywords TEXT NOT NULL DEFAULT '',
+            category TEXT NOT NULL DEFAULT '',
             listings_found INTEGER NOT NULL DEFAULT 0,
             deals_found INTEGER NOT NULL DEFAULT 0,
             errors TEXT NOT NULL DEFAULT '[]',

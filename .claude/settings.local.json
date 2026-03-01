@@ -45,7 +45,26 @@
       "Bash(awk 'NR>=50 && NR<=80')",
       "Bash(python -m pytest tests/unit/test_page_actions.py -x -v)",
       "Bash(python -m pytest tests/unit/test_js_extractor.py -x -v)",
-      "Bash(python -m pytest tests/unit/test_direct_scanner.py -x -v)"
+      "Bash(python -m pytest tests/unit/test_direct_scanner.py -x -v)",
+      "Bash(python3 -c \"import sys, json; data = json.load\\(sys.stdin\\); print\\(data[0][''text'']\\)\")",
+      "Bash(python -m pytest tests/unit/test_models.py tests/unit/test_config.py tests/unit/test_repositories.py -v --tb=short)",
+      "Bash(python -m pytest tests/unit/test_interest_matcher.py tests/unit/test_patrol_scanner.py tests/unit/test_detail_extractor.py -v --tb=short)",
+      "Bash(python -m pytest tests/unit/test_patrol_engine.py -v --tb=short)",
+      "Bash(python -m pytest tests/unit/test_patrol_scheduler.py -v --tb=short)",
+      "Bash(python -m pytest tests/ -v --tb=short)",
+      "Bash(python -m pytest tests/unit/test_watchlist_matcher.py tests/integration/test_discord_commands.py tests/integration/test_scan_engine.py tests/e2e/test_full_pipeline.py tests/unit/test_agent_tools.py tests/unit/test_formatter.py -v)",
+      "Bash(python -c \"from agentic_scraper.storage.models import ScanLog; s = ScanLog\\(query_keywords=''test''\\)\")",
+      "Bash(python -m pytest tests/unit/test_agent_tools.py::TestTriggerScan::test_calls_scheduler -v)",
+      "Bash(python -m pytest tests/unit/test_cerebras_provider.py -v --tb=short)",
+      "Bash(python -m pytest tests/ -v --tb=short --ignore=tests/unit/test_cerebras_provider.py)",
+      "Bash(python -c \"from agentic_scraper.main import main; print\\(''Import OK''\\)\")",
+      "Bash(python3 -c \"import browser_use; print\\(browser_use.__version__\\)\")",
+      "Bash(python -m pytest tests/unit/test_graphql_interceptor.py -v --tb=short)",
+      "Bash(python -m pytest tests/unit/test_repositories.py::TestListingRepository -v --tb=short)",
+      "Bash(python -m pytest tests/unit/test_stealth_profile.py tests/unit/test_interest_matcher.py -v --tb=short)",
+      "Bash(python -m pytest tests/unit/ -v --tb=short --ignore=tests/unit/test_cerebras_provider.py)",
+      "Bash(python -m pytest tests/unit/test_agent_tools.py -v --tb=short)",
+      "Bash(python -m pytest tests/unit/test_agent_runner.py -v --tb=short)"
     ]
   }
 }

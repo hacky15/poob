@@ -31,6 +31,13 @@ _DISCOUNT_THRESHOLDS = [
     (0.0, DealScore.FAIR),
 ]
 
+# Urgency boost: one tier up when seller signals motivation
+_NEXT_SCORE: dict[DealScore, DealScore] = {
+    DealScore.FAIR: DealScore.GOOD,
+    DealScore.GOOD: DealScore.GREAT,
+    DealScore.GREAT: DealScore.INCREDIBLE,
+}
+
 
 class SmartDealRadar:
     """LLM-orchestrated deal evaluation using skill tools.
@@ -62,6 +69,7 @@ class SmartDealRadar:
         min_score: DealScore = DealScore.GOOD,
         ebay_min_samples: int = 3,
         scam_threshold_pct: float = 80.0,
+        ebay_marketplace_deflator: float = 1.0,
     ) -> None:
         self._identify = identify_tool
         self._visual_identify = visual_identify_tool
@@ -71,6 +79,7 @@ class SmartDealRadar:
         self._min_score = min_score
         self._ebay_min_samples = ebay_min_samples
         self._scam_threshold_pct = scam_threshold_pct
+        self._ebay_deflator = ebay_marketplace_deflator
 
     async def evaluate(self, listing: Listing) -> Deal | None:
         """Evaluate a single listing using the skill pipeline.
@@ -81,10 +90,10 @@ class SmartDealRadar:
         Returns:
             A Deal object if the listing is a deal, None otherwise.
         """
-        if not listing.price or listing.price <= 0:
-            return None
+        listing_price = listing.price or 0
+        is_free = listing_price <= 0
 
-        # Step 1: Identify the item
+        # Step 1: Identify the item (always — even for free listings)
         identification = await self._step_identify(listing)
 
         # Step 2: Look up market prices
@@ -99,6 +108,12 @@ class SmartDealRadar:
                 title=listing.title,
             )
             return None
+
+        # Free items with a known market value are automatically incredible deals
+        if is_free:
+            return self._score_free_listing(
+                listing, identification, market_price, price_source, price_confidence
+            )
 
         # Step 3: Score the deal
         return self._step_score(
@@ -124,7 +139,9 @@ class SmartDealRadar:
         ):
             try:
                 visual_id = await self._visual_identify(
-                    image_urls=listing.image_urls
+                    image_urls=listing.image_urls,
+                    title=listing.title,
+                    description=listing.description or "",
                 )
                 if visual_id.confidence > identification.confidence:
                     log.info(
@@ -161,11 +178,13 @@ class SmartDealRadar:
             ebay_result = PriceLookupResult(sample_count=0, confidence=0.0)
 
         if ebay_result.sample_count >= self._ebay_min_samples:
-            return (
-                ebay_result.median_price,
-                "ebay_sold",
-                ebay_result.confidence,
-            )
+            # Apply marketplace deflator: FB sells 15-25% below eBay
+            # (no shipping, cash, no seller fees)
+            deflated = ebay_result.median_price * self._ebay_deflator
+            source = "ebay_sold"
+            if self._ebay_deflator < 1.0:
+                source = "ebay_sold_deflated"
+            return (deflated, source, ebay_result.confidence)
 
         # Try retail price if eBay data insufficient
         try:
@@ -180,11 +199,11 @@ class SmartDealRadar:
 
         # Use eBay if it has some data, even if below min samples
         if ebay_result.sample_count > 0 and ebay_result.confidence > retail_result.confidence:
-            return (
-                ebay_result.median_price,
-                "ebay_sold",
-                ebay_result.confidence,
-            )
+            deflated = ebay_result.median_price * self._ebay_deflator
+            source = "ebay_sold"
+            if self._ebay_deflator < 1.0:
+                source = "ebay_sold_deflated"
+            return (deflated, source, ebay_result.confidence)
 
         if retail_result.sample_count > 0 and retail_result.confidence > 0:
             # Retail is new price; apply used discount (30-50% for used items)
@@ -219,6 +238,46 @@ class SmartDealRadar:
 
         return (0.0, "", 0.0)
 
+    def _score_free_listing(
+        self,
+        listing: Listing,
+        identification: ItemIdentification,
+        market_price: float,
+        price_source: str,
+        price_confidence: float,
+    ) -> Deal | None:
+        """Score a free ($0) listing — always INCREDIBLE if market value is known."""
+        red_flags = ["FREE listing - act fast, verify in person"]
+
+        if identification.confidence < 0.5:
+            red_flags.append("Item identification uncertain")
+        if price_confidence < 0.5:
+            red_flags.append(f"Price data confidence low ({price_source})")
+
+        reasoning_parts = [
+            f"FREE {identification.item_name} (typically ${market_price:.0f} via {price_source}).",
+        ]
+        if identification.urgency_signals:
+            reasoning_parts.append(
+                f"Seller signals: {', '.join(identification.urgency_signals)}."
+            )
+        reasoning_parts.append(f"Flags: {', '.join(red_flags)}.")
+
+        log.info(
+            "Free listing scored",
+            listing_id=listing.id,
+            item=identification.item_name,
+            market_price=market_price,
+        )
+
+        return Deal(
+            listing_id=listing.id or "",
+            score=DealScore.INCREDIBLE,
+            estimated_market_price=market_price,
+            discount_pct=100.0,
+            llm_reasoning=" ".join(reasoning_parts),
+        )
+
     def _step_score(
         self,
         listing: Listing,
@@ -242,6 +301,18 @@ class SmartDealRadar:
                 score = deal_score
                 break
 
+        # Urgency boost: bump score by one tier when seller signals urgency
+        if identification.urgency_signals and score in _NEXT_SCORE:
+            boosted = _NEXT_SCORE[score]
+            log.info(
+                "Urgency boost applied",
+                listing_id=listing.id,
+                from_score=score.value,
+                to_score=boosted.value,
+                signals=list(identification.urgency_signals),
+            )
+            score = boosted
+
         # Check minimum score threshold
         if _SCORE_RANK.get(score, 0) < _SCORE_RANK.get(self._min_score, 0):
             return None
@@ -264,6 +335,10 @@ class SmartDealRadar:
             f"{identification.item_name} typically sells for ${market_price:.0f} ({price_source}).",
             f"Listed at ${listing_price:.0f} ({discount_pct:.0f}% below market).",
         ]
+        if identification.urgency_signals:
+            reasoning_parts.append(
+                f"Seller signals: {', '.join(identification.urgency_signals)}."
+            )
         if red_flags:
             reasoning_parts.append(f"Flags: {', '.join(red_flags)}.")
 
@@ -277,6 +352,7 @@ class SmartDealRadar:
             discount_pct=round(discount_pct, 1),
             market_price=market_price,
             listing_price=listing_price,
+            urgency_signals=list(identification.urgency_signals),
         )
 
         return Deal(

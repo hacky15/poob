@@ -98,8 +98,8 @@ class TestFormatWatchlistEmbed:
         from agentic_scraper.discord_bot.formatter import format_watchlist_embed
 
         watches = [
-            WatchItem(id="w1", keywords="PS5", max_price=300.0),
-            WatchItem(id="w2", keywords="Xbox", max_price=400.0),
+            WatchItem(id="w1", interest="PS5", max_price=300.0),
+            WatchItem(id="w2", interest="Xbox", max_price=400.0),
         ]
         embed = format_watchlist_embed(watches)
         assert isinstance(embed, discord.Embed)

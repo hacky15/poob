@@ -56,6 +56,7 @@ class AgentRunner:
         listing_repo: Any,
         scheduler: Any,
         max_iterations: int = 10,
+        scan_log_repo: Any = None,
     ) -> None:
         self._llm = llm
         self._prefs_repo = prefs_repo
@@ -65,6 +66,7 @@ class AgentRunner:
         self._listing_repo = listing_repo
         self._scheduler = scheduler
         self._max_iterations = max_iterations
+        self._scan_log_repo = scan_log_repo
 
     async def run(
         self,
@@ -97,6 +99,7 @@ class AgentRunner:
             deal_repo=self._deal_repo,
             listing_repo=self._listing_repo,
             scheduler=self._scheduler,
+            scan_log_repo=self._scan_log_repo,
         )
         tools_by_name = {t.name: t for t in tools}
 

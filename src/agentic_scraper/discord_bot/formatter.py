@@ -110,13 +110,13 @@ def format_watchlist_embed(watch_items: list[WatchItem]) -> discord.Embed:
     """
     if not watch_items:
         return discord.Embed(
-            title="Your Watchlist",
-            description="No active watches. Use `!watch <keywords>` to add one.",
+            title="Your Interests",
+            description="No active interests. Use `!watch <interest>` to add one.",
             color=discord.Colour.light_grey(),
         )
 
     embed = discord.Embed(
-        title="Your Watchlist",
+        title="Your Interests",
         color=discord.Colour.blue(),
     )
 
@@ -126,7 +126,7 @@ def format_watchlist_embed(watch_items: list[WatchItem]) -> discord.Embed:
         status = "Active" if item.is_active else "Paused"
 
         embed.add_field(
-            name=f"{item.keywords}{price_str}",
+            name=f"{item.interest}{price_str}",
             value=f"ID: `{item.id}`{location_str} | {status}",
             inline=False,
         )
@@ -164,14 +164,14 @@ def format_status_embed(
         status_str = "Stopped"
         color = discord.Colour.red()
 
-    embed = discord.Embed(title="Scanner Status", color=color)
+    embed = discord.Embed(title="Patrol Status", color=color)
     embed.add_field(name="Status", value=status_str, inline=True)
 
     last_str = last_scan_time.strftime("%Y-%m-%d %H:%M UTC") if last_scan_time else "Never"
-    embed.add_field(name="Last Scan", value=last_str, inline=True)
+    embed.add_field(name="Last Patrol", value=last_str, inline=True)
 
     next_str = next_scan_time.strftime("%Y-%m-%d %H:%M UTC") if next_scan_time else "N/A"
-    embed.add_field(name="Next Scan", value=next_str, inline=True)
+    embed.add_field(name="Next Patrol", value=next_str, inline=True)
 
     embed.add_field(
         name="Sites",

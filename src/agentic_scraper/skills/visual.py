@@ -28,21 +28,29 @@ class VisualIdentifyTool:
 
     Args:
         llm: Vision-capable LangChain chat model.
+        max_images: Maximum images to include in a single LLM call.
     """
 
-    def __init__(self, llm: BaseChatModel) -> None:
+    def __init__(self, llm: BaseChatModel, *, max_images: int = 3) -> None:
         self._llm = llm
+        self._max_images = max_images
 
     async def run(
         self,
         image_urls: list[str] | None = None,
         screenshot_b64: str | None = None,
+        title: str = "",
+        description: str = "",
     ) -> ItemIdentification:
         """Identify an item from images.
+
+        Sends up to max_images in a single LLM call for better identification.
 
         Args:
             image_urls: List of image URLs to try.
             screenshot_b64: Pre-encoded base64 screenshot (alternative to URLs).
+            title: Listing title for context.
+            description: Listing description for context.
 
         Returns:
             ItemIdentification with visual analysis results.
@@ -50,44 +58,58 @@ class VisualIdentifyTool:
         if not image_urls and not screenshot_b64:
             return ItemIdentification(confidence=0.0, needs_visual=True)
 
-        # Get image data
-        image_b64 = screenshot_b64
-        if not image_b64 and image_urls:
-            image_b64 = await self._fetch_first_image(image_urls)
+        # Get image data — fetch multiple images for better identification
+        images_b64: list[str] = []
+        if screenshot_b64:
+            images_b64.append(screenshot_b64)
+        if image_urls:
+            fetched = await self._fetch_images(image_urls)
+            images_b64.extend(fetched)
 
-        if not image_b64:
+        if not images_b64:
             return ItemIdentification(confidence=0.0, needs_visual=True)
 
-        # Send to vision LLM
+        # Send to vision LLM with all available images
         try:
-            message = HumanMessage(
-                content=[
-                    {"type": "text", "text": VISUAL_IDENTIFY_PROMPT},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
-                    },
-                ]
+            prompt_text = VISUAL_IDENTIFY_PROMPT.format(
+                title=title or "Unknown",
+                description=description or "No description",
             )
+            content: list[dict] = [{"type": "text", "text": prompt_text}]
+            for img_b64 in images_b64[: self._max_images]:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
+                })
+            message = HumanMessage(content=content)
             response = await self._llm.ainvoke([message])
             return self._parse_response(response.content)
         except Exception as exc:
             log.warning("Visual identification failed", error=str(exc))
             return ItemIdentification(confidence=0.0, needs_visual=True)
 
-    async def _fetch_first_image(self, urls: list[str]) -> str | None:
-        """Try to fetch and encode the first successful image from URLs."""
+    async def _fetch_images(self, urls: list[str]) -> list[str]:
+        """Fetch and encode multiple images from URLs.
+
+        Args:
+            urls: Image URLs to try downloading.
+
+        Returns:
+            List of base64-encoded image strings (may be fewer than requested).
+        """
+        results: list[str] = []
         async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-            for url in urls[:MAX_IMAGES_TO_TRY]:
+            for url in urls[: self._max_images]:
                 try:
                     response = await client.get(url)
                     if response.status_code == 200 and len(response.content) > 100:
-                        return base64.b64encode(response.content).decode("utf-8")
+                        results.append(
+                            base64.b64encode(response.content).decode("utf-8")
+                        )
                 except Exception as exc:
                     log.debug("Failed to fetch image", url=url, error=str(exc))
                     continue
-
-        return None
+        return results
 
     @staticmethod
     def _parse_response(content: str) -> ItemIdentification:
@@ -107,6 +129,12 @@ class VisualIdentifyTool:
         if not isinstance(data, dict):
             return ItemIdentification(confidence=0.0, needs_visual=True)
 
+        raw_signals = data.get("urgency_signals", [])
+        if isinstance(raw_signals, list):
+            signals = tuple(str(s) for s in raw_signals if s)
+        else:
+            signals = ()
+
         return ItemIdentification(
             item_name=str(data.get("item_name", "")),
             brand=data.get("brand"),
@@ -115,4 +143,5 @@ class VisualIdentifyTool:
             condition=data.get("condition"),
             confidence=float(data.get("confidence", 0.0)),
             needs_visual=bool(data.get("needs_visual", False)),
+            urgency_signals=signals,
         )

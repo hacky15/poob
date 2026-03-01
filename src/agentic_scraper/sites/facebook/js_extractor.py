@@ -88,3 +88,33 @@ SCROLL_DOWN_JS = """(pixels) => {
     window.scrollBy(0, pixels);
     return document.body.scrollHeight;
 }"""
+
+# Extract Open Graph meta tags from a listing detail page.
+# OG tags provide title, description, image, and canonical URL
+# without requiring JavaScript rendering.
+EXTRACT_OPEN_GRAPH_JS = """() => {
+    const meta = {};
+    document.querySelectorAll('meta[property^="og:"]').forEach(el => {
+        const key = el.getAttribute('property').replace('og:', '');
+        meta[key] = el.getAttribute('content') || '';
+    });
+    return meta;
+}"""
+
+# Extract JSON-LD structured data from a listing detail page.
+# Facebook injects Product schema with price, condition, and availability.
+EXTRACT_JSON_LD_JS = """() => {
+    const scripts = Array.from(
+        document.querySelectorAll('script[type="application/ld+json"]')
+    );
+    for (const script of scripts) {
+        try {
+            const data = JSON.parse(script.textContent);
+            if (data['@type'] === 'Product' || data['@type'] === 'Offer') {
+                return data;
+            }
+            if (data.offers) return data.offers;
+        } catch (e) {}
+    }
+    return {};
+}"""

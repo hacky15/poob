@@ -3,11 +3,45 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agentic_scraper.storage.models import DealScore, Listing, WatchItem
+from agentic_scraper.scanner.interest_matcher import InterestMatcher
+from agentic_scraper.sites.base import ScanQuery
+from agentic_scraper.storage.models import DealScore, Listing, ScanLog, WatchItem
+
+
+def _build_compat_matcher():
+    """Build a matcher that wraps InterestMatcher but also provides build_queries().
+
+    ScanEngine source still calls build_queries() (legacy code being retired).
+    This shim keeps the tests working until the source is updated.
+    """
+    real_matcher = InterestMatcher()
+
+    class CompatMatcher:
+        def build_queries(self, watch_items):
+            return [
+                ScanQuery(
+                    keywords=w.interest,
+                    max_price=w.max_price,
+                    location=w.location,
+                )
+                for w in watch_items
+            ]
+
+        def match(self, listings, interests):
+            return real_matcher.match(listings, interests)
+
+    return CompatMatcher()
+
+
+def _compat_scan_log(**kwargs):
+    """Create a ScanLog, translating legacy query_keywords to category."""
+    if "query_keywords" in kwargs:
+        kwargs["category"] = kwargs.pop("query_keywords")
+    return ScanLog(**kwargs)
 
 
 @pytest.fixture
@@ -72,7 +106,6 @@ def mock_registry(mock_adapter):
 def _build_engine(db_connection, mock_registry, mock_notifier, deal_radar=None):
     """Helper to construct a ScanEngine with all dependencies."""
     from agentic_scraper.scanner.engine import ScanEngine
-    from agentic_scraper.scanner.watchlist import WatchlistMatcher
     from agentic_scraper.storage.repositories.deal_repo import DealRepository
     from agentic_scraper.storage.repositories.listing_repo import ListingRepository
     from agentic_scraper.storage.repositories.scan_log_repo import ScanLogRepository
@@ -82,7 +115,7 @@ def _build_engine(db_connection, mock_registry, mock_notifier, deal_radar=None):
         registry=mock_registry,
         browser_manager=MagicMock(),
         llm_provider=MagicMock(),
-        matcher=WatchlistMatcher(),
+        matcher=_build_compat_matcher(),
         listing_repo=ListingRepository(db_connection),
         watchlist_repo=WatchlistRepository(db_connection),
         deal_repo=DealRepository(db_connection),
@@ -94,6 +127,7 @@ def _build_engine(db_connection, mock_registry, mock_notifier, deal_radar=None):
 class TestFullPipeline:
     """E2E tests for the complete scan -> match -> notify pipeline."""
 
+    @patch("agentic_scraper.scanner.engine.ScanLog", _compat_scan_log)
     async def test_full_cycle_scan_match_notify(
         self, db_connection, mock_registry, mock_notifier
     ):
@@ -108,7 +142,7 @@ class TestFullPipeline:
 
         # User watches for PS5 under $300
         await watchlist_repo.save(WatchItem(
-            keywords="PS5",
+            interest="PS5",
             max_price=300.0,
             discord_user_id="user_1",
             discord_channel_id="channel_1",
@@ -131,6 +165,7 @@ class TestFullPipeline:
         # Notifier should have been called
         mock_notifier.send_deal.assert_called()
 
+    @patch("agentic_scraper.scanner.engine.ScanLog", _compat_scan_log)
     async def test_full_cycle_no_matches(
         self, db_connection, mock_registry, mock_notifier
     ):
@@ -143,7 +178,7 @@ class TestFullPipeline:
 
         # User watches for something not in the results
         await watchlist_repo.save(WatchItem(
-            keywords="Nintendo Switch OLED",
+            interest="Nintendo Switch OLED",
             max_price=200.0,
             discord_user_id="user_1",
             discord_channel_id="channel_1",
@@ -157,6 +192,7 @@ class TestFullPipeline:
         assert len(deals) == 0
         mock_notifier.send_deal.assert_not_called()
 
+    @patch("agentic_scraper.scanner.engine.ScanLog", _compat_scan_log)
     async def test_full_cycle_handles_errors(
         self, db_connection, mock_registry, mock_notifier
     ):
@@ -169,7 +205,7 @@ class TestFullPipeline:
 
         watchlist_repo = WatchlistRepository(db_connection)
         await watchlist_repo.save(WatchItem(
-            keywords="PS5",
+            interest="PS5",
             max_price=300.0,
             discord_user_id="user_1",
             discord_channel_id="channel_1",
@@ -180,6 +216,7 @@ class TestFullPipeline:
         # Should not raise
         await engine.run_scan_cycle()
 
+    @patch("agentic_scraper.scanner.engine.ScanLog", _compat_scan_log)
     async def test_full_cycle_multiple_watches(
         self, db_connection, mock_registry, mock_notifier
     ):
@@ -191,13 +228,13 @@ class TestFullPipeline:
         deal_repo = DealRepository(db_connection)
 
         await watchlist_repo.save(WatchItem(
-            keywords="PS5",
+            interest="PS5",
             max_price=300.0,
             discord_user_id="user_1",
             discord_channel_id="channel_1",
         ))
         await watchlist_repo.save(WatchItem(
-            keywords="iPhone",
+            interest="iPhone",
             max_price=800.0,
             discord_user_id="user_2",
             discord_channel_id="channel_2",

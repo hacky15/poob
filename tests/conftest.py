@@ -99,7 +99,7 @@ def sample_listing() -> Listing:
 def sample_watch_item() -> WatchItem:
     """A realistic sample watch item."""
     return WatchItem(
-        keywords="PS5",
+        interest="PS5",
         max_price=300.00,
         location="Portland, OR",
         radius_miles=25,
@@ -126,7 +126,7 @@ def sample_scan_log() -> ScanLog:
     """A realistic sample scan log."""
     return ScanLog(
         site="facebook_marketplace",
-        query_keywords="PS5",
+        category="electronics",
         listings_found=15,
         deals_found=2,
         duration_seconds=45.3,

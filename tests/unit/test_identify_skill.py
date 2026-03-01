@@ -161,3 +161,67 @@ class TestIdentifyItemTool:
 
         assert "controller" in result.item_name.lower() or "dualsense" in result.item_name.lower()
         assert "accessory" in result.category
+
+    async def test_detects_urgency_signals(self):
+        """Should extract urgency signals from listing text."""
+        from agentic_scraper.skills.identify import IdentifyItemTool
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=_make_llm_response({
+            "item_name": "KitchenAid Stand Mixer",
+            "brand": "KitchenAid",
+            "model": None,
+            "category": "appliances/kitchen",
+            "condition": "good",
+            "confidence": 0.85,
+            "needs_visual": False,
+            "urgency_signals": ["must sell", "moving sale", "obo"],
+        }))
+
+        tool = IdentifyItemTool(llm)
+        result = await tool.run(
+            "KitchenAid Mixer - MUST SELL moving sale OBO",
+            "Moving next week, need it gone. Make an offer.",
+        )
+
+        assert isinstance(result.urgency_signals, tuple)
+        assert len(result.urgency_signals) == 3
+        assert "must sell" in result.urgency_signals
+        assert "moving sale" in result.urgency_signals
+        assert "obo" in result.urgency_signals
+
+    async def test_empty_urgency_signals(self):
+        """Should return empty tuple when no urgency signals found."""
+        from agentic_scraper.skills.identify import IdentifyItemTool
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=_make_llm_response({
+            "item_name": "PS5",
+            "brand": "Sony",
+            "category": "electronics/gaming",
+            "confidence": 0.9,
+            "needs_visual": False,
+            "urgency_signals": [],
+        }))
+
+        tool = IdentifyItemTool(llm)
+        result = await tool.run("PS5 Disc Edition", "Like new, barely used")
+
+        assert result.urgency_signals == ()
+
+    async def test_missing_urgency_signals_field(self):
+        """Should default to empty tuple when LLM omits urgency_signals."""
+        from agentic_scraper.skills.identify import IdentifyItemTool
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=_make_llm_response({
+            "item_name": "Table",
+            "category": "furniture",
+            "confidence": 0.7,
+            "needs_visual": False,
+        }))
+
+        tool = IdentifyItemTool(llm)
+        result = await tool.run("Table", "Nice wooden table")
+
+        assert result.urgency_signals == ()

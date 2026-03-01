@@ -39,10 +39,10 @@ class Listing:
 
 @dataclass
 class WatchItem:
-    """A user's saved search / price watch."""
+    """A user's interest - things to look out for in the marketplace."""
 
     id: str | None = None
-    keywords: str = ""
+    interest: str = ""
     max_price: float | None = None
     location: str | None = None
     radius_miles: int | None = None
@@ -76,7 +76,7 @@ class ScanLog:
 
     id: str | None = None
     site: str = ""
-    query_keywords: str = ""
+    category: str = ""
     listings_found: int = 0
     deals_found: int = 0
     errors: list[str] = field(default_factory=list)

@@ -17,6 +17,7 @@ class ItemIdentification:
         condition: Detected condition (new, like new, good, fair, parts).
         confidence: How confident the identification is (0.0-1.0).
         needs_visual: True if text is too vague for confident identification.
+        urgency_signals: Seller urgency/motivation phrases detected in listing text.
     """
 
     item_name: str = ""
@@ -26,6 +27,7 @@ class ItemIdentification:
     condition: str | None = None
     confidence: float = 0.0
     needs_visual: bool = False
+    urgency_signals: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

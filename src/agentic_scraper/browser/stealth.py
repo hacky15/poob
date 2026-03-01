@@ -56,6 +56,33 @@ async def apply_scroll_pattern(page: object, steps: int = 5) -> None:
     await scroll_page(page, pattern)
 
 
+async def simulate_mouse_movement(page: object, movements: int = 2) -> None:
+    """Simulate random mouse movements to appear human.
+
+    Moves the mouse to random positions within the viewport to generate
+    realistic mousemove events that Facebook's telemetry tracks.
+
+    Args:
+        page: A browser-use Page instance.
+        movements: Number of mouse movements to simulate.
+    """
+    try:
+        for _ in range(movements):
+            x = random.randint(100, 1000)
+            y = random.randint(100, 700)
+            # Use page.evaluate for mouse movement via JS
+            await page.evaluate(
+                f"() => {{ "
+                f"  const evt = new MouseEvent('mousemove', "
+                f"    {{clientX: {x}, clientY: {y}, bubbles: true}});"
+                f"  document.dispatchEvent(evt);"
+                f" }}"
+            )
+            await random_delay(200, 600)
+    except Exception:
+        pass  # Non-critical, don't break the flow
+
+
 def add_jitter(seconds: float, pct: float = 0.15) -> float:
     """Add random jitter to a target duration.
 

@@ -12,7 +12,7 @@ from agentic_scraper.storage.models import WatchItem
 
 
 class WatchlistRepository:
-    """CRUD operations for watch items (user's saved searches)."""
+    """CRUD operations for watch items (user's priority interests)."""
 
     def __init__(self, conn: aiosqlite.Connection) -> None:
         self._conn = conn
@@ -25,13 +25,13 @@ class WatchlistRepository:
         await self._conn.execute(
             """
             INSERT INTO watch_items
-                (id, keywords, max_price, location, radius_miles, category,
+                (id, interest, max_price, location, radius_miles, category,
                  sites, is_active, created_at, discord_user_id, discord_channel_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item.id,
-                item.keywords,
+                item.interest,
                 item.max_price,
                 item.location,
                 item.radius_miles,
@@ -96,7 +96,7 @@ class WatchlistRepository:
         """Convert a database row to a WatchItem dataclass."""
         return WatchItem(
             id=row["id"],
-            keywords=row["keywords"],
+            interest=row["interest"],
             max_price=row["max_price"],
             location=row["location"],
             radius_miles=row["radius_miles"],

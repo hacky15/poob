@@ -85,14 +85,14 @@ class TestWatchItem:
     """WatchItem dataclass creation and defaults."""
 
     def test_create_minimal(self):
-        item = WatchItem(keywords="PS5")
-        assert item.keywords == "PS5"
+        item = WatchItem(interest="PS5")
+        assert item.interest == "PS5"
         assert item.max_price is None
         assert item.is_active is True
         assert item.sites == []
 
     def test_create_full(self, sample_watch_item):
-        assert sample_watch_item.keywords == "PS5"
+        assert sample_watch_item.interest == "PS5"
         assert sample_watch_item.max_price == 300.00
         assert sample_watch_item.location == "Portland, OR"
         assert sample_watch_item.radius_miles == 25
@@ -139,7 +139,7 @@ class TestScanLog:
     """ScanLog dataclass creation and defaults."""
 
     def test_create_minimal(self):
-        log = ScanLog(site="facebook_marketplace", query_keywords="PS5")
+        log = ScanLog(site="facebook_marketplace", category="electronics")
         assert log.site == "facebook_marketplace"
         assert log.listings_found == 0
         assert log.deals_found == 0

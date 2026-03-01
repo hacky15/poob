@@ -138,6 +138,19 @@ class BrowserManager:
             raise RuntimeError("No active page in browser session.")
         return page
 
+    def get_session(self) -> BrowserSession:
+        """Get the underlying BrowserSession for CDP access.
+
+        Returns:
+            The active BrowserSession instance.
+
+        Raises:
+            RuntimeError: If browser has not been started.
+        """
+        if self._browser is None:
+            raise RuntimeError("Browser not started. Call start() first.")
+        return self._browser
+
     @property
     def is_running(self) -> bool:
         """Whether the browser is currently running."""

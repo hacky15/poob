@@ -15,9 +15,9 @@ async def startup() -> None:
     from agentic_scraper.browser.manager import BrowserManager
     from agentic_scraper.discord_bot.bot import ScraperBot
     from agentic_scraper.discord_bot.notifier import DealNotifier
-    from agentic_scraper.scanner.engine import ScanEngine
-    from agentic_scraper.scanner.scheduler import ScanScheduler
-    from agentic_scraper.scanner.watchlist import WatchlistMatcher
+    from agentic_scraper.scanner.interest_matcher import InterestMatcher
+    from agentic_scraper.scanner.patrol_engine import PatrolEngine
+    from agentic_scraper.scanner.patrol_scheduler import PatrolScheduler
     from agentic_scraper.sites.registry import SiteRegistry
     from agentic_scraper.storage.repositories.deal_repo import DealRepository
     from agentic_scraper.storage.repositories.listing_repo import ListingRepository
@@ -116,7 +116,7 @@ async def startup() -> None:
         else:
             log.info("No cloud API key configured, using local Ollama for knowledge tasks")
 
-    # 4. Vision LLM: image-based identification
+    # 4. Vision LLM: image-based identification (with configurable context window)
     vision_llm = json_llm  # fallback if no vision model configured
     if config.vision_model:
         from langchain_ollama import ChatOllama
@@ -126,8 +126,13 @@ async def startup() -> None:
             model=config.vision_model,
             temperature=config.ollama_json_temperature,
             format="json",
+            num_ctx=config.vision_model_num_ctx,
         )
-        log.info("Vision LLM initialized", model=config.vision_model)
+        log.info(
+            "Vision LLM initialized",
+            model=config.vision_model,
+            num_ctx=config.vision_model_num_ctx,
+        )
 
     # Initialize browser manager
     browser_manager = BrowserManager(
@@ -169,7 +174,7 @@ async def startup() -> None:
         from agentic_scraper.storage.models import DealScore
 
         identify_tool = IdentifyItemTool(json_llm)
-        visual_tool = VisualIdentifyTool(vision_llm)
+        visual_tool = VisualIdentifyTool(vision_llm, max_images=config.vision_max_images)
         ebay_tool = EbayLookupTool(timeout_seconds=config.ebay_http_timeout_seconds)
         retail_tool = RetailLookupTool(knowledge_llm)
         category_tool = CategoryEstimateTool(knowledge_llm)
@@ -185,27 +190,29 @@ async def startup() -> None:
             min_score=min_score,
             ebay_min_samples=config.ebay_min_samples,
             scam_threshold_pct=config.deal_radar_scam_threshold_pct,
+            ebay_marketplace_deflator=config.ebay_marketplace_deflator,
         )
-        log.info("SmartDealRadar v2 initialized")
+        log.info(
+            "SmartDealRadar v2 initialized",
+            deflator=config.ebay_marketplace_deflator,
+            max_images=config.vision_max_images,
+        )
 
-    # Build scan engine
-    engine = ScanEngine(
-        registry=registry,
+    # Build patrol engine (replaces ScanEngine)
+    engine = PatrolEngine(
         browser_manager=browser_manager,
-        llm_provider=browser_llm,
-        matcher=WatchlistMatcher(),
         listing_repo=listing_repo,
         watchlist_repo=watchlist_repo,
         deal_repo=deal_repo,
         scan_log_repo=scan_log_repo,
         notifier=notifier,
+        interest_matcher=InterestMatcher(),
         smart_deal_radar=smart_deal_radar,
-        deal_radar_max_evaluations=config.deal_radar_max_evaluations,
-        browse_enabled=config.scan_browse_enabled,
+        config=config,
     )
 
-    # Build scheduler
-    scheduler = ScanScheduler(engine, interval_minutes=config.scan_interval_minutes)
+    # Build patrol scheduler (adaptive timing replaces fixed interval)
+    scheduler = PatrolScheduler(engine, config=config)
 
     # --- Conversational Agent ---
     prefs_repo = UserPreferencesRepository(conn)
@@ -245,16 +252,19 @@ async def startup() -> None:
         listing_repo=listing_repo,
         scheduler=scheduler,
         max_iterations=config.agent_max_tool_iterations,
+        scan_log_repo=scan_log_repo,
     )
     log.info("AgentRunner initialized")
 
     # Build Discord bot
     bot = ScraperBot(config)
-    bot.scan_engine = engine
-    bot.scan_scheduler = scheduler
+    bot.patrol_engine = engine
+    bot.patrol_scheduler = scheduler
     bot.notifier = notifier
     bot.site_registry = registry
     bot.watchlist_repo = watchlist_repo
+    bot.deal_repo = deal_repo
+    bot.listing_repo = listing_repo
     bot.agent_runner = agent_runner
 
     log.info("Startup complete. Launching bot and scheduler.")

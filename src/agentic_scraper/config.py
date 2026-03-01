@@ -66,9 +66,12 @@ class AppConfig(BaseSettings):
     deal_radar_min_score: str = "good"
     deal_radar_version: str = "v2"  # "v1" (LLM-only) or "v2" (skill-based)
     vision_model: str = "qwen3-vl:8b"  # Vision-capable model for image identification
+    vision_model_num_ctx: int = 8000  # Context window for vision model
+    vision_max_images: int = 3  # Max images per visual identification call
     ebay_lookup_enabled: bool = True
     ebay_http_timeout_seconds: int = 10
     ebay_min_samples: int = 3
+    ebay_marketplace_deflator: float = 0.80  # FB sells 15-25% below eBay (no shipping, cash)
     deal_radar_max_evaluations: int = 20
     deal_radar_scam_threshold_pct: float = 80.0
 
@@ -83,6 +86,35 @@ class AppConfig(BaseSettings):
     database_path: Path = Path("data/scraper.db")
     log_dir: Path = Path("data/logs")
     log_level: str = "INFO"
+
+    # --- Patrol ---
+    patrol_enabled: bool = True
+    patrol_sweep_mode: str = "unified"  # "unified" (1 page) or "categories" (10+ pages)
+    patrol_categories: list[str] = [
+        "electronics", "furniture", "vehicles", "sports", "garden",
+        "appliances", "free", "toys", "apparel", "entertainment",
+    ]
+    patrol_base_radius_miles: int = 20
+    patrol_radius_jitter: int = 4
+    patrol_radius_oscillation_enabled: bool = False  # Ineffective per research
+    patrol_inter_category_delay_min_ms: int = 15000
+    patrol_inter_category_delay_max_ms: int = 25000
+    patrol_inter_listing_delay_min_ms: int = 3000
+    patrol_inter_listing_delay_max_ms: int = 7000
+    # Polling intervals: aligned with FB's 15-30 min listing batching delay
+    patrol_peak_interval_seconds: int = 300  # 5 min (was 120s, too aggressive)
+    patrol_moderate_interval_seconds: int = 600  # 10 min (was 300s)
+    patrol_offpeak_interval_seconds: int = 900  # 15 min (was 600s)
+    patrol_dead_interval_seconds: int = 1800  # 30 min (was 900s)
+    patrol_peak_hours_start: int = 16
+    patrol_peak_hours_end: int = 21
+    patrol_include_all_categories: bool = True
+    patrol_days_since_listed: int = 1
+    patrol_deep_inspect_enabled: bool = True  # Retained for backward compat
+    # --- Stealth ---
+    stealth_viewport_randomize: bool = True
+    stealth_mouse_movement: bool = True
+    stealth_inject_scripts: bool = True
 
     # --- Site Credentials ---
     facebook_email: str = ""

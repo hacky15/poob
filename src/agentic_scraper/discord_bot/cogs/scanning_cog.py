@@ -1,4 +1,4 @@
-"""Discord cog for scanning commands: !scan, !pause, !resume, !status."""
+"""Discord cog for patrol commands: !scan, !pause, !resume, !status."""
 
 from __future__ import annotations
 
@@ -10,19 +10,18 @@ from agentic_scraper.discord_bot.formatter import format_status_embed
 from agentic_scraper.utils.logging import get_logger
 
 if TYPE_CHECKING:
-    from agentic_scraper.scanner.scheduler import ScanScheduler
     from agentic_scraper.sites.registry import SiteRegistry
 
 log = get_logger("cogs.scanning")
 
 
 class ScanningCog(commands.Cog, name="Scanning"):
-    """Commands for controlling the scan scheduler."""
+    """Commands for controlling the patrol scheduler."""
 
     def __init__(
         self,
         bot: commands.Bot,
-        scheduler: ScanScheduler,
+        scheduler: object,
         registry: SiteRegistry,
     ) -> None:
         self.bot = bot
@@ -31,25 +30,25 @@ class ScanningCog(commands.Cog, name="Scanning"):
 
     @commands.command(name="scan")
     async def scan(self, ctx: commands.Context) -> None:
-        """Trigger an immediate scan cycle."""
+        """Trigger an immediate patrol cycle."""
         await self._do_scan(ctx)
 
     async def _do_scan(self, ctx: commands.Context) -> None:
         """Internal implementation for the scan command."""
-        await ctx.send("Triggering immediate scan...")
+        await ctx.send("Triggering immediate patrol...")
         await self._scheduler.trigger_now()
 
     @commands.command(name="pause")
     async def pause(self, ctx: commands.Context) -> None:
-        """Pause the automatic scan scheduler."""
+        """Pause the automatic patrol scheduler."""
         self._scheduler.pause()
-        await ctx.send("Scanning paused. Use `!resume` to continue.")
+        await ctx.send("Patrol paused. Use `!resume` to continue.")
 
     @commands.command(name="resume")
     async def resume(self, ctx: commands.Context) -> None:
-        """Resume the automatic scan scheduler."""
+        """Resume the automatic patrol scheduler."""
         self._scheduler.resume()
-        await ctx.send("Scanning resumed.")
+        await ctx.send("Patrol resumed.")
 
     @commands.command(name="status")
     async def status(self, ctx: commands.Context) -> None:

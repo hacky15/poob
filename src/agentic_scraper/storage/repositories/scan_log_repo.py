@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
@@ -25,14 +25,14 @@ class ScanLogRepository:
         await self._conn.execute(
             """
             INSERT INTO scan_logs
-                (id, site, query_keywords, listings_found, deals_found,
+                (id, site, category, listings_found, deals_found,
                  errors, duration_seconds, started_at, completed_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 log.id,
                 log.site,
-                log.query_keywords,
+                log.category,
                 log.listings_found,
                 log.deals_found,
                 json.dumps(log.errors),
@@ -62,13 +62,56 @@ class ScanLogRepository:
         rows = await cursor.fetchall()
         return [self._row_to_scan_log(row) for row in rows]
 
+    async def get_stats(self, hours: int = 24) -> dict:
+        """Get aggregate scan statistics for the last N hours.
+
+        Args:
+            hours: Number of hours to look back.
+
+        Returns:
+            Dict with total_scans, total_listings, total_deals,
+            total_errors, avg_duration.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        cursor = await self._conn.execute(
+            """
+            SELECT
+                COUNT(*) as total_scans,
+                COALESCE(SUM(listings_found), 0) as total_listings,
+                COALESCE(SUM(deals_found), 0) as total_deals,
+                COALESCE(AVG(duration_seconds), 0.0) as avg_duration
+            FROM scan_logs
+            WHERE started_at >= ?
+            """,
+            (cutoff,),
+        )
+        row = await cursor.fetchone()
+
+        # Count errors separately (stored as JSON array)
+        err_cursor = await self._conn.execute(
+            "SELECT errors FROM scan_logs WHERE started_at >= ?",
+            (cutoff,),
+        )
+        err_rows = await err_cursor.fetchall()
+        total_errors = sum(
+            len(json.loads(r["errors"])) for r in err_rows if r["errors"]
+        )
+
+        return {
+            "total_scans": row["total_scans"],
+            "total_listings": row["total_listings"],
+            "total_deals": row["total_deals"],
+            "total_errors": total_errors,
+            "avg_duration": round(row["avg_duration"], 1),
+        }
+
     @staticmethod
     def _row_to_scan_log(row: aiosqlite.Row) -> ScanLog:
         """Convert a database row to a ScanLog dataclass."""
         return ScanLog(
             id=row["id"],
             site=row["site"],
-            query_keywords=row["query_keywords"],
+            category=row["category"],
             listings_found=row["listings_found"],
             deals_found=row["deals_found"],
             errors=json.loads(row["errors"]),
