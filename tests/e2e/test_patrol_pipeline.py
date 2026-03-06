@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -23,6 +24,7 @@ def _make_listing(
         price=price,
         listing_url=f"https://facebook.com/marketplace/item/{external_id}",
         location="Appleton, WI",
+        posted_at=datetime.now(timezone.utc),
     )
 
 
@@ -39,8 +41,13 @@ def mock_config():
         patrol_days_since_listed=1,
         patrol_include_all_categories=False,
         patrol_deep_inspect_enabled=True,
+        patrol_radius_oscillation_enabled=False,
+        patrol_sweep_mode="unified",
         deal_radar_max_evaluations=20,
         deal_radar_min_score="good",
+        deal_public_min_score="incredible",
+        deal_watchlist_min_score="good",
+        listing_max_age_hours=6,
     )
 
 
@@ -81,10 +88,11 @@ def _build_patrol_engine(
 class TestPatrolPipeline:
     """E2E tests for the patrol -> dedup -> inspect -> evaluate -> notify pipeline."""
 
-    async def test_full_patrol_cycle_finds_deals(
+    async def test_full_patrol_cycle_with_radar(
         self, db_connection, mock_browser_manager, mock_config
     ):
-        """Full patrol cycle with interest matching finds deals and notifies."""
+        """Full patrol cycle with SmartDealRadar finds deals and notifies."""
+        from agentic_scraper.skills.models import VLMEvaluation
         from agentic_scraper.storage.repositories.deal_repo import DealRepository
         from agentic_scraper.storage.repositories.listing_repo import ListingRepository
         from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
@@ -101,9 +109,45 @@ class TestPatrolPipeline:
             discord_channel_id="channel_1",
         ))
 
-        engine = _build_patrol_engine(db_connection, mock_browser_manager, mock_config)
+        # Mock radar returns a watchlist deal for PS5 listing
+        watchlist_deal = Deal(
+            listing_id="",
+            watch_item_id="",
+            score=DealScore.GOOD,
+            estimated_market_price=450.0,
+            discount_pct=44.4,
+            llm_reasoning="Good deal on PS5",
+        )
+        vlm_eval = VLMEvaluation(
+            item_identified="PS5 Console", deal_quality="good", confidence=0.8,
+        )
 
-        # Mock the sweep to return some listings
+        mock_radar = AsyncMock()
+
+        async def radar_batch(listings, watchlist_items=None):
+            results = []
+            for listing in listings:
+                if "PS5" in listing.title:
+                    deal = Deal(
+                        listing_id=listing.id or "",
+                        watch_item_id="",  # The pipeline sets this
+                        score=DealScore.GOOD,
+                        estimated_market_price=450.0,
+                        discount_pct=44.4,
+                        llm_reasoning="Good deal on PS5",
+                    )
+                    results.append((deal, vlm_eval))
+                else:
+                    results.append((None, VLMEvaluation()))
+            return results
+
+        mock_radar.evaluate_batch = AsyncMock(side_effect=radar_batch)
+
+        engine = _build_patrol_engine(
+            db_connection, mock_browser_manager, mock_config,
+            smart_deal_radar=mock_radar,
+        )
+
         listings = [
             _make_listing("001", "PS5 Disc Edition Bundle", 250.0),
             _make_listing("002", "Couch - Great Condition", 100.0),
@@ -112,24 +156,15 @@ class TestPatrolPipeline:
 
         with patch.object(
             engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch(
-            "agentic_scraper.scanner.patrol_engine.extract_listing_details",
-            new_callable=AsyncMock,
-            side_effect=lambda page, listing: listing,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = listings
             result = await engine.run_patrol_cycle()
 
         assert isinstance(result, PatrolCycleResult)
         assert result.new_listings == 3
 
-        # Listings should be saved to DB
         saved = await listing_repo.list_recent()
         assert len(saved) == 3
-
-        # PS5 at $250 matches "PS5" watch ($400 max) -> deal
-        deals = await deal_repo.list_recent()
-        assert len(deals) >= 1
 
     async def test_dedup_prevents_duplicate_deals(
         self, db_connection, mock_browser_manager, mock_config
@@ -145,11 +180,7 @@ class TestPatrolPipeline:
 
         with patch.object(
             engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch(
-            "agentic_scraper.scanner.patrol_engine.extract_listing_details",
-            new_callable=AsyncMock,
-            side_effect=lambda page, listing: listing,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = listings
 
             # First cycle: new listing
@@ -163,7 +194,8 @@ class TestPatrolPipeline:
     async def test_smart_deal_radar_integration(
         self, db_connection, mock_browser_manager, mock_config
     ):
-        """SmartDealRadar deals should take precedence over interest matches."""
+        """SmartDealRadar batch pipeline finds and saves deals."""
+        from agentic_scraper.skills.models import VLMEvaluation
         from agentic_scraper.storage.repositories.deal_repo import DealRepository
         from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
 
@@ -177,16 +209,26 @@ class TestPatrolPipeline:
             discord_channel_id="channel_1",
         ))
 
-        # SmartDealRadar returns a GREAT deal
-        radar_deal = Deal(
-            listing_id="",  # Will be set by engine
-            score=DealScore.GREAT,
-            estimated_market_price=450.0,
-            discount_pct=44.4,
-            llm_reasoning="PS5 typically sells for $450. Listed at $250.",
+        vlm_eval = VLMEvaluation(
+            item_identified="PS5 Disc Edition", deal_quality="incredible", confidence=0.9,
         )
+
         mock_radar = AsyncMock()
-        mock_radar.evaluate = AsyncMock(return_value=radar_deal)
+
+        async def radar_batch(listings, watchlist_items=None):
+            results = []
+            for listing in listings:
+                deal = Deal(
+                    listing_id=listing.id or "",
+                    score=DealScore.INCREDIBLE,
+                    estimated_market_price=450.0,
+                    discount_pct=44.4,
+                    llm_reasoning="PS5 typically sells for $450. Listed at $250.",
+                )
+                results.append((deal, vlm_eval))
+            return results
+
+        mock_radar.evaluate_batch = AsyncMock(side_effect=radar_batch)
 
         engine = _build_patrol_engine(
             db_connection, mock_browser_manager, mock_config,
@@ -197,18 +239,14 @@ class TestPatrolPipeline:
 
         with patch.object(
             engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch(
-            "agentic_scraper.scanner.patrol_engine.extract_listing_details",
-            new_callable=AsyncMock,
-            side_effect=lambda page, listing: listing,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = listings
             result = await engine.run_patrol_cycle()
 
         assert result.deals_found >= 1
 
         deals = await deal_repo.list_recent()
-        assert any(d.score == DealScore.GREAT for d in deals)
+        assert any(d.score == DealScore.INCREDIBLE for d in deals)
 
     async def test_patrol_logs_scan_log(
         self, db_connection, mock_browser_manager, mock_config

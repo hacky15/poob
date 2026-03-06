@@ -6,8 +6,12 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
+from agentic_scraper.utils.logging import get_logger
+
 if TYPE_CHECKING:
     from agentic_scraper.config import AppConfig
+
+log = get_logger("llm.provider")
 
 
 @runtime_checkable
@@ -103,3 +107,61 @@ def create_knowledge_provider(config: AppConfig) -> LLMProvider | None:
         )
 
     return None
+
+
+def build_cloud_llm_with_fallbacks(
+    config: AppConfig,
+    local_fallback: BaseChatModel,
+) -> BaseChatModel:
+    """Build a cloud LLM chain with automatic fallbacks.
+
+    Priority: Cerebras → Groq → local Ollama.
+    Uses LangChain's ``with_fallbacks`` so a 429 or error on the primary
+    transparently retries on the next provider.
+
+    Args:
+        config: Application configuration with API keys.
+        local_fallback: Local Ollama model as last resort.
+
+    Returns:
+        A BaseChatModel (possibly wrapped with fallbacks).
+    """
+    models: list[BaseChatModel] = []
+    names: list[str] = []
+
+    # Cerebras: highest-param model, 1K true RPM with max_tokens capped
+    if config.cerebras_api_key:
+        from .cerebras_provider import CerebrasProvider
+
+        provider = CerebrasProvider(
+            api_key=config.cerebras_api_key,
+            model=config.cerebras_model,
+            temperature=config.ollama_json_temperature,
+        )
+        if provider.is_available():
+            models.append(provider.chat_model)
+            names.append(f"cerebras:{provider.model_name}")
+
+    # Groq: fast LPU inference, 30 RPM, good JSON adherence
+    if config.groq_api_key:
+        from .groq_provider import GroqProvider
+
+        provider = GroqProvider(
+            api_key=config.groq_api_key,
+            model=config.groq_model,
+            temperature=config.ollama_json_temperature,
+        )
+        if provider.is_available():
+            models.append(provider.chat_model)
+            names.append(f"groq:{provider.model_name}")
+
+    # Local Ollama as last resort
+    models.append(local_fallback)
+    names.append("ollama:local")
+
+    log.info("Cloud LLM fallback chain built", providers=names)
+
+    primary = models[0]
+    if len(models) > 1:
+        return primary.with_fallbacks(models[1:])
+    return primary

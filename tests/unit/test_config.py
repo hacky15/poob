@@ -28,8 +28,8 @@ class TestAppConfigDefaults:
         assert app_config.google_model == "gemini-2.5-flash"
 
     def test_vision_model_default(self, app_config):
-        """Vision model defaults to qwen3-vl:8b."""
-        assert app_config.vision_model == "qwen3-vl:8b"
+        """Vision model defaults to qwen2.5vl:3b."""
+        assert app_config.vision_model == "qwen2.5vl:3b"
 
     def test_browser_defaults(self, app_config):
         """Browser defaults to non-headless with vision enabled."""
@@ -74,11 +74,11 @@ class TestPatrolConfig:
     def test_patrol_categories_default(self, app_config):
         assert "electronics" in app_config.patrol_categories
         assert "furniture" in app_config.patrol_categories
-        assert "vehicles" in app_config.patrol_categories
-        assert len(app_config.patrol_categories) == 10
+        assert "vehicles" not in app_config.patrol_categories
+        assert len(app_config.patrol_categories) == 9
 
     def test_patrol_radius_defaults(self, app_config):
-        assert app_config.patrol_base_radius_miles == 20
+        assert app_config.patrol_base_radius_miles == 40
         assert app_config.patrol_radius_jitter == 4
 
     def test_patrol_timing_defaults(self, app_config):
@@ -108,14 +108,8 @@ class TestPatrolConfig:
         assert app_config.stealth_mouse_movement is True
         assert app_config.stealth_inject_scripts is True
 
-    def test_ebay_marketplace_deflator_default(self, app_config):
-        assert app_config.ebay_marketplace_deflator == 0.80
-
     def test_vision_model_num_ctx_default(self, app_config):
-        assert app_config.vision_model_num_ctx == 8000
-
-    def test_vision_max_images_default(self, app_config):
-        assert app_config.vision_max_images == 3
+        assert app_config.vision_model_num_ctx == 4096
 
 
 class TestAppConfigFromEnv:

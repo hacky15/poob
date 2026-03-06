@@ -23,7 +23,6 @@ CATEGORY_SLUG_MAP: dict[str, str] = {
     "appliances": "appliances",
     "clothing": "apparel",
     "apparel": "apparel",
-    "vehicles": "vehicles",
     "entertainment": "entertainment",
     "home goods": "homegoods",
     "home-goods": "homegoods",

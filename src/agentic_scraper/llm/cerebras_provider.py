@@ -161,6 +161,8 @@ class CerebrasProvider:
             api_key=api_key,
             base_url=CEREBRAS_BASE_URL,
             temperature=temperature,
+            max_tokens=2048,  # Triage batches need ~800-1200 tokens for 5 listings
+            max_retries=0,    # Let with_fallbacks handle, not internal retry
         )
 
     @property

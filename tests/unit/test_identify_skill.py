@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agentic_scraper.skills.models import ItemIdentification
+from agentic_scraper.skills.models import ItemIdentification, clean_optional
 
 
 def _make_llm_response(data: dict) -> MagicMock:
@@ -225,3 +225,83 @@ class TestIdentifyItemTool:
         result = await tool.run("Table", "Nice wooden table")
 
         assert result.urgency_signals == ()
+
+    async def test_null_string_brand_sanitized(self):
+        """LLM returning the string 'null' for brand should become None."""
+        from agentic_scraper.skills.identify import IdentifyItemTool
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=_make_llm_response({
+            "item_name": "Gas Powered Scooter",
+            "brand": "null",
+            "model": "null",
+            "category": "vehicles/scooter",
+            "condition": "parts",
+            "confidence": 0.8,
+            "needs_visual": False,
+        }))
+
+        tool = IdentifyItemTool(llm)
+        result = await tool.run("Nope", "Gas scooter for parts")
+
+        assert result.brand is None
+        assert result.model is None
+
+    async def test_none_string_brand_sanitized(self):
+        """LLM returning the string 'None' for brand should become None."""
+        from agentic_scraper.skills.identify import IdentifyItemTool
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=_make_llm_response({
+            "item_name": "Dining Table",
+            "brand": "None",
+            "model": "N/A",
+            "category": "furniture/table",
+            "condition": "unknown",
+            "confidence": 0.6,
+            "needs_visual": False,
+        }))
+
+        tool = IdentifyItemTool(llm)
+        result = await tool.run("Dining Table", "Wooden table")
+
+        assert result.brand is None
+        assert result.model is None
+        assert result.condition is None  # "unknown" sanitized to None
+
+
+class TestCleanOptional:
+    """Tests for the clean_optional sanitizer."""
+
+    def test_none_passthrough(self):
+        assert clean_optional(None) is None
+
+    def test_real_string_passthrough(self):
+        assert clean_optional("Sony") == "Sony"
+        assert clean_optional("DeLonghi") == "DeLonghi"
+
+    def test_null_string_becomes_none(self):
+        assert clean_optional("null") is None
+        assert clean_optional("Null") is None
+        assert clean_optional("NULL") is None
+
+    def test_none_string_becomes_none(self):
+        assert clean_optional("None") is None
+        assert clean_optional("none") is None
+
+    def test_na_strings_become_none(self):
+        assert clean_optional("N/A") is None
+        assert clean_optional("n/a") is None
+        assert clean_optional("NA") is None
+        assert clean_optional("na") is None
+
+    def test_unknown_string_becomes_none(self):
+        assert clean_optional("unknown") is None
+        assert clean_optional("Unknown") is None
+
+    def test_empty_string_becomes_none(self):
+        assert clean_optional("") is None
+
+    def test_whitespace_trimmed(self):
+        assert clean_optional("  Sony  ") == "Sony"
+        assert clean_optional("  null  ") is None

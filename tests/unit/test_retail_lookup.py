@@ -1,9 +1,9 @@
-"""Tests for RetailLookupTool - MSRP/retail price lookup."""
+"""Tests for RetailLookupTool - MSRP/retail price lookup via Tavily."""
 
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -24,19 +24,13 @@ class TestRetailLookupTool:
             "confidence": 0.9,
         })))
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "<html><body>PS5 Disc Edition - $499.99 at Best Buy</body></html>"
+        mock_search = AsyncMock()
+        mock_search.search = AsyncMock(
+            return_value="PS5 Disc Edition - $499.99 at Best Buy"
+        )
 
-        with patch("agentic_scraper.skills.retail_lookup.httpx.AsyncClient") as mock_client_cls:
-            mock_client = AsyncMock()
-            mock_client.get = AsyncMock(return_value=mock_response)
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client_cls.return_value = mock_client
-
-            tool = RetailLookupTool(llm)
-            result = await tool.run("PlayStation 5 Disc Edition", brand="Sony")
+        tool = RetailLookupTool(llm, search_provider=mock_search)
+        result = await tool.run("PlayStation 5 Disc Edition", brand="Sony")
 
         assert isinstance(result, PriceLookupResult)
         assert result.median_price == 499.99
@@ -53,37 +47,40 @@ class TestRetailLookupTool:
             "confidence": 0.0,
         })))
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "<html><body>No results</body></html>"
+        mock_search = AsyncMock()
+        mock_search.search = AsyncMock(return_value="No results found")
 
-        with patch("agentic_scraper.skills.retail_lookup.httpx.AsyncClient") as mock_client_cls:
-            mock_client = AsyncMock()
-            mock_client.get = AsyncMock(return_value=mock_response)
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client_cls.return_value = mock_client
-
-            tool = RetailLookupTool(llm)
-            result = await tool.run("Unknown Vintage Widget")
+        tool = RetailLookupTool(llm, search_provider=mock_search)
+        result = await tool.run("Unknown Vintage Widget")
 
         assert result.confidence == 0.0
 
-    async def test_handles_http_failure(self):
-        """Should return empty result when HTTP request fails."""
+    async def test_handles_search_failure(self):
+        """Should return empty result when search fails."""
         from agentic_scraper.skills.retail_lookup import RetailLookupTool
 
         llm = MagicMock()
 
-        with patch("agentic_scraper.skills.retail_lookup.httpx.AsyncClient") as mock_client_cls:
-            mock_client = AsyncMock()
-            mock_client.get = AsyncMock(side_effect=Exception("Connection timeout"))
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client_cls.return_value = mock_client
+        mock_search = AsyncMock()
+        mock_search.search = AsyncMock(side_effect=Exception("API timeout"))
 
-            tool = RetailLookupTool(llm)
-            result = await tool.run("PS5")
+        tool = RetailLookupTool(llm, search_provider=mock_search)
+        result = await tool.run("PS5")
+
+        assert result.sample_count == 0
+        assert result.confidence == 0.0
+
+    async def test_handles_empty_search_results(self):
+        """Should return empty result when search returns no text."""
+        from agentic_scraper.skills.retail_lookup import RetailLookupTool
+
+        llm = MagicMock()
+
+        mock_search = AsyncMock()
+        mock_search.search = AsyncMock(return_value="")
+
+        tool = RetailLookupTool(llm, search_provider=mock_search)
+        result = await tool.run("PS5")
 
         assert result.sample_count == 0
         assert result.confidence == 0.0
@@ -99,22 +96,14 @@ class TestRetailLookupTool:
             "confidence": 0.9,
         })))
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "<html><body>$999</body></html>"
+        mock_search = AsyncMock()
+        mock_search.search = AsyncMock(return_value="iPhone 15 Pro $999")
 
-        with patch("agentic_scraper.skills.retail_lookup.httpx.AsyncClient") as mock_client_cls:
-            mock_client = AsyncMock()
-            mock_client.get = AsyncMock(return_value=mock_response)
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client_cls.return_value = mock_client
+        tool = RetailLookupTool(llm, search_provider=mock_search)
+        await tool.run("iPhone 15 Pro", brand="Apple", model="iPhone 15 Pro")
 
-            tool = RetailLookupTool(llm)
-            await tool.run("iPhone 15 Pro", brand="Apple", model="iPhone 15 Pro")
-
-            call_url = mock_client.get.call_args[0][0]
-            assert "Apple" in call_url or "iPhone" in call_url
+        query = mock_search.search.call_args[0][0]
+        assert "Apple" in query or "iPhone" in query
 
     async def test_handles_llm_error(self):
         """Should return zero-confidence when LLM extraction fails."""
@@ -123,18 +112,20 @@ class TestRetailLookupTool:
         llm = MagicMock()
         llm.ainvoke = AsyncMock(side_effect=RuntimeError("LLM error"))
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "<html><body>$499</body></html>"
+        mock_search = AsyncMock()
+        mock_search.search = AsyncMock(return_value="$499 retail price")
 
-        with patch("agentic_scraper.skills.retail_lookup.httpx.AsyncClient") as mock_client_cls:
-            mock_client = AsyncMock()
-            mock_client.get = AsyncMock(return_value=mock_response)
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client_cls.return_value = mock_client
-
-            tool = RetailLookupTool(llm)
-            result = await tool.run("PS5")
+        tool = RetailLookupTool(llm, search_provider=mock_search)
+        result = await tool.run("PS5")
 
         assert result.confidence == 0.0
+
+    async def test_parse_llm_json_with_code_fence(self):
+        """Should handle LLM responses wrapped in markdown code fences."""
+        from agentic_scraper.skills.retail_lookup import RetailLookupTool
+
+        fenced = '```json\n{"retail_price": 299.99, "confidence": 0.8}\n```'
+        result = RetailLookupTool._parse_llm_response(fenced, "test query")
+
+        assert result.median_price == 299.99
+        assert result.confidence == 0.8

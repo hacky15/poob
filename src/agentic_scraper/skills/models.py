@@ -4,6 +4,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+# Strings LLMs commonly return instead of JSON null
+_NULL_STRINGS = frozenset({"null", "none", "n/a", "na", "unknown", ""})
+
+
+def clean_optional(value: object) -> str | None:
+    """Sanitize an LLM-returned optional string field.
+
+    LLMs frequently return the literal string "null", "None", "N/A", etc.
+    instead of JSON null.  This normalizes all of those to Python None.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if s.lower() in _NULL_STRINGS:
+        return None
+    return s
+
 
 @dataclass(frozen=True)
 class ItemIdentification:
@@ -74,6 +91,19 @@ class CategoryEstimate:
     confidence: float = 0.0
 
 
+@dataclass(frozen=True)
+class DealValidation:
+    """Result of LLM deal validation — sanity check before notifying.
+
+    Attributes:
+        is_valid: Whether the deal is genuinely good.
+        reasoning: Human-readable explanation of the judgment.
+    """
+
+    is_valid: bool = True
+    reasoning: str = ""
+
+
 @dataclass
 class DealEvaluation:
     """Final evaluation result from the SmartDealRadar orchestrator.
@@ -95,5 +125,81 @@ class DealEvaluation:
     price_source: str = ""
     deal_score: str = "fair"
     discount_pct: float = 0.0
+    reasoning: str = ""
+    red_flags: list[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# VLM pipeline models
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TriageResult:
+    """Output from Stage 1 text triage for a single listing."""
+
+    listing_id: str = ""
+    investigate: bool = False
+    reasoning: str = ""
+    scam_signals: list[str] = field(default_factory=list)
+    urgency_signals: list[str] = field(default_factory=list)
+    misspelling_bonus: bool = False
+
+
+@dataclass
+class VisualEnrichment:
+    """Output from Stage 2 visual enrichment for a single listing.
+
+    Attributes:
+        enriched_product_name: Product name identified by reverse image search.
+        enriched_brand: Brand identified from image.
+        enriched_model: Model identified from image.
+        retail_prices: Retail prices found via Google Lens or web pages.
+        web_entities: Entities and labels from Google Cloud Vision.
+        ocr_text: Text extracted from listing images via OCR.
+        enrichment_tier: Which enrichment source succeeded (1=Vision API, 2=SerpAPI, 3=none).
+        enrichment_confidence: Confidence of the enrichment result.
+    """
+
+    enriched_product_name: str | None = None
+    enriched_brand: str | None = None
+    enriched_model: str | None = None
+    retail_prices: list[float] = field(default_factory=list)
+    web_entities: list[dict] = field(default_factory=list)
+    ocr_text: str | None = None
+    enrichment_tier: int = 3  # 1=Vision API, 2=SerpAPI, 3=none
+    enrichment_confidence: float = 0.0
+
+
+@dataclass
+class VLMEvaluation:
+    """Output from Stage 3 VLM deep evaluation.
+
+    The VLM is the primary deal evaluator. It sees images, listing metadata,
+    enrichment context, and comparable sold prices, then makes the deal call.
+
+    Attributes:
+        item_identified: Specific item with brand/model/specs from VLM.
+        condition: Visual condition assessment (mint through parts).
+        condition_notes: Specific observations from photos.
+        depreciation_factor: Condition-based depreciation (0.1-1.0).
+        estimated_value_low: Low end of estimated market value.
+        estimated_value_mid: Mid (most likely) market value.
+        estimated_value_high: High end of estimated market value.
+        deal_quality: VLM's deal classification (pass/fair/good/great/incredible).
+        confidence: VLM's confidence in its evaluation (0.0-1.0).
+        reasoning: Brief explanation of the deal assessment.
+        red_flags: Concerns identified by the VLM.
+    """
+
+    item_identified: str = ""
+    condition: str = "unknown"
+    condition_notes: str = ""
+    depreciation_factor: float = 0.6
+    estimated_value_low: float = 0.0
+    estimated_value_mid: float = 0.0
+    estimated_value_high: float = 0.0
+    deal_quality: str = "pass"  # pass | fair | good | great | incredible
+    confidence: float = 0.0
     reasoning: str = ""
     red_flags: list[str] = field(default_factory=list)

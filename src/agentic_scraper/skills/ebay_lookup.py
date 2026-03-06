@@ -1,76 +1,78 @@
-"""EbayLookupTool - eBay sold price lookup via HTTP scraping."""
+"""EbayLookupTool - eBay sold price lookup via web search.
+
+Searches for eBay sold listings using Tavily API and extracts prices
+from the search result snippets.
+"""
 
 from __future__ import annotations
 
 import re
 import statistics
-from urllib.parse import quote_plus
-
-import httpx
+from typing import TYPE_CHECKING
 
 from agentic_scraper.skills.models import PriceLookupResult
 from agentic_scraper.utils.logging import get_logger
 
+if TYPE_CHECKING:
+    from agentic_scraper.skills.web_search import SearchProvider
+
 log = get_logger("skills.ebay_lookup")
 
-# eBay sold items search URL pattern
-EBAY_SOLD_URL = (
-    "https://www.ebay.com/sch/i.html?_nkw={query}&LH_Complete=1&LH_Sold=1&_sop=13"
+# Source prefixes that reverse-image-search APIs prepend to product titles.
+_SOURCE_PREFIX_RE = re.compile(
+    r"^(Amazon\.com:\s*|eBay:\s*|Walmart\.com:\s*|Target:\s*|Best Buy:\s*"
+    r"|Etsy:\s*|Wayfair:\s*|Home Depot:\s*|Lowe's:\s*)",
+    re.IGNORECASE,
 )
 
-# Browser-like headers to avoid basic bot detection
-EBAY_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-}
+
+def _sanitize_search_query(query: str) -> str:
+    """Sanitize a product name for use in Tavily search queries.
+
+    Strips e-commerce source prefixes, special characters that trigger
+    Tavily 432 Forbidden errors, trailing ellipses/dots, and truncates
+    overly long queries.
+    """
+    # Strip source prefixes
+    query = _SOURCE_PREFIX_RE.sub("", query).strip()
+    # Remove trailing ellipses/dots
+    query = re.sub(r"[.\s]+$", "", query)
+    # Remove characters that cause Tavily 432: quotes, colons, ampersands, etc.
+    query = query.replace('"', "").replace("'", "").replace("&", "and")
+    query = re.sub(r"[^\w\s.,/$-]", " ", query)
+    # Collapse multiple spaces
+    query = re.sub(r"\s{2,}", " ", query).strip()
+    # Truncate to 80 chars at word boundary
+    if len(query) > 80:
+        truncated = query[:80].rsplit(" ", 1)[0]
+        query = truncated if len(truncated) > 40 else query[:80]
+    return query
+
+# Price regex: matches $X, $X.XX, $X,XXX.XX
+_PRICE_RE = re.compile(r"\$(\d[\d,]*\.?\d{0,2})")
 
 
-def parse_ebay_sold_html(html: str) -> list[dict]:
-    """Parse eBay search results HTML to extract item titles and prices.
+def extract_prices_from_text(text: str) -> list[float]:
+    """Extract dollar prices from search result text.
+
+    Finds all $-prefixed values and filters obvious outliers.
 
     Args:
-        html: Raw HTML from eBay sold items search.
+        text: Plain text from search results.
 
     Returns:
-        List of dicts with 'title' and 'price' keys.
+        List of extracted price values.
     """
-    items: list[dict] = []
-
-    # Find all s-item blocks
-    item_pattern = re.compile(
-        r'class="s-item__title[^"]*"[^>]*>(.*?)</span>.*?'
-        r'class="s-item__price"[^>]*>(.*?)</span>',
-        re.DOTALL,
-    )
-
-    for match in item_pattern.finditer(html):
-        title_raw = match.group(1).strip()
-        price_raw = match.group(2).strip()
-
-        # Clean HTML tags from title
-        title = re.sub(r"<[^>]+>", "", title_raw).strip()
-
-        # Skip placeholder items
-        if title.lower() in ("shop on ebay", ""):
-            continue
-
-        # Extract first price (handles "$100.00 to $200.00" ranges)
-        price_match = re.search(r"\$([0-9,]+\.?\d*)", price_raw)
-        if not price_match:
-            continue
-
+    prices: list[float] = []
+    for match in _PRICE_RE.finditer(text):
         try:
-            price = float(price_match.group(1).replace(",", ""))
+            val = float(match.group(1).replace(",", ""))
+            if 1.0 <= val <= 50_000.0:
+                prices.append(val)
         except ValueError:
             continue
 
-        items.append({"title": title, "price": price})
-
-    return items
+    return prices
 
 
 def compute_price_stats(
@@ -132,19 +134,22 @@ def compute_price_stats(
 
 
 class EbayLookupTool:
-    """Look up sold prices on eBay via HTTP scraping.
+    """Look up sold prices on eBay via Tavily web search.
+
+    Searches for "eBay sold {item}" and extracts prices from the
+    search result text snippets.
 
     Args:
-        timeout_seconds: HTTP request timeout.
+        search_provider: Tavily web search provider.
     """
 
-    def __init__(self, timeout_seconds: int = 10) -> None:
-        self._timeout = timeout_seconds
+    def __init__(self, search_provider: SearchProvider) -> None:
+        self._search = search_provider
 
     async def run(
         self, query: str, condition: str | None = None
     ) -> PriceLookupResult:
-        """Search eBay sold listings and compute price statistics.
+        """Search for eBay sold prices and compute price statistics.
 
         Args:
             query: Search query for the item.
@@ -153,47 +158,53 @@ class EbayLookupTool:
         Returns:
             PriceLookupResult with market price data.
         """
-        search_query = query
-        if condition and condition not in ("new",):
-            search_query = f"{query} {condition}"
+        # Sanitize query before building search string (defense against
+        # Tavily 432 errors from special chars and source prefixes)
+        query = _sanitize_search_query(query)
+        if not query:
+            log.warning("eBay query empty after sanitization")
+            return PriceLookupResult(
+                sample_count=0, source="ebay_sold",
+                search_query="", confidence=0.0,
+            )
 
-        url = EBAY_SOLD_URL.format(query=quote_plus(search_query))
+        # Build search query targeting eBay sold listings.
+        # Use "site:ebay.com" in the query string instead of the include_domains
+        # API parameter — the API filter may require a paid Tavily plan and causes
+        # 432 Forbidden on free tier.
+        search_parts = [query]
+        if condition and condition not in ("new",):
+            search_parts.append(condition)
+        search_parts.append("sold price site:ebay.com")
+        search_query = " ".join(search_parts)
 
         try:
-            async with httpx.AsyncClient(
-                headers=EBAY_HEADERS,
-                timeout=self._timeout,
-                follow_redirects=True,
-            ) as client:
-                response = await client.get(url)
+            text = await self._search.search(search_query)
 
-            if response.status_code != 200:
-                log.warning(
-                    "eBay HTTP request failed",
-                    status=response.status_code,
-                    query=search_query,
-                )
+            if not text:
+                log.warning("eBay search returned no results", query=search_query[:60])
                 return PriceLookupResult(
                     sample_count=0, source="ebay_sold",
                     search_query=search_query, confidence=0.0,
                 )
 
-            items = parse_ebay_sold_html(response.text)
-            prices = [item["price"] for item in items]
+            prices = extract_prices_from_text(text)
 
             log.info(
                 "eBay lookup complete",
-                query=search_query,
-                items_found=len(items),
+                query=search_query[:60],
+                prices_found=len(prices),
             )
 
-            return compute_price_stats(prices, query=search_query, source="ebay_sold")
+            return compute_price_stats(
+                prices, query=search_query, source="ebay_sold"
+            )
 
         except Exception as exc:
             log.warning(
                 "eBay lookup failed",
                 error=str(exc),
-                query=search_query,
+                query=search_query[:60],
             )
             return PriceLookupResult(
                 sample_count=0, source="ebay_sold",

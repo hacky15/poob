@@ -225,3 +225,68 @@ class TestParseListingsIntegration:
 
     def test_unparseable_input(self):
         assert parse_listings("random text with no structure", site="test") == []
+
+
+# ---------------------------------------------------------------------------
+# Embedded price rescue from title
+# ---------------------------------------------------------------------------
+
+class TestEmbeddedPriceRescue:
+    """Tests for extracting embedded prices from concatenated title text."""
+
+    def test_just_listed_with_embedded_price(self):
+        """FB concatenates 'Just listed$200Title' — should rescue price."""
+        from agentic_scraper.sites.facebook.parser import _dict_to_listing
+
+        listing = _dict_to_listing(
+            {"title": "Just listed$200Haaka 30 pound sausage stuffer", "price": None},
+            site="facebook_marketplace",
+        )
+        assert listing.price == 200.0
+        assert "Haaka" in listing.title
+        assert "$200" not in listing.title
+        assert "Just listed" not in listing.title
+
+    def test_embedded_price_with_comma(self):
+        """Should handle $1,500 embedded in title."""
+        from agentic_scraper.sites.facebook.parser import _dict_to_listing
+
+        listing = _dict_to_listing(
+            {"title": "$1,500Samsung 65 inch TV", "price": None},
+            site="facebook_marketplace",
+        )
+        assert listing.price == 1500.0
+        assert "Samsung" in listing.title
+
+    def test_no_embedded_price_leaves_title_alone(self):
+        """Title without $ should not be modified."""
+        from agentic_scraper.sites.facebook.parser import _dict_to_listing
+
+        listing = _dict_to_listing(
+            {"title": "Free couch good condition", "price": None},
+            site="facebook_marketplace",
+        )
+        assert listing.price is None
+        assert listing.title == "Free couch good condition"
+
+    def test_normal_price_not_modified(self):
+        """When price is already set, title should not be touched."""
+        from agentic_scraper.sites.facebook.parser import _dict_to_listing
+
+        listing = _dict_to_listing(
+            {"title": "PS5 Console", "price": 350.0},
+            site="facebook_marketplace",
+        )
+        assert listing.price == 350.0
+        assert listing.title == "PS5 Console"
+
+    def test_listed_ago_prefix_stripped(self):
+        """Should strip 'Listed 2h ago' prefix along with price."""
+        from agentic_scraper.sites.facebook.parser import _dict_to_listing
+
+        listing = _dict_to_listing(
+            {"title": "Listed 2h ago$50Nice lamp", "price": None},
+            site="facebook_marketplace",
+        )
+        assert listing.price == 50.0
+        assert "lamp" in listing.title.lower()

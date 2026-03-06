@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING
 import httpx
 from langchain_core.messages import HumanMessage
 
-from agentic_scraper.skills.models import ItemIdentification
+from agentic_scraper.skills.llm_call import llm_call
+from agentic_scraper.skills.models import ItemIdentification, clean_optional
 from agentic_scraper.skills.prompts import VISUAL_IDENTIFY_PROMPT
 from agentic_scraper.utils.logging import get_logger
 
@@ -82,7 +83,9 @@ class VisualIdentifyTool:
                     "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
                 })
             message = HumanMessage(content=content)
-            response = await self._llm.ainvoke([message])
+            response = await llm_call(
+                self._llm, [message], skill="visual_identify",
+            )
             return self._parse_response(response.content)
         except Exception as exc:
             log.warning("Visual identification failed", error=str(exc))
@@ -137,10 +140,10 @@ class VisualIdentifyTool:
 
         return ItemIdentification(
             item_name=str(data.get("item_name", "")),
-            brand=data.get("brand"),
-            model=data.get("model"),
+            brand=clean_optional(data.get("brand")),
+            model=clean_optional(data.get("model")),
             category=str(data.get("category", "")),
-            condition=data.get("condition"),
+            condition=clean_optional(data.get("condition")),
             confidence=float(data.get("confidence", 0.0)),
             needs_visual=bool(data.get("needs_visual", False)),
             urgency_signals=signals,

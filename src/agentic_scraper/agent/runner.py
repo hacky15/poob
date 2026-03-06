@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import structlog
@@ -17,6 +18,7 @@ from langchain_core.messages import (
 
 from agentic_scraper.agent.prompts import build_system_prompt
 from agentic_scraper.agent.tools import build_tools
+from agentic_scraper.skills.llm_call import _model_id
 from agentic_scraper.storage.repositories.conversation_repo import ConversationRepository
 from agentic_scraper.storage.repositories.preferences_repo import UserPreferencesRepository
 from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
@@ -57,6 +59,7 @@ class AgentRunner:
         scheduler: Any,
         max_iterations: int = 10,
         scan_log_repo: Any = None,
+        exclusion_repo: Any = None,
     ) -> None:
         self._llm = llm
         self._prefs_repo = prefs_repo
@@ -67,6 +70,7 @@ class AgentRunner:
         self._scheduler = scheduler
         self._max_iterations = max_iterations
         self._scan_log_repo = scan_log_repo
+        self._exclusion_repo = exclusion_repo
 
     async def run(
         self,
@@ -100,6 +104,7 @@ class AgentRunner:
             listing_repo=self._listing_repo,
             scheduler=self._scheduler,
             scan_log_repo=self._scan_log_repo,
+            exclusion_repo=self._exclusion_repo,
         )
         tools_by_name = {t.name: t for t in tools}
 
@@ -146,13 +151,19 @@ class AgentRunner:
             Tuple of (final text response, whether any tools were called).
         """
         any_tools_called = False
+        last_tool_result = ""
 
+        model = _model_id(bound_llm)
         for iteration in range(self._max_iterations):
+            t0 = time.monotonic()
             response: AIMessage = await bound_llm.ainvoke(messages)
+            elapsed = time.monotonic() - t0
 
             log.info(
                 "agent.llm_response",
                 iteration=iteration,
+                model=model,
+                elapsed_s=round(elapsed, 1),
                 has_tool_calls=bool(response.tool_calls),
                 tool_calls=[tc.get("name", "?") for tc in (response.tool_calls or [])],
                 content_type=type(response.content).__name__,
@@ -161,7 +172,12 @@ class AgentRunner:
 
             # If no tool calls, we have our final answer
             if not response.tool_calls:
-                return _extract_text(response.content), any_tools_called
+                text = _extract_text(response.content)
+                # If LLM returned empty after tool calls, use the last tool result
+                if not text.strip() or text == _EMPTY_FALLBACK:
+                    if last_tool_result:
+                        return last_tool_result, any_tools_called
+                return text, any_tools_called
 
             # Execute each tool call
             any_tools_called = True
@@ -191,8 +207,9 @@ class AgentRunner:
                             error=str(exc),
                         )
 
+                last_tool_result = str(tool_result)
                 messages.append(
-                    ToolMessage(content=str(tool_result), tool_call_id=tool_call_id)
+                    ToolMessage(content=last_tool_result, tool_call_id=tool_call_id)
                 )
 
         # Hit max iterations — return whatever we have
@@ -248,6 +265,9 @@ class AgentRunner:
         return lc_messages
 
 
+_EMPTY_FALLBACK = "I'm not sure how to respond to that."
+
+
 def _extract_text(content: str | list) -> str:
     """Extract plain text from LLM response content.
 
@@ -256,7 +276,7 @@ def _extract_text(content: str | list) -> str:
     while most other models return a plain string.
     """
     if isinstance(content, str):
-        return content or "I'm not sure how to respond to that."
+        return content or _EMPTY_FALLBACK
     if isinstance(content, list):
         parts = []
         for block in content:
@@ -264,5 +284,5 @@ def _extract_text(content: str | list) -> str:
                 parts.append(block.get("text", ""))
             elif isinstance(block, str):
                 parts.append(block)
-        return "".join(parts) or "I'm not sure how to respond to that."
-    return str(content) or "I'm not sure how to respond to that."
+        return "".join(parts) or _EMPTY_FALLBACK
+    return str(content) or _EMPTY_FALLBACK

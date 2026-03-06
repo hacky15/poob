@@ -43,6 +43,8 @@ class TestCerebrasProvider:
             api_key="test-key",
             base_url=CEREBRAS_BASE_URL,
             temperature=0.3,
+            max_tokens=2048,
+            max_retries=0,
         )
         assert provider.chat_model is mock_chat_cls.return_value
 
@@ -214,6 +216,8 @@ class TestAutoDetectIntegration:
             api_key="test-key",
             base_url=CEREBRAS_BASE_URL,
             temperature=0.3,
+            max_tokens=2048,
+            max_retries=0,
         )
 
     @patch("agentic_scraper.llm.cerebras_provider.ChatOpenAI")

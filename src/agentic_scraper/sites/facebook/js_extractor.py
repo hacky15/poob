@@ -51,9 +51,50 @@ EXTRACT_LISTINGS_JS = """() => {
             // Location is usually 1-2 lines after title
             location = lines[priceIdx + 2] || '';
         } else {
-            // Fallback: first line is title
-            title = lines[0] || '';
-            location = lines[1] || '';
+            // Second pass: find $ anywhere in concatenated text
+            // (FB sometimes omits newlines: "Just listed$200Haaka sausage stuffer")
+            const embedded = allText.match(/\\$(\\d[\\d,]*\\.?\\d{0,2})/);
+            if (embedded) {
+                price = parseFloat(embedded[1].replace(/,/g, '')) || null;
+                // Remove price + common FB prefixes from title
+                title = allText
+                    .replace(/(?:Just listed|Listed \\w+ ago)?\\s*\\$\\d[\\d,]*\\.?\\d{0,2}\\s*/i, '')
+                    .split('\\n')[0].trim() || lines[0] || '';
+                location = lines.length > 1 ? lines[lines.length - 1] : '';
+            } else {
+                // Fallback: first line is title
+                title = lines[0] || '';
+                location = lines[1] || '';
+            }
+        }
+
+        // Freshness hint: "Just listed", "Listed X hours ago", etc.
+        // Primary: find as a standalone line
+        // Fallback: regex across full text for concatenated layouts
+        let freshness = '';
+        const freshLine = lines.find(l => /^(Just listed|Listed\\s)/i.test(l));
+        if (freshLine) freshness = freshLine;
+        if (!freshness) {
+            const freshMatch = allText.match(
+                /(Just listed|Listed (?:\\d+ (?:minutes?|hours?|days?|weeks?) ago|yesterday|last week))/i
+            );
+            if (freshMatch) freshness = freshMatch[0];
+        }
+
+        // Sponsored/promoted detection
+        // innerText resolves CSS reordering that FB uses to obfuscate "Sponsored"
+        let isSponsored = false;
+        const lowerText = allText.toLowerCase();
+        if (lowerText.includes('sponsored')) {
+            isSponsored = true;
+        }
+        if (!isSponsored) {
+            const ariaSponsored = card.querySelector('[aria-label*="Sponsored" i]');
+            if (ariaSponsored) isSponsored = true;
+        }
+        if (!isSponsored) {
+            const adLink = card.querySelector('a[href*="/ads/about"]');
+            if (adLink) isSponsored = true;
         }
 
         // Find first image in the card
@@ -67,7 +108,9 @@ EXTRACT_LISTINGS_JS = """() => {
                 location: location,
                 listing_url: href,
                 external_id: externalId,
-                image_url: imageUrl
+                image_url: imageUrl,
+                freshness: freshness,
+                is_sponsored: isSponsored
             });
         }
     }

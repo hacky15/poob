@@ -26,7 +26,7 @@ class FacebookMarketplaceAdapter:
     Supports two scan modes:
     - "direct" (default): Uses CDP Page for navigation and JS for extraction.
       Fast (~10s), zero LLM calls for navigation. Falls back to agent on error.
-    - "agent": Uses browser-use LLM Agent for navigation (legacy path).
+    - "agent": Uses browser-use LLM Agent for navigation.
       Slower (~3min), requires NVIDIA NIM or compatible structured-output LLM.
     """
 
@@ -51,7 +51,7 @@ class FacebookMarketplaceAdapter:
 
         Args:
             mode: "direct" for CDP-based scanning (fast, default),
-                  "agent" for browser-use LLM agent (legacy).
+                  "agent" for browser-use LLM agent.
         """
         if mode not in ("direct", "agent"):
             raise ValueError(f"Invalid scan mode: {mode!r}. Use 'direct' or 'agent'.")
@@ -286,7 +286,7 @@ class FacebookMarketplaceAdapter:
     async def _get_details_agent(
         self, listing_url: str, browser_manager: object, llm: BaseChatModel
     ) -> Listing:
-        """Get listing details via browser-use agent (legacy).
+        """Get listing details via browser-use agent.
 
         Args:
             listing_url: URL of the listing.

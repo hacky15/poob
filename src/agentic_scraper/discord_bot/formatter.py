@@ -26,12 +26,15 @@ SCORE_EMOJI: dict[DealScore, str] = {
 }
 
 
-def format_deal_embed(deal: Deal, listing: Listing) -> discord.Embed:
+def format_deal_embed(
+    deal: Deal, listing: Listing, watch_interest: str = ""
+) -> discord.Embed:
     """Build a Discord embed for a deal alert.
 
     Args:
         deal: The deal to display.
         listing: The associated listing.
+        watch_interest: Optional watchlist interest that matched (shown in DMs).
 
     Returns:
         A formatted Discord Embed.
@@ -62,11 +65,16 @@ def format_deal_embed(deal: Deal, listing: Listing) -> discord.Embed:
     embed.add_field(name="Site", value=listing.site, inline=True)
     embed.add_field(name="Deal Score", value=deal.score.value.upper(), inline=True)
 
+    if watch_interest:
+        embed.add_field(name="Matched Interest", value=watch_interest, inline=True)
+
     if deal.llm_reasoning:
         embed.add_field(name="Why it's a deal", value=deal.llm_reasoning, inline=False)
 
     if listing.image_urls:
         embed.set_image(url=listing.image_urls[0])
+
+    embed.set_footer(text="React: \u2705 Claimed | \u274c Overpriced | \U0001f6ab Scam | \U0001f610 Not for me")
 
     return embed
 
@@ -124,10 +132,12 @@ def format_watchlist_embed(watch_items: list[WatchItem]) -> discord.Embed:
         price_str = f" (max ${item.max_price:.0f})" if item.max_price else ""
         location_str = f" near {item.location}" if item.location else ""
         status = "Active" if item.is_active else "Paused"
+        threshold = item.notification_threshold or "good"
+        threshold_str = f" | Notify: {threshold}" if threshold != "good" else ""
 
         embed.add_field(
             name=f"{item.interest}{price_str}",
-            value=f"ID: `{item.id}`{location_str} | {status}",
+            value=f"ID: `{item.id}`{location_str} | {status}{threshold_str}",
             inline=False,
         )
 

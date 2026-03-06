@@ -29,13 +29,27 @@ class WatchlistCog(commands.Cog, name="Watchlist"):
         ctx: commands.Context,
         interest: str,
         max_price: float | None = None,
+        notification_level: str = "good",
         location: str | None = None,
     ) -> None:
         """Add something to look out for on Marketplace.
 
-        Usage: !watch "PS5" 300 "Appleton, WI"
+        Usage:
+          !watch "PS5" 300                    — PS5 under $300, good deals
+          !watch "PS5" 300 great              — PS5 under $300, great+ deals only
+          !watch "espresso machine" all       — any espresso machine listing
+          !watch "furniture" incredible       — only incredible furniture deals
+          !watch "free stuff" free            — only free items
+
+        Notification levels: all, good, great, incredible, free
         """
-        await self._do_watch(ctx, interest=interest, max_price=max_price, location=location)
+        await self._do_watch(
+            ctx,
+            interest=interest,
+            max_price=max_price,
+            notification_level=notification_level,
+            location=location,
+        )
 
     async def _do_watch(
         self,
@@ -43,19 +57,28 @@ class WatchlistCog(commands.Cog, name="Watchlist"):
         *,
         interest: str,
         max_price: float | None,
+        notification_level: str,
         location: str | None,
     ) -> None:
         """Internal implementation for the watch command."""
+        valid_levels = {"all", "good", "great", "incredible", "free"}
+        if notification_level not in valid_levels:
+            notification_level = "good"
+
         item = WatchItem(
             interest=interest,
             max_price=max_price,
+            notification_threshold=notification_level,
             location=location,
             discord_user_id=str(ctx.author.id),
             discord_channel_id=str(ctx.channel.id),
         )
         saved = await self._repo.save(item)
         price_str = f" (max ${max_price:.0f})" if max_price else ""
-        await ctx.send(f"Looking out for: **{interest}**{price_str} (ID: `{saved.id}`)")
+        level_str = f" [{notification_level}]" if notification_level != "good" else ""
+        await ctx.send(
+            f"Looking out for: **{interest}**{price_str}{level_str} (ID: `{saved.id}`)"
+        )
 
     @commands.command(name="unwatch")
     async def unwatch(self, ctx: commands.Context, watch_id: str) -> None:

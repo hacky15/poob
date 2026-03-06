@@ -26,7 +26,9 @@ class TestWatchlistCog:
         ctx.channel.id = "channel_456"
         ctx.send = AsyncMock()
 
-        await cog._do_watch(ctx, interest="PS5", max_price=300.0, location=None)
+        await cog._do_watch(
+            ctx, interest="PS5", max_price=300.0, location=None, notification_level="good",
+        )
 
         items = await repo.list_for_user("user_123")
         assert len(items) == 1

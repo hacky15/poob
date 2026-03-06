@@ -24,10 +24,11 @@ class WatchlistRepository:
 
         await self._conn.execute(
             """
-            INSERT INTO watch_items
+            INSERT OR REPLACE INTO watch_items
                 (id, interest, max_price, location, radius_miles, category,
-                 sites, is_active, created_at, discord_user_id, discord_channel_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 sites, is_active, created_at, discord_user_id, discord_channel_id,
+                 notification_threshold, notes, search_configs)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item.id,
@@ -41,6 +42,9 @@ class WatchlistRepository:
                 item.created_at.isoformat(),
                 item.discord_user_id,
                 item.discord_channel_id,
+                item.notification_threshold,
+                item.notes,
+                json.dumps(item.search_configs),
             ),
         )
         await self._conn.commit()
@@ -82,6 +86,15 @@ class WatchlistRepository:
         await self._conn.commit()
         return cursor.rowcount > 0
 
+    async def deactivate_all_for_user(self, discord_user_id: str) -> int:
+        """Deactivate all active watch items for a user. Returns count deactivated."""
+        cursor = await self._conn.execute(
+            "UPDATE watch_items SET is_active = 0 WHERE discord_user_id = ? AND is_active = 1",
+            (discord_user_id,),
+        )
+        await self._conn.commit()
+        return cursor.rowcount
+
     async def delete(self, item_id: str, discord_user_id: str) -> bool:
         """Delete a watch item. Only the owning user can delete. Returns True if deleted."""
         cursor = await self._conn.execute(
@@ -106,4 +119,7 @@ class WatchlistRepository:
             created_at=datetime.fromisoformat(row["created_at"]),
             discord_user_id=row["discord_user_id"],
             discord_channel_id=row["discord_channel_id"],
+            notification_threshold=row["notification_threshold"] or "good",
+            notes=row["notes"] if "notes" in row.keys() else "",
+            search_configs=json.loads(row["search_configs"]) if "search_configs" in row.keys() else [],
         )

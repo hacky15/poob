@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -23,6 +24,10 @@ def _make_listing(
     price: float = 300.0,
     **kwargs,
 ) -> Listing:
+    # Default to a recent timestamp so listings pass the freshness filter.
+    # Tests that specifically test stale filtering can override with posted_at=None.
+    if "posted_at" not in kwargs:
+        kwargs["posted_at"] = datetime.now(timezone.utc)
     return Listing(
         id=f"listing-{external_id}",
         site="facebook_marketplace",
@@ -38,8 +43,12 @@ def _make_interest(
     id: str = "watch-1",
     interest: str = "PS5",
     max_price: float = 500.0,
+    discord_user_id: str = "123456789",
 ) -> WatchItem:
-    return WatchItem(id=id, interest=interest, max_price=max_price)
+    return WatchItem(
+        id=id, interest=interest, max_price=max_price,
+        discord_user_id=discord_user_id,
+    )
 
 
 @pytest.fixture
@@ -60,6 +69,9 @@ def mock_config():
         patrol_sweep_mode="unified",
         deal_radar_max_evaluations=10,
         deal_radar_min_score="good",
+        deal_public_min_score="incredible",
+        deal_watchlist_min_score="good",
+        listing_max_age_hours=6,
     )
 
 
@@ -68,9 +80,6 @@ def mock_browser_manager():
     mgr = AsyncMock()
     page = AsyncMock()
     mgr.get_page = AsyncMock(return_value=page)
-    # get_session() for GraphQL interceptor
-    session = MagicMock()
-    mgr.get_session = MagicMock(return_value=session)
     return mgr
 
 
@@ -105,10 +114,23 @@ def mock_notifier():
     return AsyncMock()
 
 
+def _default_vlm_eval():
+    """Default VLMEvaluation for mocks."""
+    from agentic_scraper.skills.models import VLMEvaluation
+    return VLMEvaluation(
+        item_identified="Generic Item",
+        condition="good",
+        deal_quality="pass",
+        confidence=0.8,
+        reasoning="No deal detected",
+    )
+
+
 @pytest.fixture
 def mock_smart_deal_radar():
     radar = AsyncMock()
-    radar.evaluate = AsyncMock(return_value=None)
+    # evaluate_batch returns list[tuple[Deal | None, VLMEvaluation]]
+    radar.evaluate_batch = AsyncMock(return_value=[])
     return radar
 
 
@@ -144,7 +166,7 @@ def patrol_engine(
     )
 
 
-# --- Phase 1: Sweep + Intercept ---
+# --- Sweep + Intercept ---
 
 
 class TestSweepAndIntercept:
@@ -155,13 +177,7 @@ class TestSweepAndIntercept:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=[],
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = []
             result = await patrol_engine.run_patrol_cycle()
 
@@ -177,13 +193,7 @@ class TestSweepAndIntercept:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=[],
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = []
             result = await patrol_engine.run_patrol_cycle()
 
@@ -192,50 +202,69 @@ class TestSweepAndIntercept:
 
     @pytest.mark.asyncio
     async def test_graphql_data_preferred_over_dom(self, patrol_engine, mock_listing_repo):
-        """When GraphQL intercept returns data, it should be used as primary source."""
-        from agentic_scraper.browser.graphql_interceptor import GraphQLListingData
+        """When JS interceptor captures GraphQL responses, that data should be primary."""
+        from agentic_scraper.scanner.patrol_engine import PatrolCycleResult
 
-        gql_data = [
-            GraphQLListingData(
-                external_id="gql-111",
-                title="PS5 from GraphQL",
-                price=250.0,
-                listing_url="https://facebook.com/marketplace/item/gql-111",
-            )
-        ]
+        page = await patrol_engine._browser.get_page()
+
+        # The JS drain returns captured GraphQL response bodies
+        gql_json = json.dumps({
+            "data": {
+                "marketplace_search": {
+                    "feed_units": {
+                        "edges": [{
+                            "node": {
+                                "listing": {
+                                    "id": "gql-111",
+                                    "marketplace_listing_title": "PS5 from GraphQL",
+                                    "listing_price": {"amount": "250.00", "currency": "USD"},
+                                    "creation_time": int(time.time()),
+                                }
+                            }
+                        }]
+                    }
+                }
+            }
+        })
+
+        # page.evaluate returns different things depending on the script:
+        # - inject script: None
+        # - drain script: list of captured JSON bodies
+        # - sweep also calls evaluate for DOM extraction (handled by sweep mock)
+        call_count = {"n": 0}
+
+        async def mock_evaluate(script):
+            call_count["n"] += 1
+            # Drain call returns captured GraphQL bodies
+            if "__gql_captures" in script and "return" in script:
+                return [gql_json]
+            return None
+
+        page.evaluate = AsyncMock(side_effect=mock_evaluate)
 
         mock_listing_repo.filter_new_ids = AsyncMock(return_value={"gql-111"})
+        result = PatrolCycleResult()
 
         with patch.object(
-            patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=gql_data,
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
+            patrol_engine, "_sweep_categories", new_callable=AsyncMock,
+            return_value=[],  # No DOM listings
         ):
-            mock_sweep.return_value = []
-            result = await patrol_engine.run_patrol_cycle()
+            listings, data_source = await patrol_engine._sweep_and_intercept(page, result)
 
-        assert result.data_source == "graphql"
-        assert result.new_listings == 1
+        assert data_source == "graphql"
+        assert len(listings) == 1
+        assert listings[0].title == "PS5 from GraphQL"
+        assert listings[0].posted_at is not None
 
     @pytest.mark.asyncio
     async def test_dom_fallback_when_graphql_empty(self, patrol_engine, mock_listing_repo):
-        """When GraphQL returns nothing, DOM data should be used."""
+        """When no GraphQL responses are captured, DOM data should be used."""
         dom_listing = _make_listing("dom-111", "Table from DOM", 50.0)
         mock_listing_repo.filter_new_ids = AsyncMock(return_value={"dom-111"})
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=[],
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = [dom_listing]
             result = await patrol_engine.run_patrol_cycle()
 
@@ -243,17 +272,14 @@ class TestSweepAndIntercept:
         assert result.new_listings == 1
 
     @pytest.mark.asyncio
-    async def test_interceptor_failure_uses_dom(self, patrol_engine, mock_listing_repo):
-        """If interceptor start fails, should still work with DOM data."""
+    async def test_empty_graphql_responses_ignored(self, patrol_engine, mock_listing_repo):
+        """Non-marketplace GraphQL responses should be silently ignored."""
         dom_listing = _make_listing("111")
         mock_listing_repo.filter_new_ids = AsyncMock(return_value={"111"})
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-            side_effect=Exception("CDP not available"),
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = [dom_listing]
             result = await patrol_engine.run_patrol_cycle()
 
@@ -261,7 +287,7 @@ class TestSweepAndIntercept:
         assert result.new_listings == 1
 
 
-# --- Phase 2: Batch Dedup ---
+# --- Batch Dedup ---
 
 
 class TestBatchDedup:
@@ -275,13 +301,7 @@ class TestBatchDedup:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=[],
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = listings
             result = await patrol_engine.run_patrol_cycle()
 
@@ -298,13 +318,7 @@ class TestBatchDedup:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=[],
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = listings
             result = await patrol_engine.run_patrol_cycle()
 
@@ -322,13 +336,7 @@ class TestBatchDedup:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=[],
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = listings
             result = await patrol_engine.run_patrol_cycle()
 
@@ -336,7 +344,7 @@ class TestBatchDedup:
         assert mock_listing_repo.save.call_count == 1
 
 
-# --- Phase 3: Evaluation ---
+# --- Evaluation ---
 
 
 class TestEvaluation:
@@ -349,93 +357,109 @@ class TestEvaluation:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=[],
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = listings
             await patrol_engine.run_patrol_cycle()
 
-        assert mock_smart_deal_radar.evaluate.call_count >= 1
+        assert mock_smart_deal_radar.evaluate_batch.call_count >= 1
 
     @pytest.mark.asyncio
-    async def test_interest_match_creates_deal_when_radar_returns_none(
+    async def test_watchlist_deal_from_pipeline(
         self,
         patrol_engine,
         mock_listing_repo,
         mock_watchlist_repo,
         mock_smart_deal_radar,
         mock_deal_repo,
+        mock_notifier,
     ):
+        """Pipeline returns watchlist deals which get DM'd."""
         listing = _make_listing("111", title="PS5 Console Bundle", price=300.0)
         interest = _make_interest("watch-1", "PS5", 500.0)
 
+        watchlist_deal = Deal(
+            listing_id="listing-111",
+            watch_item_id="watch-1",
+            score=DealScore.GOOD,
+            estimated_market_price=450.0,
+            discount_pct=33.0,
+            llm_reasoning="Good deal on PS5",
+        )
+
         mock_listing_repo.filter_new_ids = AsyncMock(return_value={"111"})
         mock_watchlist_repo.list_active = AsyncMock(return_value=[interest])
-        mock_smart_deal_radar.evaluate = AsyncMock(return_value=None)
+        mock_watchlist_repo.get = AsyncMock(return_value=interest)
+        mock_smart_deal_radar.evaluate_batch = AsyncMock(
+            return_value=[(watchlist_deal, _default_vlm_eval())]
+        )
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=[],
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = [listing]
             await patrol_engine.run_patrol_cycle()
 
         assert mock_deal_repo.save.call_count >= 1
+        mock_notifier.send_deal_dm.assert_called()
 
     @pytest.mark.asyncio
-    async def test_radar_deal_takes_precedence_over_interest_match(
+    async def test_radar_returns_base_and_watchlist_deals(
         self,
         patrol_engine,
         mock_listing_repo,
         mock_watchlist_repo,
         mock_smart_deal_radar,
         mock_deal_repo,
+        mock_notifier,
     ):
-        listing = _make_listing("111", title="PS5 Console", price=200.0)
+        """Pipeline can return both base deals and watchlist deals."""
+        listing1 = _make_listing("111", title="PS5 Console", price=200.0)
+        listing2 = _make_listing("222", title="Nice Table", price=30.0)
         interest = _make_interest("watch-1", "PS5", 500.0)
-        radar_deal = Deal(
+
+        base_deal = Deal(
+            listing_id="listing-222",
+            score=DealScore.INCREDIBLE,
+            estimated_market_price=200.0,
+            discount_pct=85.0,
+            llm_reasoning="Incredible table deal",
+        )
+        watchlist_deal = Deal(
             listing_id="listing-111",
+            watch_item_id="watch-1",
             score=DealScore.GREAT,
             estimated_market_price=450.0,
             discount_pct=55.5,
             llm_reasoning="Great deal on PS5",
         )
 
-        mock_listing_repo.filter_new_ids = AsyncMock(return_value={"111"})
+        mock_listing_repo.filter_new_ids = AsyncMock(return_value={"111", "222"})
         mock_watchlist_repo.list_active = AsyncMock(return_value=[interest])
-        mock_smart_deal_radar.evaluate = AsyncMock(return_value=radar_deal)
+        mock_watchlist_repo.get = AsyncMock(return_value=interest)
+        mock_smart_deal_radar.evaluate_batch = AsyncMock(
+            return_value=[
+                (watchlist_deal, _default_vlm_eval()),
+                (base_deal, _default_vlm_eval()),
+            ]
+        )
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=[],
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
-        ):
-            mock_sweep.return_value = [listing]
+        ) as mock_sweep:
+            mock_sweep.return_value = [listing1, listing2]
             await patrol_engine.run_patrol_cycle()
 
-        saved_deal = mock_deal_repo.save.call_args[0][0]
-        assert saved_deal.score == DealScore.GREAT
+        assert mock_deal_repo.save.call_count >= 2
+        mock_notifier.send_deal.assert_called()
+        mock_notifier.send_deal_dm.assert_called()
 
 
-# --- Phase 4: Notify ---
+# --- Notify ---
 
 
 class TestNotify:
     @pytest.mark.asyncio
-    async def test_notifies_on_deals(
+    async def test_public_channel_notifies_incredible_deals(
         self,
         patrol_engine,
         mock_listing_repo,
@@ -443,30 +467,97 @@ class TestNotify:
         mock_notifier,
         mock_deal_repo,
     ):
+        """INCREDIBLE base deals go to the public channel."""
         listing = _make_listing("111")
         deal = Deal(
             listing_id="listing-111",
-            score=DealScore.GOOD,
+            score=DealScore.INCREDIBLE,
             estimated_market_price=500.0,
-            discount_pct=40.0,
-            llm_reasoning="Good deal",
+            discount_pct=70.0,
+            llm_reasoning="Incredible deal",
         )
         mock_listing_repo.filter_new_ids = AsyncMock(return_value={"111"})
-        mock_smart_deal_radar.evaluate = AsyncMock(return_value=deal)
+        mock_smart_deal_radar.evaluate_batch = AsyncMock(
+            return_value=[(deal, _default_vlm_eval())]
+        )
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=[],
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = [listing]
             await patrol_engine.run_patrol_cycle()
 
         mock_notifier.send_deal.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_public_channel_skips_good_deals(
+        self,
+        patrol_engine,
+        mock_listing_repo,
+        mock_smart_deal_radar,
+        mock_notifier,
+        mock_deal_repo,
+    ):
+        """GOOD base deals should NOT go to the public channel (requires INCREDIBLE)."""
+        listing = _make_listing("111", title="Random Item", price=50.0)
+        deal = Deal(
+            listing_id="listing-111",
+            score=DealScore.GOOD,
+            estimated_market_price=100.0,
+            discount_pct=50.0,
+        )
+        mock_listing_repo.filter_new_ids = AsyncMock(return_value={"111"})
+        mock_smart_deal_radar.evaluate_batch = AsyncMock(
+            return_value=[(deal, _default_vlm_eval())]
+        )
+
+        with patch.object(
+            patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
+        ) as mock_sweep:
+            mock_sweep.return_value = [listing]
+            await patrol_engine.run_patrol_cycle()
+
+        mock_notifier.send_deal.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_watchlist_dm_sent_for_good_deal(
+        self,
+        patrol_engine,
+        mock_listing_repo,
+        mock_watchlist_repo,
+        mock_smart_deal_radar,
+        mock_notifier,
+        mock_deal_repo,
+    ):
+        """GOOD watchlist deals should be DM'd to the user who owns the watch item."""
+        listing = _make_listing("111", title="PS5 Console Bundle", price=300.0)
+        interest = _make_interest("watch-1", "PS5", 500.0, discord_user_id="987654321")
+
+        watchlist_deal = Deal(
+            listing_id="listing-111",
+            watch_item_id="watch-1",
+            score=DealScore.GOOD,
+            estimated_market_price=450.0,
+            discount_pct=33.0,
+            llm_reasoning="Good deal on PS5",
+        )
+        mock_listing_repo.filter_new_ids = AsyncMock(return_value={"111"})
+        mock_watchlist_repo.list_active = AsyncMock(return_value=[interest])
+        mock_watchlist_repo.get = AsyncMock(return_value=interest)
+        mock_smart_deal_radar.evaluate_batch = AsyncMock(
+            return_value=[(watchlist_deal, _default_vlm_eval())]
+        )
+
+        with patch.object(
+            patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
+        ) as mock_sweep:
+            mock_sweep.return_value = [listing]
+            await patrol_engine.run_patrol_cycle()
+
+        mock_notifier.send_deal_dm.assert_called()
+        call_kwargs = mock_notifier.send_deal_dm.call_args
+        assert call_kwargs[1]["discord_user_id"] == 987654321
+        assert call_kwargs[1]["watch_interest"] == "PS5"
 
     @pytest.mark.asyncio
     async def test_no_notification_when_no_deals(
@@ -476,17 +567,12 @@ class TestNotify:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=[],
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = [_make_listing("111")]
             await patrol_engine.run_patrol_cycle()
 
         mock_notifier.send_deal.assert_not_called()
+        mock_notifier.send_deal_dm.assert_not_called()
 
 
 # --- Shadow Ban Detection ---
@@ -500,13 +586,7 @@ class TestShadowBanDetection:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=[],
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = []
 
             # Run 3 empty cycles
@@ -522,13 +602,7 @@ class TestShadowBanDetection:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=[],
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = [_make_listing("111")]
             result = await patrol_engine.run_patrol_cycle()
 
@@ -545,13 +619,7 @@ class TestScanLogging:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=[],
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = []
             await patrol_engine.run_patrol_cycle()
 
@@ -574,13 +642,7 @@ class TestPatrolCycleResult:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=[],
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = []
             result = await patrol_engine.run_patrol_cycle()
 
@@ -598,22 +660,18 @@ class TestPatrolCycleResult:
         listing = _make_listing("111")
         deal = Deal(
             listing_id="listing-111",
-            score=DealScore.GOOD,
+            score=DealScore.INCREDIBLE,
             estimated_market_price=500.0,
-            discount_pct=40.0,
+            discount_pct=70.0,
         )
         mock_listing_repo.filter_new_ids = AsyncMock(return_value={"111"})
-        mock_smart_deal_radar.evaluate = AsyncMock(return_value=deal)
+        mock_smart_deal_radar.evaluate_batch = AsyncMock(
+            return_value=[(deal, _default_vlm_eval())]
+        )
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=[],
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = [listing]
             result = await patrol_engine.run_patrol_cycle()
 
@@ -633,12 +691,6 @@ class TestErrorHandling:
         with patch.object(
             patrol_engine._scanner, "sweep_category",
             side_effect=Exception("Network error"),
-        ), patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=[],
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
         ):
             result = await patrol_engine.run_patrol_cycle()
 
@@ -648,23 +700,489 @@ class TestErrorHandling:
     async def test_radar_error_doesnt_crash_cycle(
         self, patrol_engine, mock_listing_repo, mock_smart_deal_radar,
     ):
-        """SmartDealRadar failure on one listing shouldn't kill the cycle."""
+        """SmartDealRadar batch failure shouldn't kill the cycle."""
         mock_listing_repo.filter_new_ids = AsyncMock(return_value={"111"})
-        mock_smart_deal_radar.evaluate = AsyncMock(
+        mock_smart_deal_radar.evaluate_batch = AsyncMock(
             side_effect=Exception("LLM timeout")
         )
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep, patch.object(
-            patrol_engine._interceptor, "start", new_callable=AsyncMock,
-        ), patch.object(
-            patrol_engine._interceptor, "drain", return_value=[],
-        ), patch.object(
-            patrol_engine._interceptor, "stop", new_callable=AsyncMock,
-        ):
+        ) as mock_sweep:
             mock_sweep.return_value = [_make_listing("111")]
             result = await patrol_engine.run_patrol_cycle()
 
         assert result is not None
         assert result.deals_found == 0
+
+
+# --- Stale Listing Filtering ---
+
+
+class TestStaleFiltering:
+    def test_filters_stale_listings(self, patrol_engine):
+        """Listings older than max_age_hours should be filtered out."""
+        now = datetime.now(timezone.utc)
+        fresh = _make_listing("111", posted_at=now - timedelta(hours=1))
+        stale = _make_listing("222", posted_at=now - timedelta(hours=12))
+
+        result = patrol_engine._filter_stale([fresh, stale])
+        assert len(result) == 1
+        assert result[0].external_id == "111"
+
+    def test_keeps_listings_without_timestamp(self, patrol_engine):
+        """No-timestamp listings should be KEPT (DOM scraper can't extract dates,
+        but page is sorted newest-first so they're likely fresh)."""
+        no_ts = _make_listing("111", posted_at=None)
+        assert no_ts.posted_at is None
+
+        result = patrol_engine._filter_stale([no_ts])
+        assert len(result) == 1
+
+    def test_no_timestamp_mixed_with_fresh(self, patrol_engine):
+        """No-timestamp listings and fresh ones both pass through."""
+        now = datetime.now(timezone.utc)
+        fresh = _make_listing("111", posted_at=now - timedelta(hours=1))
+        no_ts = _make_listing("222", posted_at=None)
+
+        result = patrol_engine._filter_stale([fresh, no_ts])
+        assert len(result) == 2
+
+    def test_disabled_when_max_age_zero(self, patrol_engine, mock_config):
+        """Setting listing_max_age_hours=0 disables filtering (keeps everything)."""
+        mock_config.listing_max_age_hours = 0
+        stale = _make_listing(
+            "111", posted_at=datetime.now(timezone.utc) - timedelta(days=30)
+        )
+        no_ts = _make_listing("222", posted_at=None)
+
+        result = patrol_engine._filter_stale([stale, no_ts])
+        assert len(result) == 2
+
+    def test_just_inside_cutoff_is_kept(self, patrol_engine):
+        """Listing just inside the cutoff window should be kept."""
+        just_fresh = _make_listing(
+            "111", posted_at=datetime.now(timezone.utc) - timedelta(hours=5, minutes=59)
+        )
+
+        result = patrol_engine._filter_stale([just_fresh])
+        assert len(result) == 1
+
+    def test_exempt_ids_bypass_no_timestamp_discard(self, patrol_engine):
+        """Watchlist-matched listings should survive despite no timestamp."""
+        no_ts = _make_listing("111", title="PS5 Console", posted_at=None)
+
+        result = patrol_engine._filter_stale([no_ts], exempt_ids={"111"})
+        assert len(result) == 1
+        assert result[0].external_id == "111"
+
+    def test_all_no_timestamp_kept_regardless_of_exempt(self, patrol_engine):
+        """All no-timestamp listings are kept (page sorted newest-first)."""
+        no_ts_exempt = _make_listing("111", title="PS5 Console", posted_at=None)
+        no_ts_normal = _make_listing("222", title="Random Thing", posted_at=None)
+        now = datetime.now(timezone.utc)
+        fresh = _make_listing("333", posted_at=now - timedelta(hours=1))
+
+        result = patrol_engine._filter_stale(
+            [no_ts_exempt, no_ts_normal, fresh],
+            exempt_ids={"111"},
+        )
+        assert len(result) == 3
+        ids = {l.external_id for l in result}
+        assert "111" in ids  # no timestamp, kept
+        assert "222" in ids  # no timestamp, kept
+        assert "333" in ids  # has timestamp, fresh, kept
+
+    def test_stale_listings_not_saved_by_exempt(self, patrol_engine):
+        """Exempt IDs should NOT protect actually-stale listings (with old timestamps)."""
+        now = datetime.now(timezone.utc)
+        stale_exempt = _make_listing(
+            "111", posted_at=now - timedelta(hours=24)
+        )
+
+        result = patrol_engine._filter_stale([stale_exempt], exempt_ids={"111"})
+        assert len(result) == 0  # has timestamp, and it's stale — still filtered
+
+    def test_sponsored_listings_always_filtered(self, patrol_engine):
+        """Sponsored listings should be discarded regardless of timestamp."""
+        now = datetime.now(timezone.utc)
+        sponsored = _make_listing("111", posted_at=now, is_sponsored=True)
+        organic = _make_listing("222", posted_at=now)
+
+        result = patrol_engine._filter_stale([sponsored, organic])
+        assert len(result) == 1
+        assert result[0].external_id == "222"
+
+    def test_sponsored_without_timestamp_also_filtered(self, patrol_engine):
+        """Sponsored listings without timestamps are still discarded."""
+        sponsored = _make_listing("111", posted_at=None, is_sponsored=True)
+
+        result = patrol_engine._filter_stale([sponsored])
+        assert len(result) == 0
+
+    def test_sponsored_exempt_still_filtered(self, patrol_engine):
+        """Exempt IDs should NOT protect sponsored listings."""
+        sponsored = _make_listing("111", posted_at=None, is_sponsored=True)
+
+        result = patrol_engine._filter_stale([sponsored], exempt_ids={"111"})
+        assert len(result) == 0
+
+    def test_sponsored_filtered_even_when_disabled(self, patrol_engine, mock_config):
+        """Sponsored filtering works even when listing_max_age_hours=0."""
+        mock_config.listing_max_age_hours = 0
+        now = datetime.now(timezone.utc)
+        sponsored = _make_listing("111", posted_at=now, is_sponsored=True)
+        organic = _make_listing("222", posted_at=now)
+
+        result = patrol_engine._filter_stale([sponsored, organic])
+        assert len(result) == 1
+        assert result[0].external_id == "222"
+
+
+# --- Sort Order Verification ---
+
+
+class TestSortVerification:
+    def test_sorted_listings_no_warning(self, patrol_engine):
+        """Properly sorted listings should not trigger a warning."""
+        now = datetime.now(timezone.utc)
+        listings = [
+            _make_listing("1", posted_at=now - timedelta(minutes=5)),
+            _make_listing("2", posted_at=now - timedelta(minutes=10)),
+        ]
+        patrol_engine._verify_sort_order(listings)  # should not raise
+
+    def test_unsorted_listings_warns(self, patrol_engine, capsys):
+        """Out-of-order timestamps should produce a warning log."""
+        now = datetime.now(timezone.utc)
+        listings = [
+            _make_listing("1", posted_at=now - timedelta(hours=3)),  # older
+            _make_listing("2", posted_at=now - timedelta(minutes=5)),  # newer = violation
+        ]
+        patrol_engine._verify_sort_order(listings)
+        captured = capsys.readouterr()
+        assert "Sort order verification failed" in captured.out
+
+    def test_no_timestamps_skips_check(self, patrol_engine):
+        """Listings without timestamps should be silently skipped."""
+        listings = [
+            _make_listing("1", posted_at=None),
+            _make_listing("2", posted_at=None),
+        ]
+        patrol_engine._verify_sort_order(listings)  # should not raise
+
+    def test_single_listing_skips_check(self, patrol_engine):
+        """Single listing cannot violate sort order."""
+        now = datetime.now(timezone.utc)
+        listings = [_make_listing("1", posted_at=now)]
+        patrol_engine._verify_sort_order(listings)  # should not raise
+
+
+# --- GraphQL Timestamp Parsing ---
+
+
+class TestGraphQLTimestampParsing:
+    def test_creation_time_parsed_to_posted_at(self):
+        """GraphQL creation_time should be parsed into Listing.posted_at."""
+        from agentic_scraper.browser.graphql_interceptor import GraphQLListingData
+        from agentic_scraper.scanner.patrol_engine import _graphql_to_listing
+
+        gql = GraphQLListingData(
+            external_id="123",
+            title="Test Item",
+            price=100.0,
+            posted_at="1709337600",  # 2024-03-02 00:00:00 UTC
+        )
+        listing = _graphql_to_listing(gql)
+        assert listing.posted_at is not None
+        assert listing.posted_at.year >= 2024
+
+    def test_invalid_creation_time_sets_none(self):
+        """Invalid creation_time should result in posted_at=None."""
+        from agentic_scraper.browser.graphql_interceptor import GraphQLListingData
+        from agentic_scraper.scanner.patrol_engine import _graphql_to_listing
+
+        gql = GraphQLListingData(
+            external_id="123",
+            title="Test Item",
+            posted_at="not-a-number",
+        )
+        listing = _graphql_to_listing(gql)
+        assert listing.posted_at is None
+
+    def test_no_creation_time_sets_none(self):
+        """Missing creation_time should result in posted_at=None."""
+        from agentic_scraper.browser.graphql_interceptor import GraphQLListingData
+        from agentic_scraper.scanner.patrol_engine import _graphql_to_listing
+
+        gql = GraphQLListingData(external_id="123", title="Test Item")
+        listing = _graphql_to_listing(gql)
+        assert listing.posted_at is None
+
+
+# --- Freshness Text Parsing ---
+
+
+class TestFreshnessParsing:
+    def test_just_listed(self):
+        from agentic_scraper.sites.facebook.parser import _parse_freshness
+
+        result = _parse_freshness("Just listed")
+        assert result is not None
+        assert (datetime.now(timezone.utc) - result).total_seconds() < 5
+
+    def test_minutes_ago(self):
+        from agentic_scraper.sites.facebook.parser import _parse_freshness
+
+        result = _parse_freshness("Listed 30 minutes ago")
+        assert result is not None
+        diff = (datetime.now(timezone.utc) - result).total_seconds()
+        assert 1700 < diff < 1900  # ~30 minutes
+
+    def test_hours_ago(self):
+        from agentic_scraper.sites.facebook.parser import _parse_freshness
+
+        result = _parse_freshness("Listed 2 hours ago")
+        assert result is not None
+        diff = (datetime.now(timezone.utc) - result).total_seconds()
+        assert 7000 < diff < 7400  # ~2 hours
+
+    def test_yesterday(self):
+        from agentic_scraper.sites.facebook.parser import _parse_freshness
+
+        result = _parse_freshness("Listed yesterday")
+        assert result is not None
+        diff = (datetime.now(timezone.utc) - result).total_seconds()
+        assert 85000 < diff < 87000  # ~24 hours
+
+    def test_days_ago(self):
+        from agentic_scraper.sites.facebook.parser import _parse_freshness
+
+        result = _parse_freshness("Listed 3 days ago")
+        assert result is not None
+        diff = (datetime.now(timezone.utc) - result).total_seconds()
+        assert 258000 < diff < 260000  # ~3 days
+
+    def test_empty_string(self):
+        from agentic_scraper.sites.facebook.parser import _parse_freshness
+
+        assert _parse_freshness("") is None
+
+    def test_unknown_format(self):
+        from agentic_scraper.sites.facebook.parser import _parse_freshness
+
+        assert _parse_freshness("Some random text") is None
+
+
+# --- Watchlist Exemption from Stale Filter ---
+
+
+class TestWatchlistExemption:
+    @pytest.mark.asyncio
+    async def test_watchlist_match_survives_no_timestamp(
+        self,
+        patrol_engine,
+        mock_listing_repo,
+        mock_watchlist_repo,
+        mock_smart_deal_radar,
+        mock_deal_repo,
+        mock_notifier,
+    ):
+        """Watchlist-matched listings without timestamps should survive stale filter."""
+        # Listing from DOM keyword search — no freshness tag → posted_at=None
+        listing = _make_listing("111", title="PS5 Console Bundle", price=300.0, posted_at=None)
+        interest = _make_interest("watch-1", "PS5", 500.0, discord_user_id="987654321")
+
+        watchlist_deal = Deal(
+            listing_id="listing-111",
+            watch_item_id="watch-1",
+            score=DealScore.GOOD,
+            estimated_market_price=450.0,
+            discount_pct=33.0,
+            llm_reasoning="Good deal on PS5",
+        )
+
+        mock_listing_repo.filter_new_ids = AsyncMock(return_value={"111"})
+        mock_watchlist_repo.list_active = AsyncMock(return_value=[interest])
+        mock_watchlist_repo.get = AsyncMock(return_value=interest)
+        mock_smart_deal_radar.evaluate_batch = AsyncMock(
+            return_value=[(watchlist_deal, _default_vlm_eval())]
+        )
+
+        with patch.object(
+            patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
+        ) as mock_sweep:
+            mock_sweep.return_value = [listing]
+            result = await patrol_engine.run_patrol_cycle()
+
+        # The listing should NOT be discarded — it matches watchlist interest "PS5"
+        mock_notifier.send_deal_dm.assert_called()
+        call_kwargs = mock_notifier.send_deal_dm.call_args
+        assert call_kwargs[1]["discord_user_id"] == 987654321
+
+    @pytest.mark.asyncio
+    async def test_non_matching_no_timestamp_still_discarded(
+        self,
+        patrol_engine,
+        mock_listing_repo,
+        mock_watchlist_repo,
+        mock_smart_deal_radar,
+        mock_notifier,
+    ):
+        """No-timestamp listings that DON'T match watchlist should still be discarded."""
+        listing = _make_listing("111", title="Random Couch", price=50.0, posted_at=None)
+        interest = _make_interest("watch-1", "PS5", 500.0)
+
+        mock_listing_repo.filter_new_ids = AsyncMock(return_value={"111"})
+        mock_watchlist_repo.list_active = AsyncMock(return_value=[interest])
+        mock_smart_deal_radar.evaluate_batch = AsyncMock(return_value=[])
+
+        with patch.object(
+            patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
+        ) as mock_sweep:
+            mock_sweep.return_value = [listing]
+            result = await patrol_engine.run_patrol_cycle()
+
+        # "Random Couch" doesn't match "PS5" → no exemption → discarded → no DM
+        mock_notifier.send_deal_dm.assert_not_called()
+        mock_notifier.send_deal.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mixed_watchlist_and_normal_listings(
+        self,
+        patrol_engine,
+        mock_listing_repo,
+        mock_watchlist_repo,
+        mock_smart_deal_radar,
+        mock_deal_repo,
+        mock_notifier,
+    ):
+        """Mix of timestamped, no-timestamp matching, and no-timestamp non-matching."""
+        now = datetime.now(timezone.utc)
+        # Fresh listing with timestamp (passes filter normally)
+        fresh = _make_listing("111", title="Table", price=50.0, posted_at=now)
+        # No timestamp but matches watchlist (should be exempted)
+        exempt = _make_listing("222", title="PS5 Disc Edition", price=250.0, posted_at=None)
+        # No timestamp, doesn't match watchlist (should be discarded)
+        discard = _make_listing("333", title="Random Junk", price=10.0, posted_at=None)
+
+        interest = _make_interest("watch-1", "PS5", 500.0, discord_user_id="123")
+
+        watchlist_deal = Deal(
+            listing_id="listing-222",
+            watch_item_id="watch-1",
+            score=DealScore.GOOD,
+            estimated_market_price=400.0,
+            discount_pct=37.5,
+            llm_reasoning="Good deal on PS5",
+        )
+
+        mock_listing_repo.filter_new_ids = AsyncMock(return_value={"111", "222", "333"})
+        mock_watchlist_repo.list_active = AsyncMock(return_value=[interest])
+        mock_watchlist_repo.get = AsyncMock(return_value=interest)
+        mock_smart_deal_radar.evaluate_batch = AsyncMock(
+            return_value=[(watchlist_deal, _default_vlm_eval())]
+        )
+
+        with patch.object(
+            patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
+        ) as mock_sweep:
+            mock_sweep.return_value = [fresh, exempt, discard]
+            result = await patrol_engine.run_patrol_cycle()
+
+        # 3 new listings, but only 2 survive the stale filter (fresh + exempt)
+        # The PS5 exempt listing should trigger a watchlist DM
+        mock_notifier.send_deal_dm.assert_called()
+
+
+class TestWatchlistSweepMultiConfig:
+    """Test _sweep_watchlist_items iterates over search_configs per WatchItem."""
+
+    @pytest.mark.asyncio
+    async def test_empty_search_configs_uses_single_default(
+        self, patrol_engine, mock_watchlist_repo
+    ):
+        """When search_configs is empty, one sweep_search call with global defaults."""
+        item = _make_interest(interest="TV", max_price=200.0)
+        item.search_configs = []
+        mock_watchlist_repo.list_active = AsyncMock(return_value=[item])
+
+        from agentic_scraper.scanner.patrol_engine import PatrolCycleResult
+
+        with patch.object(
+            patrol_engine._scanner, "sweep_search", new_callable=AsyncMock
+        ) as mock_sweep:
+            mock_sweep.return_value = [_make_listing("111", title="TV")]
+            result = PatrolCycleResult()
+            listings = await patrol_engine._sweep_watchlist_items(MagicMock(), result)
+
+            assert len(listings) == 1
+            mock_sweep.assert_called_once()
+            call_kwargs = mock_sweep.call_args
+            assert call_kwargs[1]["max_price"] == 200.0
+            assert call_kwargs[1]["location_slug"] is None
+            assert call_kwargs[1]["condition"] is None
+
+    @pytest.mark.asyncio
+    async def test_multi_config_runs_multiple_searches(
+        self, patrol_engine, mock_watchlist_repo
+    ):
+        """Each search_config entry triggers a separate sweep_search call."""
+        item = _make_interest(interest="couch", max_price=300.0)
+        item.search_configs = [
+            {"location": "madison", "radius_miles": 20, "condition": "used_good"},
+            {"location": "appleton", "radius_miles": 40, "max_price": 0},
+        ]
+        mock_watchlist_repo.list_active = AsyncMock(return_value=[item])
+
+        from agentic_scraper.scanner.patrol_engine import PatrolCycleResult
+
+        with patch.object(
+            patrol_engine._scanner, "sweep_search", new_callable=AsyncMock
+        ) as mock_sweep:
+            mock_sweep.side_effect = [
+                [_make_listing("111", title="Couch Madison")],
+                [_make_listing("222", title="Couch Appleton")],
+            ]
+            result = PatrolCycleResult()
+            listings = await patrol_engine._sweep_watchlist_items(MagicMock(), result)
+
+            assert len(listings) == 2
+            assert mock_sweep.call_count == 2
+
+            # Check first call
+            first_call = mock_sweep.call_args_list[0]
+            assert first_call[1]["location_slug"] == "madison"
+            assert first_call[1]["radius_miles"] == 20
+            assert first_call[1]["condition"] == "used_good"
+            assert first_call[1]["max_price"] == 300.0  # from item.max_price
+
+            # Check second call
+            second_call = mock_sweep.call_args_list[1]
+            assert second_call[1]["location_slug"] == "appleton"
+            assert second_call[1]["radius_miles"] == 40
+            assert second_call[1]["max_price"] == 0  # overridden by config
+
+    @pytest.mark.asyncio
+    async def test_dedup_across_configs(
+        self, patrol_engine, mock_watchlist_repo
+    ):
+        """Same listing from overlapping searches should not be duplicated."""
+        item = _make_interest(interest="desk")
+        item.search_configs = [
+            {"location": "madison", "radius_miles": 20},
+            {"location": "appleton", "radius_miles": 40},
+        ]
+        mock_watchlist_repo.list_active = AsyncMock(return_value=[item])
+        same_listing = _make_listing("111", title="Desk")
+
+        from agentic_scraper.scanner.patrol_engine import PatrolCycleResult
+
+        with patch.object(
+            patrol_engine._scanner, "sweep_search", new_callable=AsyncMock
+        ) as mock_sweep:
+            mock_sweep.side_effect = [[same_listing], [same_listing]]
+            result = PatrolCycleResult()
+            listings = await patrol_engine._sweep_watchlist_items(MagicMock(), result)
+
+            assert len(listings) == 1  # deduped

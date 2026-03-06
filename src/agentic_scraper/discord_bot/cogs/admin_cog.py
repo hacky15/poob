@@ -55,5 +55,5 @@ class AdminCog(commands.Cog, name="Admin"):
 
         Usage: !logs 10
         """
-        # Stub - will be wired to scan_log_repo in Phase 4
-        await ctx.send(f"Fetching last {count} scan logs... (coming in Phase 4)")
+        # TODO: Wire to scan_log_repo
+        await ctx.send(f"Fetching last {count} scan logs... (not yet implemented)")

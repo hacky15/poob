@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 
 from langchain_core.messages import HumanMessage
 
-from agentic_scraper.skills.models import ItemIdentification
+from agentic_scraper.skills.llm_call import llm_call
+from agentic_scraper.skills.models import ItemIdentification, clean_optional
 from agentic_scraper.skills.prompts import IDENTIFY_ITEM_PROMPT
 from agentic_scraper.utils.logging import get_logger
 
@@ -44,7 +45,9 @@ class IdentifyItemTool:
         )
 
         try:
-            response = await self._llm.ainvoke([HumanMessage(content=prompt)])
+            response = await llm_call(
+                self._llm, [HumanMessage(content=prompt)], skill="identify",
+            )
             return self._parse_response(response.content)
         except Exception as exc:
             log.warning("Item identification failed", error=str(exc), title=title)
@@ -81,10 +84,10 @@ class IdentifyItemTool:
 
         return ItemIdentification(
             item_name=str(data.get("item_name", "")),
-            brand=data.get("brand"),
-            model=data.get("model"),
+            brand=clean_optional(data.get("brand")),
+            model=clean_optional(data.get("model")),
             category=str(data.get("category", "")),
-            condition=data.get("condition"),
+            condition=clean_optional(data.get("condition")),
             confidence=float(data.get("confidence", 0.0)),
             needs_visual=bool(data.get("needs_visual", False)),
             urgency_signals=signals,

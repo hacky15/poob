@@ -35,6 +35,7 @@ class Listing:
     posted_at: datetime | None = None
     scraped_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     raw_data: dict = field(default_factory=dict)
+    is_sponsored: bool = False
 
 
 @dataclass
@@ -52,6 +53,33 @@ class WatchItem:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     discord_user_id: str = ""
     discord_channel_id: str = ""
+    notification_threshold: str = "good"  # "all" | "good" | "great" | "incredible" | "free"
+    notes: str = ""  # User preference filters (e.g., "not metal", "no IKEA")
+    search_configs: list[dict] = field(default_factory=list)
+    # Per-search configs: [{"location": "madison", "radius_miles": 20, "condition": "good", ...}]
+    # When empty, uses global patrol defaults.
+
+
+@dataclass
+class DealFeedback:
+    """User feedback on a deal notification via Discord reactions."""
+
+    id: str | None = None
+    deal_id: str = ""
+    discord_user_id: str = ""
+    feedback_type: str = ""  # "claimed" | "overpriced" | "scam" | "not_interested"
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass
+class ExclusionItem:
+    """An item/keyword to exclude from general search results and deal notifications."""
+
+    id: str | None = None
+    keyword: str = ""
+    discord_user_id: str = ""
+    is_active: bool = True
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass

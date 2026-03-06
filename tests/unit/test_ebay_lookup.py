@@ -1,81 +1,104 @@
-"""Tests for EbayLookupTool - eBay sold price lookup."""
+"""Tests for EbayLookupTool - eBay sold price lookup via Tavily."""
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from agentic_scraper.skills.models import PriceLookupResult
 
 
-# Minimal eBay sold listings HTML fixture
-EBAY_SOLD_HTML = """
-<html><body>
-<ul class="srp-results">
-  <li class="s-item">
-    <span class="s-item__title">Sony PS5 Disc Edition Console</span>
-    <span class="s-item__price">$350.00</span>
-  </li>
-  <li class="s-item">
-    <span class="s-item__title">PS5 Disc Edition Bundle w/ Controller</span>
-    <span class="s-item__price">$380.00</span>
-  </li>
-  <li class="s-item">
-    <span class="s-item__title">PlayStation 5 Disc Console - Used</span>
-    <span class="s-item__price">$320.00</span>
-  </li>
-  <li class="s-item">
-    <span class="s-item__title">PS5 Disc Edition White</span>
-    <span class="s-item__price">$340.00</span>
-  </li>
-  <li class="s-item">
-    <span class="s-item__title">PS5 Controller DualSense - White</span>
-    <span class="s-item__price">$35.00</span>
-  </li>
-</ul>
-</body></html>
-"""
+class TestExtractPricesFromText:
+    """Tests for extracting prices from search result text."""
+
+    def test_extract_prices_from_text(self):
+        """Should extract dollar prices from plain text."""
+        from agentic_scraper.skills.ebay_lookup import extract_prices_from_text
+
+        text = (
+            "Sony PS5 Disc Edition Console sold for $350.00\n"
+            "PS5 Bundle w/ Controller - $380.00\n"
+            "PlayStation 5 Used - $320.00\n"
+        )
+        prices = extract_prices_from_text(text)
+
+        assert len(prices) == 3
+        assert 320.0 in prices
+        assert 350.0 in prices
+        assert 380.0 in prices
+
+    def test_extract_prices_filters_outliers(self):
+        """Should filter prices below $1 and above $50,000."""
+        from agentic_scraper.skills.ebay_lookup import extract_prices_from_text
+
+        text = "Item sold for $0.50 another at $100.00 and $99,999.99"
+        prices = extract_prices_from_text(text)
+
+        assert prices == [100.0]
+
+    def test_extract_prices_handles_commas(self):
+        """Should parse comma-separated prices like $1,500.00."""
+        from agentic_scraper.skills.ebay_lookup import extract_prices_from_text
+
+        text = "Sold for $1,500.00 and $2,300.50"
+        prices = extract_prices_from_text(text)
+
+        assert 1500.0 in prices
+        assert 2300.50 in prices
+
+    def test_extract_prices_empty_text(self):
+        """Should return empty list for text with no prices."""
+        from agentic_scraper.skills.ebay_lookup import extract_prices_from_text
+
+        assert extract_prices_from_text("No prices here") == []
+        assert extract_prices_from_text("") == []
 
 
-class TestEbayHtmlParser:
-    """Tests for parsing eBay search results HTML."""
+class TestSanitizeSearchQuery:
+    """Tests for _sanitize_search_query — defense against Tavily 432 errors."""
 
-    def test_parse_prices_from_html(self):
-        """Should extract prices from eBay sold listings HTML."""
-        from agentic_scraper.skills.ebay_lookup import parse_ebay_sold_html
+    def test_strips_amazon_prefix(self):
+        from agentic_scraper.skills.ebay_lookup import _sanitize_search_query
 
-        items = parse_ebay_sold_html(EBAY_SOLD_HTML)
+        assert _sanitize_search_query("Amazon.com: TCL 85 Class TV") == "TCL 85 Class TV"
 
-        assert len(items) >= 4
-        titles = [item["title"] for item in items]
-        prices = [item["price"] for item in items]
-        assert any("PS5" in t for t in titles)
-        assert all(isinstance(p, float) for p in prices)
+    def test_strips_walmart_prefix(self):
+        from agentic_scraper.skills.ebay_lookup import _sanitize_search_query
 
-    def test_parse_empty_html(self):
-        """Should return empty list for pages with no results."""
-        from agentic_scraper.skills.ebay_lookup import parse_ebay_sold_html
+        assert _sanitize_search_query("Walmart.com: Crockpot 6qt") == "Crockpot 6qt"
 
-        items = parse_ebay_sold_html("<html><body>No results</body></html>")
-        assert items == []
+    def test_strips_trailing_ellipsis(self):
+        from agentic_scraper.skills.ebay_lookup import _sanitize_search_query
 
-    def test_parse_handles_price_ranges(self):
-        """Should handle price range formats like '$100.00 to $200.00'."""
-        from agentic_scraper.skills.ebay_lookup import parse_ebay_sold_html
+        result = _sanitize_search_query("Some Product Name...")
+        assert not result.endswith(".")
 
-        html = """
-        <ul class="srp-results">
-          <li class="s-item">
-            <span class="s-item__title">Test Item</span>
-            <span class="s-item__price">$100.00 to $200.00</span>
-          </li>
-        </ul>
-        """
-        items = parse_ebay_sold_html(html)
-        # Should take the first price in a range
-        assert len(items) == 1
-        assert items[0]["price"] == 100.0
+    def test_strips_quotes_and_ampersands(self):
+        from agentic_scraper.skills.ebay_lookup import _sanitize_search_query
+
+        result = _sanitize_search_query('80\'s & 90\'s VTG Lot of 30 Pillsbury')
+        assert '"' not in result
+        assert "'" not in result
+        assert "&" not in result
+        assert "and" in result
+
+    def test_truncates_long_names(self):
+        from agentic_scraper.skills.ebay_lookup import _sanitize_search_query
+
+        long_name = "A " * 60  # 120 chars
+        result = _sanitize_search_query(long_name)
+        assert len(result) <= 80
+
+    def test_returns_empty_for_only_special_chars(self):
+        from agentic_scraper.skills.ebay_lookup import _sanitize_search_query
+
+        assert _sanitize_search_query("...") == ""
+
+    def test_passthrough_clean_name(self):
+        from agentic_scraper.skills.ebay_lookup import _sanitize_search_query
+
+        assert _sanitize_search_query("IKEA MALM desk") == "IKEA MALM desk"
 
 
 class TestEbayPriceStats:
@@ -132,86 +155,76 @@ class TestEbayPriceStats:
 class TestEbayLookupTool:
     """Tests for the EbayLookupTool high-level interface."""
 
-    async def test_http_lookup_success(self):
-        """Should return price data when HTTP scraping succeeds."""
+    async def test_tavily_lookup_success(self):
+        """Should return price data when Tavily search succeeds."""
         from agentic_scraper.skills.ebay_lookup import EbayLookupTool
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = EBAY_SOLD_HTML
+        mock_search = AsyncMock()
+        mock_search.search = AsyncMock(return_value=(
+            "PS5 Disc Edition sold for $350.00\n"
+            "PS5 Console Used - $320.00\n"
+            "PlayStation 5 Bundle - $380.00\n"
+        ))
 
-        with patch("agentic_scraper.skills.ebay_lookup.httpx.AsyncClient") as mock_client_cls:
-            mock_client = AsyncMock()
-            mock_client.get = AsyncMock(return_value=mock_response)
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client_cls.return_value = mock_client
-
-            tool = EbayLookupTool(timeout_seconds=10)
-            result = await tool.run("PS5 Disc Edition")
+        tool = EbayLookupTool(search_provider=mock_search)
+        result = await tool.run("PS5 Disc Edition")
 
         assert isinstance(result, PriceLookupResult)
-        assert result.sample_count > 0
+        assert result.sample_count == 3
         assert result.source == "ebay_sold"
+        assert result.median_price == 350.0
 
-    async def test_http_failure_returns_empty(self):
-        """Should return empty result when HTTP scraping fails."""
+    async def test_tavily_empty_results(self):
+        """Should return empty result when search returns nothing."""
         from agentic_scraper.skills.ebay_lookup import EbayLookupTool
 
-        with patch("agentic_scraper.skills.ebay_lookup.httpx.AsyncClient") as mock_client_cls:
-            mock_client = AsyncMock()
-            mock_client.get = AsyncMock(side_effect=Exception("Connection failed"))
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client_cls.return_value = mock_client
+        mock_search = AsyncMock()
+        mock_search.search = AsyncMock(return_value="")
 
-            tool = EbayLookupTool(timeout_seconds=5)
-            result = await tool.run("PS5 Disc Edition")
+        tool = EbayLookupTool(search_provider=mock_search)
+        result = await tool.run("PS5 Disc Edition")
 
         assert result.sample_count == 0
         assert result.confidence == 0.0
 
-    async def test_builds_correct_ebay_url(self):
-        """Should construct eBay sold items search URL correctly."""
+    async def test_tavily_error_returns_empty(self):
+        """Should return empty result when search raises."""
         from agentic_scraper.skills.ebay_lookup import EbayLookupTool
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "<html></html>"
+        mock_search = AsyncMock()
+        mock_search.search = AsyncMock(side_effect=Exception("API error"))
 
-        with patch("agentic_scraper.skills.ebay_lookup.httpx.AsyncClient") as mock_client_cls:
-            mock_client = AsyncMock()
-            mock_client.get = AsyncMock(return_value=mock_response)
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client_cls.return_value = mock_client
+        tool = EbayLookupTool(search_provider=mock_search)
+        result = await tool.run("PS5 Disc Edition")
 
-            tool = EbayLookupTool(timeout_seconds=10)
-            await tool.run("PS5 Disc Edition")
+        assert result.sample_count == 0
+        assert result.confidence == 0.0
 
-            call_url = mock_client.get.call_args[0][0]
-            assert "ebay.com" in call_url
-            assert "LH_Sold=1" in call_url
-            assert "LH_Complete=1" in call_url
-            assert "PS5" in call_url
-
-    async def test_filters_condition_in_query(self):
-        """Should include condition in search when provided."""
+    async def test_includes_ebay_site_filter_in_query(self):
+        """Should include site:ebay.com in the search query string."""
         from agentic_scraper.skills.ebay_lookup import EbayLookupTool
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "<html></html>"
+        mock_search = AsyncMock()
+        mock_search.search = AsyncMock(return_value="$100.00")
 
-        with patch("agentic_scraper.skills.ebay_lookup.httpx.AsyncClient") as mock_client_cls:
-            mock_client = AsyncMock()
-            mock_client.get = AsyncMock(return_value=mock_response)
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client_cls.return_value = mock_client
+        tool = EbayLookupTool(search_provider=mock_search)
+        await tool.run("PS5")
 
-            tool = EbayLookupTool(timeout_seconds=10)
-            await tool.run("iPhone 15 Pro", condition="used")
+        mock_search.search.assert_called_once()
+        query = mock_search.search.call_args[0][0]
+        assert "site:ebay.com" in query
+        assert "PS5" in query
 
-            call_url = mock_client.get.call_args[0][0]
-            assert "iPhone" in call_url
+    async def test_includes_condition_in_query(self):
+        """Should include condition in search query when provided."""
+        from agentic_scraper.skills.ebay_lookup import EbayLookupTool
+
+        mock_search = AsyncMock()
+        mock_search.search = AsyncMock(return_value="$200.00")
+
+        tool = EbayLookupTool(search_provider=mock_search)
+        await tool.run("iPhone 15 Pro", condition="used")
+
+        query = mock_search.search.call_args[0][0]
+        assert "used" in query
+        assert "iPhone 15 Pro" in query

@@ -5,11 +5,10 @@ from __future__ import annotations
 import json
 import re
 from typing import TYPE_CHECKING
-from urllib.parse import quote_plus
 
-import httpx
 from langchain_core.messages import HumanMessage
 
+from agentic_scraper.skills.llm_call import llm_call
 from agentic_scraper.skills.models import PriceLookupResult
 from agentic_scraper.skills.prompts import RETAIL_PRICE_EXTRACT_PROMPT
 from agentic_scraper.utils.logging import get_logger
@@ -17,28 +16,26 @@ from agentic_scraper.utils.logging import get_logger
 if TYPE_CHECKING:
     from langchain_core.language_models.chat_models import BaseChatModel
 
+    from agentic_scraper.skills.web_search import SearchProvider
+
 log = get_logger("skills.retail_lookup")
-
-# Search URL for retail price lookups
-SEARCH_URL = "https://html.duckduckgo.com/html/?q={query}"
-
-SEARCH_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ),
-}
 
 
 class RetailLookupTool:
-    """Look up the retail/MSRP price of an item via web search.
+    """Look up the retail/MSRP price of an item via Tavily web search.
 
     Args:
         llm: LangChain chat model for extracting prices from search results.
+        search_provider: Tavily web search provider.
     """
 
-    def __init__(self, llm: BaseChatModel) -> None:
+    def __init__(
+        self,
+        llm: BaseChatModel,
+        search_provider: SearchProvider,
+    ) -> None:
         self._llm = llm
+        self._search = search_provider
 
     async def run(
         self,
@@ -67,21 +64,12 @@ class RetailLookupTool:
         parts.append("retail price MSRP")
         search_query = " ".join(parts)
 
-        url = SEARCH_URL.format(query=quote_plus(search_query))
-
         try:
-            async with httpx.AsyncClient(
-                headers=SEARCH_HEADERS,
-                timeout=10,
-                follow_redirects=True,
-            ) as client:
-                response = await client.get(url)
+            search_text = await self._search.search(search_query)
 
-            if response.status_code != 200:
-                log.warning("Retail search failed", status=response.status_code)
+            if not search_text:
+                log.warning("Retail search returned no results", query=search_query[:60])
                 return self._empty_result(search_query)
-
-            search_text = self._extract_text(response.text)
 
             return await self._extract_price(
                 search_text, item_name, brand, model, search_query
@@ -108,7 +96,9 @@ class RetailLookupTool:
         )
 
         try:
-            response = await self._llm.ainvoke([HumanMessage(content=prompt)])
+            response = await llm_call(
+                self._llm, [HumanMessage(content=prompt)], skill="retail_extract",
+            )
             return self._parse_llm_response(response.content, search_query)
         except Exception as exc:
             log.warning("LLM price extraction failed", error=str(exc))
@@ -147,15 +137,6 @@ class RetailLookupTool:
             search_query=search_query,
             confidence=round(confidence, 2),
         )
-
-    @staticmethod
-    def _extract_text(html: str) -> str:
-        """Extract visible text from HTML, stripping tags."""
-        text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL)
-        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL)
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = re.sub(r"\s+", " ", text)
-        return text.strip()
 
     @staticmethod
     def _empty_result(search_query: str) -> PriceLookupResult:

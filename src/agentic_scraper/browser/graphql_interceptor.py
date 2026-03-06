@@ -1,11 +1,8 @@
 """GraphQL network interceptor for Facebook Marketplace.
 
-Passively captures listing data from Facebook's GraphQL API responses
-during category page navigation. This replaces fragile DOM parsing and
-eliminates the need for deep inspection of individual listing pages.
-
-Uses CDP Network domain events to intercept responses to /api/graphql/
-and extract structured listing data from the JSON payloads.
+Captures listing data from Facebook's GraphQL API responses during
+category page navigation. Uses CDP Network domain events to intercept
+responses to /api/graphql/ and extract structured listing data.
 """
 
 from __future__ import annotations
@@ -38,6 +35,7 @@ class GraphQLListingData:
     condition: str | None = None
     seller_name: str = ""
     posted_at: str | None = None  # ISO timestamp or unix timestamp string
+    is_sponsored: bool = False
 
 
 def parse_graphql_listings(body: str) -> list[GraphQLListingData]:
@@ -188,6 +186,12 @@ def _parse_edge_node(edge: dict) -> GraphQLListingData | None:
         if seller and isinstance(seller, dict):
             seller_name = seller.get("name", "")
 
+        # Sponsored / boosted listing detection (best-effort)
+        is_sponsored = bool(listing.get("is_marketplace_boost_listing", False))
+        tracking = listing.get("tracking")
+        if not is_sponsored and tracking and isinstance(tracking, str):
+            is_sponsored = "sponsor" in tracking.lower()
+
         return GraphQLListingData(
             external_id=ext_id,
             title=title,
@@ -200,6 +204,7 @@ def _parse_edge_node(edge: dict) -> GraphQLListingData | None:
             condition=condition,
             seller_name=seller_name,
             posted_at=posted_at,
+            is_sponsored=is_sponsored,
         )
     except Exception:
         return None

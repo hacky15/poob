@@ -63,7 +63,7 @@ def mock_page():
 def mock_browser_manager(mock_page):
     """Mock BrowserManager that doesn't launch a real browser."""
     manager = AsyncMock()
-    # Agent path (legacy browser-use)
+    # Agent path (browser-use)
     agent_mock = AsyncMock()
     agent_mock.run = AsyncMock(
         return_value=MagicMock(

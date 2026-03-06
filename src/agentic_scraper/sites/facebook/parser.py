@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from agentic_scraper.storage.models import Listing
 from agentic_scraper.utils.logging import get_logger
@@ -351,19 +351,88 @@ def _dict_to_listing(data: dict, site: str) -> Listing:
     elif "image_url" in data and data["image_url"]:
         image_urls = [data["image_url"]]
 
+    title = data.get("title", "")
+    price = _parse_price(data.get("price"))
+
+    # Rescue embedded price from title when JS extractor missed it
+    # Handles concatenated text like "Just listed$200Haaka sausage stuffer"
+    if price is None and title:
+        embedded = re.search(r"\$(\d[\d,]*\.?\d{0,2})", title)
+        if embedded:
+            try:
+                price = float(embedded.group(1).replace(",", ""))
+                # Strip the price and common FB prefixes from title
+                title = re.sub(
+                    r"(?:Just listed|Listed \w+ ago)?\s*\$\d[\d,]*\.?\d{0,2}\s*",
+                    "",
+                    title,
+                ).strip()
+            except ValueError:
+                pass
+
+    # Parse freshness text into posted_at when available
+    posted_at = _parse_freshness(data.get("freshness", ""))
+
     return Listing(
         site=site,
         external_id=str(data.get("external_id", "")),
-        title=data.get("title", ""),
-        price=_parse_price(data.get("price")),
+        title=title,
+        price=price,
         description=data.get("description", ""),
         location=data.get("location", ""),
         seller_name=data.get("seller_name", ""),
         image_urls=image_urls,
         listing_url=data.get("listing_url", ""),
+        posted_at=posted_at,
         scraped_at=datetime.now(timezone.utc),
         raw_data=data,
+        is_sponsored=bool(data.get("is_sponsored", False)),
     )
+
+
+def _parse_freshness(text: str) -> datetime | None:
+    """Parse Facebook freshness text into a datetime estimate.
+
+    Args:
+        text: Freshness string like "Just listed", "Listed 3 hours ago", etc.
+
+    Returns:
+        Estimated posted_at datetime, or None if unparseable.
+    """
+    if not text:
+        return None
+
+    text = text.strip().lower()
+    now = datetime.now(timezone.utc)
+
+    if "just listed" in text:
+        return now
+
+    # "Listed X minutes ago"
+    m = re.search(r"(\d+)\s*minutes?\s*ago", text)
+    if m:
+        return now - timedelta(minutes=int(m.group(1)))
+
+    # "Listed X hours ago"
+    m = re.search(r"(\d+)\s*hours?\s*ago", text)
+    if m:
+        return now - timedelta(hours=int(m.group(1)))
+
+    # "Listed yesterday"
+    if "yesterday" in text:
+        return now - timedelta(hours=24)
+
+    # "Listed X days ago"
+    m = re.search(r"(\d+)\s*days?\s*ago", text)
+    if m:
+        return now - timedelta(days=int(m.group(1)))
+
+    # "Listed X weeks ago"
+    m = re.search(r"(\d+)\s*weeks?\s*ago", text)
+    if m:
+        return now - timedelta(weeks=int(m.group(1)))
+
+    return None
 
 
 def _parse_price(value: object) -> float | None:

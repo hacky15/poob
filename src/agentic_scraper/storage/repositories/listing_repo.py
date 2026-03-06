@@ -31,8 +31,8 @@ class ListingRepository:
             INSERT INTO listings
                 (id, site, external_id, title, price, currency, description,
                  location, seller_name, image_urls, listing_url, posted_at,
-                 scraped_at, raw_data)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 scraped_at, raw_data, is_sponsored)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(site, external_id) DO UPDATE SET
                 title = excluded.title,
                 price = excluded.price,
@@ -41,7 +41,8 @@ class ListingRepository:
                 image_urls = excluded.image_urls,
                 listing_url = excluded.listing_url,
                 scraped_at = excluded.scraped_at,
-                raw_data = excluded.raw_data
+                raw_data = excluded.raw_data,
+                is_sponsored = excluded.is_sponsored
             """,
             (
                 listing.id,
@@ -58,6 +59,7 @@ class ListingRepository:
                 listing.posted_at.isoformat() if listing.posted_at else None,
                 listing.scraped_at.isoformat(),
                 json.dumps(listing.raw_data),
+                int(listing.is_sponsored),
             ),
         )
         await self._conn.commit()
@@ -182,4 +184,5 @@ class ListingRepository:
             ),
             scraped_at=datetime.fromisoformat(row["scraped_at"]),
             raw_data=json.loads(row["raw_data"]),
+            is_sponsored=bool(row["is_sponsored"]) if "is_sponsored" in row.keys() else False,
         )

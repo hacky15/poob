@@ -153,3 +153,88 @@ class PatrolScanner:
         except Exception as exc:
             log.error("Category sweep failed", category=category, error=str(exc))
             return []
+
+    async def sweep_search(
+        self,
+        page: object,
+        keywords: str,
+        *,
+        max_price: float | None = None,
+        min_price: float | None = None,
+        location_slug: str | None = None,
+        condition: str | None = None,
+        radius_miles: int | None = None,
+    ) -> list[Listing]:
+        """Search Facebook Marketplace by keywords and extract listings.
+
+        Used by the patrol engine to search for specific watchlist items,
+        complementing the main category sweep.
+
+        Args:
+            page: A browser-use CDP Page instance.
+            keywords: Search keywords (e.g. "PS5", "dining table").
+            max_price: Optional maximum price filter.
+            min_price: Optional minimum price filter.
+            location_slug: FB city slug (e.g. "madison", "green-bay") for URL path.
+            condition: FB condition filter (e.g. "used_good", "used_like_new,used_good").
+            radius_miles: Override radius for this search (uses oscillator default if None).
+
+        Returns:
+            List of Listing objects from the search results.
+        """
+        if radius_miles is not None:
+            radius = radius_miles
+        elif self._fixed_radius:
+            radius = self._fixed_radius
+        else:
+            radius = self._oscillator.next()
+
+        # Build URL path — location slug goes before /search/
+        if location_slug:
+            search_path = f"/marketplace/{location_slug}/search/"
+        else:
+            search_path = "/marketplace/search/"
+
+        url = (
+            f"https://www.facebook.com{search_path}"
+            f"?query={keywords.replace(' ', '+')}"
+            f"&sortBy=creation_time_descend"
+            f"&daysSinceListed={self._days_since_listed}"
+            f"&deliveryMethod=local_pick_up"
+            f"&radius={radius}"
+        )
+        if max_price is not None:
+            url += f"&maxPrice={max_price:.0f}"
+        if min_price is not None:
+            url += f"&minPrice={min_price:.0f}"
+        if condition:
+            url += f"&itemCondition={condition}"
+
+        try:
+            await navigate_and_wait(page, url)
+            await apply_scroll_pattern(page, steps=self._scroll_steps)
+            raw_data = await page.evaluate(EXTRACT_LISTINGS_JS)
+
+            if isinstance(raw_data, str):
+                raw_data = json.loads(raw_data)
+            if not isinstance(raw_data, list):
+                raw_data = []
+
+            raw_json = json.dumps(raw_data)
+            listings = parse_listings(raw_json, site="facebook_marketplace")
+
+            log.info(
+                "Search sweep complete",
+                keywords=keywords,
+                radius=radius,
+                max_price=max_price,
+                min_price=min_price,
+                location=location_slug,
+                condition=condition,
+                listings_found=len(listings),
+            )
+            return listings
+
+        except Exception as exc:
+            log.error("Search sweep failed", keywords=keywords, error=str(exc))
+            return []

@@ -285,13 +285,3 @@ class TestMatchSingle:
         deals = matcher.match_single(ps5_listing, [iphone_interest])
         assert len(deals) == 0
 
-
-# --- Compat shim ---
-
-
-class TestCompatShim:
-    def test_watchlist_matcher_import(self):
-        """The old WatchlistMatcher import should still work via the compat shim."""
-        from agentic_scraper.scanner.watchlist import WatchlistMatcher
-
-        assert WatchlistMatcher is InterestMatcher

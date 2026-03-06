@@ -1,7 +1,7 @@
 # Agentic Web Scraper - Project Conventions
 
 ## Overview
-Autonomous deal-hunting bot: browser-use + Playwright for web automation, Ollama for local LLM, Discord for two-way interaction, SQLite for storage. Scans marketplace sites (starting with Facebook Marketplace) for deals and notifies via Discord.
+Autonomous deal-hunting bot that monitors Facebook Marketplace, evaluates listings through a multi-stage VLM pipeline, and delivers deal alerts via Discord. Uses Playwright for browser automation, a cascade of cloud and local LLMs for evaluation, and SQLite for storage.
 
 ## Architecture
 - **src layout:** All source code under `src/agentic_scraper/`
@@ -9,6 +9,9 @@ Autonomous deal-hunting bot: browser-use + Playwright for web automation, Ollama
 - **Async-first:** Every I/O operation is async
 - **Dependency injection:** Components receive dependencies via constructor
 - **Plugin system:** Site adapters auto-discovered from `src/agentic_scraper/sites/` subdirectories
+- **LLM provider cascade:** Agent brain uses Groq → NVIDIA NIM → Gemini → Ollama (fastest-first)
+- **VLM evaluation pipeline:** Text triage → visual enrichment → VLM deep evaluation (Gemini Flash → Groq Vision → Gemini Pro → OpenRouter → Ollama)
+- **Dual interaction model:** Patrol engine runs autonomously; Discord bot provides conversational agent with tool-calling
 
 ## Code Style
 - Python 3.12+ features (type unions with `|`, match statements where appropriate)
@@ -50,13 +53,17 @@ Autonomous deal-hunting bot: browser-use + Playwright for web automation, Ollama
 - Secrets (tokens, passwords) only in `.env`, never in code
 
 ## Key Dependencies
-- `browser-use` + `playwright`: Browser automation
-- `langchain-ollama`: Local LLM via Ollama
-- `discord.py`: Two-way Discord bot
-- `aiosqlite`: Async SQLite
-- `pydantic-settings`: Typed configuration
+- `playwright`: Browser automation (with `browser-use` for agent-mode navigation)
+- `discord.py`: Two-way Discord bot with conversational agent
+- `aiosqlite`: Async SQLite storage
+- `pydantic-settings`: Typed configuration from environment
 - `structlog`: Structured logging
-- `httpx`: HTTP client
+- `httpx`: HTTP client (eBay/retail lookups, API calls)
+- `langchain-ollama`: Local LLM via Ollama
+- `google-genai`: Gemini Flash/Pro for VLM evaluation
+- `groq`: Groq Cloud for fast agent responses and vision
+- `cerebras-cloud-sdk`: Cerebras for text triage
+- `openai` (SDK): NVIDIA NIM and OpenRouter access via OpenAI-compatible API
 
 ## Running
 - `pip install -e ".[dev]"` to install in dev mode

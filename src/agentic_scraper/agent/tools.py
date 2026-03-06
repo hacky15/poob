@@ -7,7 +7,37 @@ from typing import Any
 
 from langchain_core.tools import StructuredTool
 
-from agentic_scraper.storage.models import WatchItem
+from agentic_scraper.storage.models import ExclusionItem, WatchItem
+
+
+# Map common synonyms to the canonical notification levels.
+# LLMs frequently say "excellent" or "amazing" instead of "great"/"incredible".
+_LEVEL_ALIASES: dict[str, str] = {
+    "all": "all",
+    "any": "all",
+    "everything": "all",
+    "good": "good",
+    "decent": "good",
+    "great": "great",
+    "excellent": "great",
+    "amazing": "incredible",
+    "incredible": "incredible",
+    "insane": "incredible",
+    "free": "free",
+}
+
+_VALID_LEVELS = {"all", "good", "great", "incredible", "free"}
+
+
+def _normalize_notification_level(raw: str) -> str | None:
+    """Normalize a notification level string to one of the valid values.
+
+    Returns the canonical level, or None if the input is unrecognizable.
+    """
+    key = raw.strip().lower()
+    if key in _VALID_LEVELS:
+        return key
+    return _LEVEL_ALIASES.get(key)
 
 
 def build_tools(
@@ -20,6 +50,7 @@ def build_tools(
     listing_repo: Any,
     scheduler: Any,
     scan_log_repo: Any = None,
+    exclusion_repo: Any = None,
 ) -> list[StructuredTool]:
     """Build agent tools scoped to a specific user and channel.
 
@@ -46,40 +77,141 @@ def build_tools(
     async def _add_to_wishlist(
         item_name: str,
         max_price: float | None = None,
+        notification_level: str = "good",
         priority: str = "normal",
         category: str | None = None,
+        notes: str = "",
+        search_configs: str = "[]",
     ) -> str:
         """Add an interest to the watchlist so the patrol system looks out for it.
+
+        IMPORTANT: You MUST gather all required info before calling this tool:
+        - item_name (required)
+        - condition preference (required — ask user if not stated)
+        - location(s) + radius (required — ask user if not stated)
+        - max_price (optional but recommended)
 
         Args:
             item_name: What to look out for (e.g. "coffee table", "PS5").
             max_price: Maximum price in dollars, or None for no limit.
+            notification_level: When to notify. Options:
+                "all" = every matching listing regardless of deal quality,
+                "good" = good deals and above (20%+ below market),
+                "great" = great deals and above (40%+ below market),
+                "incredible" = only incredible deals (50%+ below market),
+                "free" = only free listings ($0).
             priority: "low", "normal", or "high".
             category: Item category like "furniture", "electronics", "clothing".
+            notes: User preferences for this item (e.g. "not metal", "modern style",
+                "ideally wood finish"). Passed to the deal evaluator as context.
+            search_configs: JSON string of search configurations. Each config is a dict
+                with optional keys:
+                - "location": FB city slug (e.g. "madison", "appleton", "green-bay")
+                - "radius_miles": search radius in miles (e.g. 20, 40)
+                - "condition": FB condition filter. Values:
+                    "new", "used_like_new", "used_good", "used_fair"
+                    Combine with comma: "used_good,used_like_new"
+                    Omit for any condition.
+                - "min_price": minimum price in dollars
+                - "max_price": maximum price for THIS search (overrides top-level)
+                Example: '[{"location": "madison", "radius_miles": 20, "condition": "used_good", "max_price": 200}]'
+                Multiple configs = multiple searches per patrol cycle.
         """
-        # Create a WatchItem so the patrol system matches against it
-        watch_item = WatchItem(
-            interest=item_name,
-            max_price=max_price,
-            category=category,
-            discord_user_id=discord_user_id,
-            discord_channel_id=discord_channel_id,
-        )
-        await watchlist_repo.save(watch_item)
+        # Validate and normalize notification_level
+        resolved = _normalize_notification_level(notification_level)
+        if resolved is None:
+            return (
+                f"Invalid notification level '{notification_level}'. "
+                f"Valid options: all, good, great, incredible, free."
+            )
+        notification_level = resolved
 
-        # Persist in user preferences for display / prompt injection
+        # Parse search_configs from JSON string
+        try:
+            configs = json.loads(search_configs) if search_configs else []
+        except (json.JSONDecodeError, TypeError):
+            configs = []
+
+        # Check for existing active item with the same name (prevent duplicates)
+        existing_items = await watchlist_repo.list_for_user(discord_user_id)
+        existing = None
+        for item in existing_items:
+            if item.interest.lower() == item_name.lower() and item.is_active:
+                existing = item
+                break
+
+        if existing:
+            # Update the existing item instead of creating a duplicate
+            existing.max_price = max_price
+            existing.notification_threshold = notification_level
+            if category:
+                existing.category = category
+            if notes:
+                existing.notes = notes
+            if configs:
+                existing.search_configs = configs
+            await watchlist_repo.save(existing)
+            watch_item = existing
+        else:
+            watch_item = WatchItem(
+                interest=item_name,
+                max_price=max_price,
+                notification_threshold=notification_level,
+                category=category,
+                discord_user_id=discord_user_id,
+                discord_channel_id=discord_channel_id,
+                notes=notes,
+                search_configs=configs,
+            )
+            await watchlist_repo.save(watch_item)
+
+        # Sync preferences JSON (used for system prompt injection)
         wishlist_json = await prefs_repo.get(discord_user_id, "wishlist")
         wishlist: list[dict] = json.loads(wishlist_json) if wishlist_json else []
-        entry: dict[str, Any] = {"name": item_name, "priority": priority}
+        entry: dict[str, Any] = {
+            "name": item_name,
+            "priority": priority,
+            "notification_level": notification_level,
+        }
         if max_price is not None:
             entry["max_price"] = max_price
         if category is not None:
             entry["category"] = category
-        wishlist.append(entry)
+        if notes:
+            entry["notes"] = notes
+        if configs:
+            entry["search_configs"] = configs
+
+        # Replace existing entry or append new one
+        replaced = False
+        for i, w in enumerate(wishlist):
+            if w["name"].lower() == item_name.lower():
+                wishlist[i] = entry
+                replaced = True
+                break
+        if not replaced:
+            wishlist.append(entry)
         await prefs_repo.set(discord_user_id, "wishlist", json.dumps(wishlist))
 
         price_str = f" (max ${max_price})" if max_price else ""
-        return f"Added '{item_name}'{price_str} to your wishlist."
+        level_str = f", notify for {notification_level} deals"
+        notes_str = f" ({notes})" if notes else ""
+        configs_str = ""
+        if configs:
+            cfg_parts = []
+            for c in configs:
+                parts = []
+                if c.get("location"):
+                    parts.append(c["location"])
+                if c.get("radius_miles"):
+                    parts.append(f"{c['radius_miles']}mi")
+                if c.get("condition"):
+                    parts.append(c["condition"].replace("used_", ""))
+                if c.get("max_price") is not None:
+                    parts.append(f"max ${c['max_price']}")
+                cfg_parts.append(" ".join(parts))
+            configs_str = f"\nSearches: {' | '.join(cfg_parts)}"
+        return f"Added '{item_name}'{price_str}{level_str}{notes_str} to your watchlist.{configs_str}"
 
     # ------------------------------------------------------------------
     # remove_from_wishlist
@@ -108,25 +240,137 @@ def build_tools(
         return f"Removed '{item_name}' from your wishlist."
 
     # ------------------------------------------------------------------
+    # clear_wishlist
+    # ------------------------------------------------------------------
+    async def _clear_wishlist() -> str:
+        """Remove ALL items from the watchlist at once. Use when the user
+        says 'remove all', 'clear my list', or 'start fresh'."""
+        count = await watchlist_repo.deactivate_all_for_user(discord_user_id)
+        await prefs_repo.set(discord_user_id, "wishlist", "[]")
+        if count == 0:
+            return "Your watchlist is already empty."
+        return f"Cleared {count} item(s) from your watchlist."
+
+    # ------------------------------------------------------------------
+    # update_wishlist_item
+    # ------------------------------------------------------------------
+    async def _update_wishlist_item(
+        item_name: str,
+        notification_level: str | None = None,
+        max_price: float | None = None,
+        notes: str | None = None,
+        search_configs: str | None = None,
+    ) -> str:
+        """Update an existing watchlist item's notification level, max price, notes, or search configs.
+
+        Use this when the user wants to change settings on an item already on
+        their watchlist — e.g. "only incredible deals" or "raise my budget to $200"
+        or "not metal and old looking" or "add a search in Appleton".
+
+        Args:
+            item_name: The item to update (must already be on the watchlist).
+            notification_level: New notification level (all/good/great/incredible/free).
+            max_price: New max price, or None to leave unchanged.
+            notes: New preferences/notes for this item, or None to leave unchanged.
+            search_configs: New search configs as JSON string, or None to leave unchanged.
+                Same format as add_to_wishlist.
+        """
+        items = await watchlist_repo.list_for_user(discord_user_id)
+        matched = None
+        for item in items:
+            if item.interest.lower() == item_name.lower() and item.is_active:
+                matched = item
+                break
+
+        if matched is None:
+            return f"Item '{item_name}' not found on your watchlist. Can't update it."
+
+        changes: list[str] = []
+        if notification_level is not None:
+            resolved = _normalize_notification_level(notification_level)
+            if resolved is None:
+                return f"Invalid notification level '{notification_level}'. Use: all, good, great, incredible, free."
+            matched.notification_threshold = resolved
+            changes.append(f"notifications → {resolved}")
+        if max_price is not None:
+            matched.max_price = max_price
+            changes.append(f"max price → ${max_price}")
+        if notes is not None:
+            matched.notes = notes
+            changes.append(f"notes → {notes}")
+        if search_configs is not None:
+            try:
+                configs = json.loads(search_configs)
+                matched.search_configs = configs
+                changes.append(f"search configs → {len(configs)} config(s)")
+            except (json.JSONDecodeError, TypeError):
+                return "Invalid search_configs JSON."
+
+        if not changes:
+            return "Nothing to update. Specify notification_level, max_price, or notes."
+
+        await watchlist_repo.save(matched)
+
+        # Also update in preferences JSON
+        wishlist_json = await prefs_repo.get(discord_user_id, "wishlist")
+        if wishlist_json:
+            wishlist = json.loads(wishlist_json)
+            for entry in wishlist:
+                if entry["name"].lower() == item_name.lower():
+                    if notification_level is not None:
+                        entry["notification_level"] = notification_level.lower()
+                    if max_price is not None:
+                        entry["max_price"] = max_price
+                    if notes is not None:
+                        entry["notes"] = notes
+                    if search_configs is not None:
+                        try:
+                            entry["search_configs"] = json.loads(search_configs)
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+            await prefs_repo.set(discord_user_id, "wishlist", json.dumps(wishlist))
+
+        return f"Updated '{item_name}': {', '.join(changes)}."
+
+    # ------------------------------------------------------------------
     # show_wishlist
     # ------------------------------------------------------------------
     async def _show_wishlist() -> str:
-        """Show all items currently on the wishlist."""
-        wishlist_json = await prefs_repo.get(discord_user_id, "wishlist")
-        if not wishlist_json:
-            return "Your wishlist is empty."
+        """Show all items currently on the wishlist.
 
-        wishlist = json.loads(wishlist_json)
-        if not wishlist:
+        Reads from the watchlist database table (source of truth), not the
+        preferences JSON cache.
+        """
+        items = await watchlist_repo.list_for_user(discord_user_id)
+        active = [i for i in items if i.is_active]
+        if not active:
             return "Your wishlist is empty."
 
         lines = []
-        for item in wishlist:
-            line = f"- {item['name']}"
-            if "max_price" in item:
-                line += f" (max ${item['max_price']})"
-            if item.get("priority", "normal") != "normal":
-                line += f" [{item['priority']}]"
+        for item in active:
+            line = f"- {item.interest}"
+            if item.max_price is not None:
+                line += f" (max ${item.max_price})"
+            notif = item.notification_threshold or "good"
+            line += f" -- notify: {notif}"
+            if item.notes:
+                line += f" -- prefs: {item.notes}"
+            if item.search_configs:
+                cfg_parts = []
+                for c in item.search_configs:
+                    parts = []
+                    if c.get("location"):
+                        parts.append(c["location"])
+                    if c.get("radius_miles"):
+                        parts.append(f"{c['radius_miles']}mi")
+                    if c.get("condition"):
+                        parts.append(c["condition"].replace("used_", ""))
+                    if c.get("max_price") is not None:
+                        parts.append(f"max ${c['max_price']}")
+                    if c.get("min_price") is not None:
+                        parts.append(f"min ${c['min_price']}")
+                    cfg_parts.append(" ".join(parts))
+                line += f"\n  Searches: {' | '.join(cfg_parts)}"
             lines.append(line)
 
         return "Your wishlist:\n" + "\n".join(lines)
@@ -441,9 +685,66 @@ def build_tools(
         return f"Updated {', '.join(updated)}."
 
     # ------------------------------------------------------------------
+    # add_to_exclusion
+    # ------------------------------------------------------------------
+    async def _add_to_exclusion(keyword: str) -> str:
+        """Add a keyword to the exclusion list. Matching listings will be
+        filtered out of general deal notifications.
+
+        Args:
+            keyword: Word or phrase to exclude (e.g. "mattress", "broken TV").
+        """
+        if exclusion_repo is None:
+            return "Exclusion list feature is not available."
+
+        existing = await exclusion_repo.list_for_user(discord_user_id)
+        for item in existing:
+            if item.keyword.lower() == keyword.lower():
+                return f"'{keyword}' is already on your exclusion list."
+
+        exc_item = ExclusionItem(
+            keyword=keyword,
+            discord_user_id=discord_user_id,
+        )
+        await exclusion_repo.save(exc_item)
+        return f"Added '{keyword}' to your exclusion list. Listings matching this won't be shown."
+
+    # ------------------------------------------------------------------
+    # remove_from_exclusion
+    # ------------------------------------------------------------------
+    async def _remove_from_exclusion(keyword: str) -> str:
+        """Remove a keyword from the exclusion list.
+
+        Args:
+            keyword: The keyword to remove.
+        """
+        if exclusion_repo is None:
+            return "Exclusion list feature is not available."
+
+        deleted = await exclusion_repo.delete_for_user(keyword, discord_user_id)
+        if deleted:
+            return f"Removed '{keyword}' from your exclusion list."
+        return f"'{keyword}' was not found on your exclusion list."
+
+    # ------------------------------------------------------------------
+    # show_exclusion_list
+    # ------------------------------------------------------------------
+    async def _show_exclusion_list() -> str:
+        """Show all keywords on the exclusion list."""
+        if exclusion_repo is None:
+            return "Exclusion list feature is not available."
+
+        items = await exclusion_repo.list_for_user(discord_user_id)
+        if not items:
+            return "Your exclusion list is empty."
+
+        lines = [f"- {item.keyword}" for item in items]
+        return "Your exclusion list:\n" + "\n".join(lines)
+
+    # ------------------------------------------------------------------
     # Assemble and return
     # ------------------------------------------------------------------
-    return [
+    tools = [
         StructuredTool.from_function(
             coroutine=_add_to_wishlist,
             name="add_to_wishlist",
@@ -455,7 +756,24 @@ def build_tools(
         StructuredTool.from_function(
             coroutine=_remove_from_wishlist,
             name="remove_from_wishlist",
-            description="Remove an interest from the watchlist and stop looking out for it.",
+            description="Remove a single interest from the watchlist.",
+        ),
+        StructuredTool.from_function(
+            coroutine=_clear_wishlist,
+            name="clear_wishlist",
+            description=(
+                "Remove ALL items from the watchlist at once. Use when the user"
+                " wants to clear everything or start fresh."
+            ),
+        ),
+        StructuredTool.from_function(
+            coroutine=_update_wishlist_item,
+            name="update_wishlist_item",
+            description=(
+                "Update an existing watchlist item's notification level or max price."
+                " Use when the user wants to change settings on an item already on"
+                " their watchlist."
+            ),
         ),
         StructuredTool.from_function(
             coroutine=_show_wishlist,
@@ -531,3 +849,28 @@ def build_tools(
             ),
         ),
     ]
+
+    # Exclusion tools (only if repo wired up)
+    if exclusion_repo is not None:
+        tools.extend([
+            StructuredTool.from_function(
+                coroutine=_add_to_exclusion,
+                name="add_to_exclusion",
+                description=(
+                    "Add a keyword to the exclusion list. Listings matching excluded"
+                    " keywords will be filtered out of deal notifications."
+                ),
+            ),
+            StructuredTool.from_function(
+                coroutine=_remove_from_exclusion,
+                name="remove_from_exclusion",
+                description="Remove a keyword from the exclusion list.",
+            ),
+            StructuredTool.from_function(
+                coroutine=_show_exclusion_list,
+                name="show_exclusion_list",
+                description="Show all keywords the user has excluded from notifications.",
+            ),
+        ])
+
+    return tools

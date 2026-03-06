@@ -38,6 +38,42 @@ async def migrate_schema(conn: aiosqlite.Connection) -> None:
         await conn.execute("ALTER TABLE scan_logs RENAME COLUMN query_keywords TO category")
         await conn.commit()
 
+    # Add notification_threshold to watch_items
+    cursor = await conn.execute("PRAGMA table_info(watch_items)")
+    columns = [row[1] for row in await cursor.fetchall()]
+    if "notification_threshold" not in columns:
+        await conn.execute(
+            "ALTER TABLE watch_items ADD COLUMN notification_threshold TEXT DEFAULT 'good'"
+        )
+        await conn.commit()
+
+    # Add notes to watch_items (user preference filters)
+    cursor = await conn.execute("PRAGMA table_info(watch_items)")
+    columns = [row[1] for row in await cursor.fetchall()]
+    if "notes" not in columns:
+        await conn.execute(
+            "ALTER TABLE watch_items ADD COLUMN notes TEXT DEFAULT ''"
+        )
+        await conn.commit()
+
+    # Add is_sponsored to listings
+    cursor = await conn.execute("PRAGMA table_info(listings)")
+    columns = [row[1] for row in await cursor.fetchall()]
+    if "is_sponsored" not in columns:
+        await conn.execute(
+            "ALTER TABLE listings ADD COLUMN is_sponsored INTEGER NOT NULL DEFAULT 0"
+        )
+        await conn.commit()
+
+    # Add search_configs to watch_items
+    cursor = await conn.execute("PRAGMA table_info(watch_items)")
+    columns = [row[1] for row in await cursor.fetchall()]
+    if "search_configs" not in columns:
+        await conn.execute(
+            "ALTER TABLE watch_items ADD COLUMN search_configs TEXT DEFAULT '[]'"
+        )
+        await conn.commit()
+
 
 async def init_schema(conn: aiosqlite.Connection) -> None:
     """Create all tables if they don't exist."""
@@ -58,6 +94,7 @@ async def init_schema(conn: aiosqlite.Connection) -> None:
             posted_at TEXT,
             scraped_at TEXT NOT NULL,
             raw_data TEXT NOT NULL DEFAULT '{}',
+            is_sponsored INTEGER NOT NULL DEFAULT 0,
             UNIQUE(site, external_id)
         );
 
@@ -72,7 +109,10 @@ async def init_schema(conn: aiosqlite.Connection) -> None:
             is_active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             discord_user_id TEXT NOT NULL DEFAULT '',
-            discord_channel_id TEXT NOT NULL DEFAULT ''
+            discord_channel_id TEXT NOT NULL DEFAULT '',
+            notification_threshold TEXT DEFAULT 'good',
+            notes TEXT DEFAULT '',
+            search_configs TEXT DEFAULT '[]'
         );
 
         CREATE TABLE IF NOT EXISTS deals (
@@ -136,6 +176,32 @@ async def init_schema(conn: aiosqlite.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_conv_msgs_user_time
             ON conversation_messages(discord_user_id, timestamp);
+
+        CREATE TABLE IF NOT EXISTS deal_feedback (
+            id TEXT PRIMARY KEY,
+            deal_id TEXT NOT NULL,
+            discord_user_id TEXT NOT NULL,
+            feedback_type TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_deal_feedback_deal
+            ON deal_feedback(deal_id);
+        CREATE INDEX IF NOT EXISTS idx_deal_feedback_user
+            ON deal_feedback(discord_user_id);
+
+        CREATE TABLE IF NOT EXISTS exclusion_items (
+            id TEXT PRIMARY KEY,
+            keyword TEXT NOT NULL DEFAULT '',
+            discord_user_id TEXT NOT NULL DEFAULT '',
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_exclusion_items_user
+            ON exclusion_items(discord_user_id);
+        CREATE INDEX IF NOT EXISTS idx_exclusion_items_active
+            ON exclusion_items(is_active);
         """
     )
     await conn.commit()

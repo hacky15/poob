@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from agentic_scraper.scanner.patrol_scheduler import PatrolScheduler
     from agentic_scraper.sites.registry import SiteRegistry
     from agentic_scraper.storage.repositories.deal_repo import DealRepository
+    from agentic_scraper.storage.repositories.feedback_repo import FeedbackRepository
     from agentic_scraper.storage.repositories.listing_repo import ListingRepository
     from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
 
@@ -36,6 +37,7 @@ class ScraperBot(commands.Bot):
     def __init__(self, config: AppConfig) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
+        intents.reactions = True
 
         super().__init__(
             command_prefix=config.discord_command_prefix,
@@ -51,6 +53,7 @@ class ScraperBot(commands.Bot):
         self.deal_repo: DealRepository | None = None
         self.listing_repo: ListingRepository | None = None
         self.agent_runner: AgentRunner | None = None
+        self.feedback_repo: FeedbackRepository | None = None
 
     async def setup_hook(self) -> None:
         """Load all cog extensions when the bot starts."""
@@ -83,20 +86,31 @@ class ScraperBot(commands.Bot):
 
             await self.add_cog(AgentMessageHandler(bot=self, agent_runner=self.agent_runner))
 
+        if self.notifier and self.feedback_repo:
+            from agentic_scraper.discord_bot.cogs.feedback_cog import FeedbackCog
+
+            await self.add_cog(FeedbackCog(
+                bot=self,
+                notifier=self.notifier,
+                feedback_repo=self.feedback_repo,
+            ))
+
         log.info("All cogs loaded")
 
     async def on_ready(self) -> None:
         """Called when the bot has connected to Discord."""
         log.info("Bot is ready", user=str(self.user), guilds=len(self.guilds))
 
-        # Wire the deals notification channel now that we're connected
-        if self.notifier and self.config.discord_deals_channel_id:
-            channel = self.get_channel(self.config.discord_deals_channel_id)
-            if channel is not None:
-                self.notifier.set_channel(channel)
-                log.info("Deals notification channel set", channel=channel.name)
-            else:
-                log.warning(
-                    "Deals channel not found — deal notifications will be skipped",
-                    channel_id=self.config.discord_deals_channel_id,
-                )
+        # Wire the deals notification channel and bot reference
+        if self.notifier:
+            self.notifier.set_bot(self)
+            if self.config.discord_deals_channel_id:
+                channel = self.get_channel(self.config.discord_deals_channel_id)
+                if channel is not None:
+                    self.notifier.set_channel(channel)
+                    log.info("Deals notification channel set", channel=channel.name)
+                else:
+                    log.warning(
+                        "Deals channel not found — deal notifications will be skipped",
+                        channel_id=self.config.discord_deals_channel_id,
+                    )
