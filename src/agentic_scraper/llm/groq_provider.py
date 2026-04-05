@@ -35,7 +35,7 @@ class GroqProvider:
         api_key: str,
         model: str,
         temperature: float,
-        max_tokens: int = 500,
+        max_tokens: int = 2048,
     ) -> None:
         self._api_key = api_key
         self._model_name = model

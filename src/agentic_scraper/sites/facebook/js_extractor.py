@@ -156,7 +156,12 @@ EXTRACT_JSON_LD_JS = """() => {
             if (data['@type'] === 'Product' || data['@type'] === 'Offer') {
                 return data;
             }
-            if (data.offers) return data.offers;
+            if (data.offers && typeof data.offers === 'object' && !Array.isArray(data.offers)) {
+                return data.offers;
+            }
+            if (Array.isArray(data.offers) && data.offers.length > 0 && typeof data.offers[0] === 'object') {
+                return data.offers[0];
+            }
         } catch (e) {}
     }
     return {};

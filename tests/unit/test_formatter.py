@@ -68,7 +68,95 @@ class TestFormatDealEmbed:
         deal = Deal(listing_id="l1", score=DealScore.FAIR)
         embed = format_deal_embed(deal, listing)
         # No image should be set when listing has no images
-        assert embed.image.url is None or embed.image.url == ""
+        assert embed.image is None or embed.image.url is None or embed.image.url == ""
+
+
+class TestProvenanceField:
+    """Tests for the provenance 'Evaluation Details' in deal embeds."""
+
+    def test_provenance_shown_when_available(self):
+        from agentic_scraper.discord_bot.formatter import format_deal_embed
+        from agentic_scraper.skills.models import DealProvenance
+
+        prov = DealProvenance(
+            vlm_providers=["gemini_flash_lite", "groq_vision"],
+            vlm_agreement=0.85,
+            vlm_condition="good",
+            vlm_condition_notes="minor scratches",
+            vlm_item_identified="KitchenAid Artisan Mixer",
+            price_source="ebay_sold",
+            price_sample_count=5,
+            price_confidence=0.8,
+            final_score="great",
+        )
+        listing = Listing(title="KitchenAid Mixer", price=50.0)
+        deal = Deal(
+            listing_id="l1",
+            score=DealScore.GREAT,
+            provenance_json=prov.to_json(),
+        )
+        embed = format_deal_embed(deal, listing)
+        field_names = [f.name for f in embed.fields]
+        assert "Evaluation Details" in field_names
+        details_field = next(f for f in embed.fields if f.name == "Evaluation Details")
+        assert "gemini_flash_lite" in details_field.value
+        assert "groq_vision" in details_field.value
+        assert "agreement: 0.85" in details_field.value
+        assert "ebay_sold" in details_field.value
+        assert "KitchenAid Artisan Mixer" in details_field.value
+
+    def test_provenance_omitted_when_empty(self):
+        from agentic_scraper.discord_bot.formatter import format_deal_embed
+
+        listing = Listing(title="Item", price=10.0)
+        deal = Deal(listing_id="l1", score=DealScore.FAIR, provenance_json="")
+        embed = format_deal_embed(deal, listing)
+        field_names = [f.name for f in embed.fields]
+        assert "Evaluation Details" not in field_names
+
+    def test_provenance_shows_score_adjustments(self):
+        from agentic_scraper.discord_bot.formatter import _format_provenance_field
+        from agentic_scraper.skills.models import DealProvenance
+
+        prov = DealProvenance(
+            score_adjustments=["incredible->great: $28 saved, 55%"],
+            final_score="great",
+        )
+        deal = Deal(provenance_json=prov.to_json())
+        text = _format_provenance_field(deal)
+        assert text is not None
+        assert "incredible->great" in text
+
+    def test_provenance_roundtrip(self):
+        """DealProvenance should survive JSON round-trip."""
+        from agentic_scraper.skills.models import DealProvenance
+
+        prov = DealProvenance(
+            vlm_providers=["gemini_flash"],
+            vlm_agreement=0.7,
+            scam_signals=["suspicious pricing"],
+            score_adjustments=["good->fair: $3 saved, 15%"],
+            web_search_used=True,
+        )
+        restored = DealProvenance.from_json(prov.to_json())
+        assert restored.vlm_providers == ["gemini_flash"]
+        assert restored.vlm_agreement == 0.7
+        assert restored.scam_signals == ["suspicious pricing"]
+        assert restored.web_search_used is True
+
+    def test_provenance_from_empty_json(self):
+        from agentic_scraper.skills.models import DealProvenance
+
+        p = DealProvenance.from_json("")
+        assert p.vlm_providers == []
+        assert p.final_score == ""
+
+    def test_provenance_ignores_unknown_keys(self):
+        from agentic_scraper.skills.models import DealProvenance
+
+        p = DealProvenance.from_json('{"unknown_field": 123, "final_score": "great"}')
+        assert p.final_score == "great"
+        assert not hasattr(p, "unknown_field")
 
 
 class TestFormatListingEmbed:

@@ -15,6 +15,7 @@ import asyncio
 import random
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 from agentic_scraper.utils.logging import get_logger
 
@@ -99,7 +100,10 @@ class PatrolScheduler:
         log.info("Patrol scheduler resumed")
 
     async def trigger_now(self) -> None:
-        """Trigger an immediate patrol cycle, bypassing the timer."""
+        """Trigger an immediate patrol cycle, starting the scheduler if needed."""
+        if not self._is_running:
+            log.info("Scheduler not running — starting it now")
+            await self.start()
         log.info("Immediate patrol triggered")
         self._trigger_event.set()
 
@@ -144,27 +148,34 @@ class PatrolScheduler:
         """Main scheduler loop. Waits for adaptive interval or trigger, then patrols."""
         while self._is_running:
             now = datetime.now(timezone.utc)
-            base_interval = self._calculate_base_interval(now.hour)
+            local_tz = ZoneInfo(self._config.display_timezone)
+            local_hour = now.astimezone(local_tz).hour
+            base_interval = self._calculate_base_interval(local_hour)
             interval_seconds = self._apply_jitter(base_interval)
 
-            self._trigger_event.clear()
-            self._next_scan_time = now + timedelta(seconds=interval_seconds)
-
-            log.info(
-                "Waiting for next patrol",
-                base_interval=base_interval,
-                jittered_interval=round(interval_seconds, 1),
-                next_at=self._next_scan_time.strftime("%H:%M:%S"),
-            )
-
-            try:
-                await asyncio.wait_for(
-                    self._trigger_event.wait(),
-                    timeout=interval_seconds,
+            # Check if trigger was already set (e.g., trigger_now() called before
+            # the loop task started — race between create_task and event.set).
+            if self._trigger_event.is_set():
+                log.info("Patrol triggered manually (immediate)")
+                self._trigger_event.clear()
+            else:
+                self._next_scan_time = now + timedelta(seconds=interval_seconds)
+                log.info(
+                    "Waiting for next patrol",
+                    base_interval=base_interval,
+                    jittered_interval=round(interval_seconds, 1),
+                    next_at=self._next_scan_time.strftime("%H:%M:%S"),
                 )
-                log.info("Patrol triggered manually")
-            except asyncio.TimeoutError:
-                log.info("Scheduled patrol starting")
+
+                try:
+                    await asyncio.wait_for(
+                        self._trigger_event.wait(),
+                        timeout=interval_seconds,
+                    )
+                    log.info("Patrol triggered manually")
+                except asyncio.TimeoutError:
+                    log.info("Scheduled patrol starting")
+                self._trigger_event.clear()
 
             if not self._is_running:
                 break

@@ -36,6 +36,19 @@ class GraphQLListingData:
     seller_name: str = ""
     posted_at: str | None = None  # ISO timestamp or unix timestamp string
     is_sponsored: bool = False
+    category_id: str | None = None  # marketplace_listing_category_id from GraphQL
+    delivery_types: list[str] = field(default_factory=list)  # ["IN_PERSON", "SHIPPING"]
+    latitude: float | None = None  # From location object (if present in search results)
+    longitude: float | None = None
+
+
+@dataclass
+class GraphQLPageResult:
+    """Result of parsing a GraphQL response, including pagination info."""
+
+    listings: list[GraphQLListingData]
+    end_cursor: str | None = None
+    has_next_page: bool = False
 
 
 def parse_graphql_listings(body: str) -> list[GraphQLListingData]:
@@ -49,16 +62,31 @@ def parse_graphql_listings(body: str) -> list[GraphQLListingData]:
     Returns:
         List of parsed listing data. Empty list on any parse failure.
     """
+    return parse_graphql_response(body).listings
+
+
+def parse_graphql_response(body: str) -> GraphQLPageResult:
+    """Parse Facebook GraphQL response JSON into listings + pagination info.
+
+    Same as parse_graphql_listings but also extracts the pagination cursor
+    so callers can fetch subsequent pages.
+
+    Args:
+        body: Raw JSON response body string.
+
+    Returns:
+        GraphQLPageResult with listings and pagination cursor.
+    """
     if not body:
-        return []
+        return GraphQLPageResult(listings=[])
 
     try:
         data = json.loads(body)
     except (json.JSONDecodeError, ValueError):
-        return []
+        return GraphQLPageResult(listings=[])
 
     if not isinstance(data, dict):
-        return []
+        return GraphQLPageResult(listings=[])
 
     listings: list[GraphQLListingData] = []
     seen_ids: set[str] = set()
@@ -71,8 +99,15 @@ def parse_graphql_listings(body: str) -> list[GraphQLListingData]:
             seen_ids.add(listing_data.external_id)
             listings.append(listing_data)
 
+    # Extract pagination cursor from page_info
+    end_cursor, has_next = _extract_page_info(data)
+
     if listings:
-        return listings
+        return GraphQLPageResult(
+            listings=listings,
+            end_cursor=end_cursor,
+            has_next_page=has_next,
+        )
 
     # Strategy 2: Recursive search for listing-like dicts
     found = _recursive_find_listings(data)
@@ -81,7 +116,11 @@ def parse_graphql_listings(body: str) -> list[GraphQLListingData]:
             seen_ids.add(item.external_id)
             listings.append(item)
 
-    return listings
+    return GraphQLPageResult(
+        listings=listings,
+        end_cursor=end_cursor,
+        has_next_page=has_next,
+    )
 
 
 def _extract_edges(data: dict) -> list[dict]:
@@ -113,6 +152,40 @@ def _extract_edges(data: dict) -> list[dict]:
     return []
 
 
+def _extract_page_info(data: dict) -> tuple[str | None, bool]:
+    """Extract pagination cursor from a GraphQL response.
+
+    Facebook embeds page_info alongside the edges in feed_units (or similar).
+    The end_cursor is an opaque string used to fetch the next page.
+
+    Returns:
+        Tuple of (end_cursor, has_next_page).
+    """
+    # All known paths where page_info lives (sibling to edges)
+    _PAGE_INFO_PATHS: list[list[str]] = [
+        ["data", "marketplace_search", "feed_units", "page_info"],
+        ["data", "viewer", "marketplace_feed_stories", "page_info"],
+        ["data", "marketplace_category_feed", "page_info"],
+        # Alternate nesting seen in some responses
+        ["data", "marketplace_search", "feed_units", "pageInfo"],
+    ]
+
+    for path in _PAGE_INFO_PATHS:
+        obj: Any = data
+        try:
+            for key in path:
+                obj = obj[key]
+            if isinstance(obj, dict):
+                cursor = obj.get("end_cursor") or obj.get("endCursor")
+                has_next = obj.get("has_next_page", obj.get("hasNextPage", False))
+                if cursor:
+                    return str(cursor), bool(has_next)
+        except (KeyError, TypeError, IndexError):
+            continue
+
+    return None, False
+
+
 def _parse_edge_node(edge: dict) -> GraphQLListingData | None:
     """Parse a single edge node into GraphQLListingData."""
     try:
@@ -123,19 +196,75 @@ def _parse_edge_node(edge: dict) -> GraphQLListingData | None:
         if not ext_id:
             return None
 
+        # Real Facebook listing IDs are pure numeric strings (e.g., "1234567890").
+        # Non-listing nodes have compound IDs like
+        # "19764:IN_MEMORY_MARKETPLACE_FEED_STORY_ENT:EntMarketplaceSearchFeedNoResults".
+        # These are search metadata, "no results" placeholders, or feed story
+        # wrappers — not actual marketplace listings.
+        if not ext_id.isdigit():
+            return None
+
         title = listing.get("marketplace_listing_title", "")
 
-        # Price extraction
+        # Guard: if there's no title AND no price fields, this isn't a real
+        # listing node — it's likely search metadata that has a numeric `id`
+        # but no listing data. Skip it.
+        if not title and not listing.get("listing_price") and not listing.get("price"):
+            return None
+
+        # Price extraction — Facebook uses different price keys and formats
+        # across endpoints. The anonymous GraphQL may use "listing_price",
+        # "price", or nest the amount in different structures.
         price = None
         currency = "USD"
-        price_obj = listing.get("listing_price")
-        if price_obj and isinstance(price_obj, dict):
-            try:
-                amount_str = str(price_obj.get("amount", ""))
-                price = float(amount_str.replace(",", "")) if amount_str else None
-            except (ValueError, TypeError):
-                price = None
-            currency = price_obj.get("currency", "USD")
+        # Try multiple known price field names
+        for price_key in ("listing_price", "price", "formatted_price"):
+            price_obj = listing.get(price_key)
+            if price_obj and isinstance(price_obj, dict):
+                try:
+                    # Priority 1: "amount" field is in DOLLARS as a string
+                    amount_str = price_obj.get("amount")
+                    if not amount_str:
+                        # Priority 2: offset fields are in CENTS — must divide by 100
+                        cents_str = (
+                            price_obj.get("amount_with_offset_in_currency")
+                            or price_obj.get("amount_with_offset_amount")
+                            or price_obj.get("amount_with_offset")
+                        )
+                        if cents_str:
+                            try:
+                                amount_str = str(float(str(cents_str)) / 100.0)
+                            except (ValueError, TypeError):
+                                amount_str = None
+                    if not amount_str:
+                        # Priority 3: formatted display string ("$18.00")
+                        amount_str = (
+                            price_obj.get("formatted_amount")
+                            or price_obj.get("text", "")
+                            or ""
+                        )
+                    amount_str = str(amount_str) if amount_str else ""
+                    if amount_str:
+                        # Strip currency symbols and parse
+                        cleaned = amount_str.replace(",", "").replace("$", "").strip()
+                        price = float(cleaned) if cleaned else None
+                except (ValueError, TypeError):
+                    price = None
+                currency = price_obj.get("currency", "USD")
+                if price is not None:
+                    break
+            elif price_obj and isinstance(price_obj, (int, float)):
+                price = float(price_obj)
+                break
+            elif price_obj and isinstance(price_obj, str):
+                # Price as plain string like "$25" or "25.00"
+                try:
+                    cleaned = price_obj.replace(",", "").replace("$", "").strip()
+                    price = float(cleaned) if cleaned else None
+                except (ValueError, TypeError):
+                    pass
+                if price is not None:
+                    break
 
         # Image
         image_urls: list[str] = []
@@ -156,13 +285,24 @@ def _parse_edge_node(edge: dict) -> GraphQLListingData | None:
                     if uri and uri not in image_urls:
                         image_urls.append(uri)
 
-        # Location
+        # Location (display name + coordinates if available)
         location = ""
+        latitude = None
+        longitude = None
         loc_obj = listing.get("location")
         if loc_obj and isinstance(loc_obj, dict):
             rg = loc_obj.get("reverse_geocode", {})
             cp = rg.get("city_page", {})
             location = cp.get("display_name", "")
+            # Try extracting coordinates from location object (may not be in search results)
+            try:
+                lat_val = loc_obj.get("latitude")
+                lon_val = loc_obj.get("longitude")
+                if lat_val is not None and lon_val is not None:
+                    latitude = float(lat_val)
+                    longitude = float(lon_val)
+            except (ValueError, TypeError):
+                pass
 
         # Condition
         condition = listing.get("marketplace_listing_condition_type")
@@ -186,6 +326,16 @@ def _parse_edge_node(edge: dict) -> GraphQLListingData | None:
         if seller and isinstance(seller, dict):
             seller_name = seller.get("name", "")
 
+        # Category ID — numeric category assigned by Facebook (100% reliable filtering)
+        category_id = listing.get("marketplace_listing_category_id")
+        if category_id is not None:
+            category_id = str(category_id)
+
+        # Delivery types (["IN_PERSON", "SHIPPING"])
+        delivery_types = listing.get("delivery_types", [])
+        if not isinstance(delivery_types, list):
+            delivery_types = []
+
         # Sponsored / boosted listing detection (best-effort)
         is_sponsored = bool(listing.get("is_marketplace_boost_listing", False))
         tracking = listing.get("tracking")
@@ -205,6 +355,10 @@ def _parse_edge_node(edge: dict) -> GraphQLListingData | None:
             seller_name=seller_name,
             posted_at=posted_at,
             is_sponsored=is_sponsored,
+            category_id=category_id,
+            delivery_types=delivery_types,
+            latitude=latitude,
+            longitude=longitude,
         )
     except Exception:
         return None

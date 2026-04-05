@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from agentic_scraper.browser.graphql_interceptor import (
@@ -18,6 +18,22 @@ from agentic_scraper.browser.graphql_interceptor import (
 )
 from agentic_scraper.browser.stealth import random_delay
 from agentic_scraper.scanner.interest_matcher import InterestMatcher
+from agentic_scraper.scanner.listing_filter import (
+    CategoryFilter,
+    FilterChain,
+    FilterStage,
+    FreshnessFilter,
+    GarbageFilter,
+    GeoDistanceFilter,
+    LocationTextFilter,
+    SponsoredFilter,
+)
+from agentic_scraper.sites.facebook.graphql_client import (
+    AnonymousGraphQLClient,
+    build_search_params,
+    miles_to_km,
+    resolve_center_coordinates,
+)
 from agentic_scraper.sites.facebook.patrol_scanner import PatrolScanner, RadiusOscillator
 from agentic_scraper.storage.models import Deal, DealScore, Listing, ScanLog
 from agentic_scraper.utils.logging import get_logger
@@ -33,6 +49,7 @@ if TYPE_CHECKING:
     from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
 
 log = get_logger("scanner.patrol_engine")
+
 
 # Map string score names to DealScore for config-based filtering
 _SCORE_RANK: dict[DealScore, int] = {
@@ -76,6 +93,14 @@ def _graphql_to_listing(gql: GraphQLListingData) -> Listing:
         raw_data["condition"] = gql.condition
     if gql.posted_at:
         raw_data["posted_at_raw"] = gql.posted_at
+    if gql.category_id:
+        raw_data["category_id"] = gql.category_id
+    if gql.delivery_types:
+        raw_data["delivery_types"] = gql.delivery_types
+    if gql.latitude is not None:
+        raw_data["latitude"] = gql.latitude
+    if gql.longitude is not None:
+        raw_data["longitude"] = gql.longitude
 
     # Parse creation_time unix timestamp into proper datetime
     posted_at = None
@@ -133,9 +158,11 @@ class PatrolEngine:
         interest_matcher: InterestMatcher,
         smart_deal_radar: SmartDealRadar | None = None,
         exclusion_repo: ExclusionRepository | None = None,
+        anonymous_browser: object | None = None,
         config: AppConfig,
     ) -> None:
         self._browser = browser_manager
+        self._anonymous_browser = anonymous_browser
         self._listing_repo = listing_repo
         self._watchlist_repo = watchlist_repo
         self._deal_repo = deal_repo
@@ -157,17 +184,63 @@ class PatrolEngine:
         )
         self._scanner = PatrolScanner(
             radius_oscillator=oscillator,
-            scroll_steps=5,
+            scroll_steps=getattr(config, "patrol_scroll_steps_category", 20),
+            search_scroll_steps=getattr(config, "patrol_scroll_steps_search", 30),
             days_since_listed=config.patrol_days_since_listed,
             fixed_radius=fixed_radius,
+            scroll_until_stable=getattr(config, "patrol_scroll_until_stable", True),
+            scroll_max_stable_checks=getattr(config, "patrol_scroll_max_stable_checks", 3),
         )
 
         # Parse min score from config string
         self._min_score = DealScore(config.deal_radar_min_score)
         self._max_evaluations = config.deal_radar_max_evaluations
 
+        # Build unified filter chain (replaces hardcoded _ALLOWED_NOTIFY_STATES,
+        # _EXCLUDED_CATEGORY_PATTERNS, triple-check pattern, and backlog bypass).
+        center_lat, center_lon = resolve_center_coordinates(
+            city_slug=config.marketplace_default_location,
+            explicit_lat=getattr(config, "patrol_center_lat", 0.0),
+            explicit_lon=getattr(config, "patrol_center_lon", 0.0),
+        )
+        self._filter_chain = FilterChain([
+            # --- PRE_ENRICHMENT stage ---
+            SponsoredFilter(),
+            LocationTextFilter(  # Coarse geo pre-check using state centroids
+                center_lat=center_lat,
+                center_lon=center_lon,
+                radius_miles=float(config.patrol_base_radius_miles),
+            ),
+            CategoryFilter(),  # Uses category_id when available, keyword fallback
+            FreshnessFilter(max_age_hours=config.listing_max_age_hours),
+            # --- POST_ENRICHMENT stage ---
+            GarbageFilter(),
+            # Re-check category with enriched descriptions (keyword fallback only
+            # fires when category_id is absent, so no double-rejection risk).
+            CategoryFilter(
+                name="category_post",
+                stage=FilterStage.POST_ENRICHMENT,
+            ),
+            FreshnessFilter(
+                name="freshness_post",
+                stage=FilterStage.POST_ENRICHMENT,
+                max_age_hours=config.listing_max_age_hours,
+            ),
+            GeoDistanceFilter(
+                center_lat=center_lat,
+                center_lon=center_lon,
+                radius_miles=float(config.patrol_base_radius_miles),
+            ),
+        ])
+
         # Sweep mode: "unified" (1 page load) or "categories" (multi-page)
         self._sweep_mode = getattr(config, "patrol_sweep_mode", "unified")
+
+        # Anonymous GraphQL client (depersonalized, no browser needed)
+        self._graphql_enabled = getattr(config, "patrol_anonymous_graphql_enabled", True)
+        self._graphql_client = AnonymousGraphQLClient(
+            min_delay_seconds=getattr(config, "patrol_graphql_min_delay_seconds", 12.0),
+        )
 
         # Shadow ban tracking
         self._consecutive_empty_sweeps = 0
@@ -187,13 +260,31 @@ class PatrolEngine:
         try:
             page = await self._browser.get_page()
 
+            # Pre-fetch known listing IDs for early-exit pagination.
+            # On cycle 2+, most GQL results are already in the DB.
+            # Passing known_ids lets pagination stop early when >80%
+            # of a page is duplicates, cutting fetch time significantly.
+            known_ids: set[str] = set()
+            try:
+                known_ids = await self._listing_repo.get_known_external_ids(
+                    "facebook_marketplace", max_age_hours=48,
+                )
+                if known_ids:
+                    log.info("Loaded known listing IDs for dedup", count=len(known_ids))
+            except Exception:
+                pass  # Non-critical — pagination still works without it
+
             # Step 1: Sweep + intercept (GraphQL primary, DOM fallback)
-            all_listings, data_source = await self._sweep_and_intercept(page, result)
+            all_listings, data_source = await self._sweep_and_intercept(
+                page, result, known_ids=known_ids,
+            )
             result.data_source = data_source
 
             # Step 1b: Watchlist keyword searches
             if getattr(self._config, "patrol_watchlist_sweep_enabled", True):
-                watchlist_listings = await self._sweep_watchlist_items(page, result)
+                watchlist_listings = await self._sweep_watchlist_items(
+                    page, result, known_ids=known_ids,
+                )
                 # Merge; dedup handles overlap below
                 existing_ids = {l.external_id for l in all_listings if l.external_id}
                 for wl in watchlist_listings:
@@ -204,37 +295,113 @@ class PatrolEngine:
             # Step 2: Batch dedup
             new_listings = await self._batch_dedup_and_save(all_listings, result)
 
-            # Step 2b: Exempt watchlist matches from freshness filter.
-            # DOM-sourced watchlist results lack posted_at timestamps.
+            # Step 2b: Identify watchlist-matched listings for filter exemptions.
+            # These listings get exempted from category and geo filters because:
+            # 1. They were found via a user's targeted watchlist search (already
+            #    geo-scoped to the user's location), so the global patrol center
+            #    shouldn't reject them.
+            # 2. Users may explicitly watch items in excluded categories.
             exempt_ids: set[str] = set()
             interests = await self._watchlist_repo.list_active()
             if interests:
                 for listing in new_listings:
-                    if listing.posted_at is None:
-                        matches = self._interest_matcher.match_single(
-                            listing, interests
-                        )
-                        if matches:
-                            exempt_ids.add(listing.external_id)
+                    # Primary signal: tagged during watchlist sweep
+                    if (listing.raw_data or {}).get("_watch_item_id"):
+                        exempt_ids.add(listing.external_id)
+                    # Secondary: title/description matches a watchlist interest
+                    elif self._interest_matcher.match_single(listing, interests):
+                        exempt_ids.add(listing.external_id)
                 if exempt_ids:
                     log.info(
                         "Watchlist pre-filter exemptions",
                         exempt_count=len(exempt_ids),
                     )
 
-            # Step 2c: Filter stale + sponsored listings (watchlist matches exempt)
-            sponsored_pre = sum(1 for l in new_listings if l.is_sponsored)
-            new_listings = self._filter_stale(new_listings, exempt_ids=exempt_ids)
-            result.sponsored_filtered = sponsored_pre
+            # Step 2c: Pre-enrichment filtering (unified filter chain).
+            # Watchlist-matched listings are exempt from category and geo
+            # filters — their search was already location-targeted by the
+            # watchlist item's own config. This ensures a Kentucky user's
+            # watchlist results aren't rejected by a Wisconsin-centered filter.
+            _WATCHLIST_TAGS = frozenset({
+                "watchlist_category_override",
+                "watchlist_geo_override",
+            })
+            tags_by_id: dict[str, frozenset[str]] = {}
+            for eid in exempt_ids:
+                tags_by_id[eid] = _WATCHLIST_TAGS
+            new_listings, pre_rejected = self._filter_chain.filter_batch(
+                new_listings,
+                stage=FilterStage.PRE_ENRICHMENT,
+                tags_by_id=tags_by_id,
+            )
+            result.sponsored_filtered = sum(
+                1 for _, r in pre_rejected
+                if any(v.filter_name == "sponsored" for v in r.rejections)
+            )
 
             # Step 2d: Sort order verification (diagnostic only)
             self._verify_sort_order(new_listings)
 
+            # Step 2f: Pre-enrichment priority cap.
+            # Apply the evaluation cap BEFORE detail enrichment to avoid wasting
+            # browser time on listings that will be discarded. Previously 210+
+            # listings were enriched via detail pages (15+ min of browser work)
+            # only for the cap to discard all but 30 in _evaluate().
+            # Watchlist-matched listings go first, then general listings.
+            interests_for_sort = await self._watchlist_repo.list_active()
+            if interests_for_sort:
+                wl_first: list[Listing] = []
+                wl_rest: list[Listing] = []
+                for listing in new_listings:
+                    watch_tag = (listing.raw_data or {}).get("_watch_item_id")
+                    if watch_tag:
+                        wl_first.append(listing)
+                    else:
+                        matches = self._interest_matcher.match_single(
+                            listing, interests_for_sort
+                        )
+                        if matches:
+                            wl_first.append(listing)
+                        else:
+                            wl_rest.append(listing)
+                new_listings = wl_first + wl_rest
+
+            if len(new_listings) > self._max_evaluations:
+                log.info(
+                    "Pre-enrichment cap applied",
+                    before=len(new_listings),
+                    after=self._max_evaluations,
+                )
+                new_listings = new_listings[: self._max_evaluations]
+
+            # Step 2g: Enrich capped listings by visiting their detail pages.
+            # The search results grid only shows title, price, location, and
+            # image — descriptions are only on individual listing pages.
+            # Without descriptions, text triage and VLM evaluation are blind
+            # to item details (condition, brand, features, seller motivation).
+            # This also fixes broken DOM extractions ("Just listed" titles)
+            # as a side effect, since detail pages have real OG/JSON-LD data.
+            new_listings = await self._enrich_listings_from_detail_pages(
+                page, new_listings,
+            )
+
+            # Step 2h: Post-enrichment filtering (unified filter chain).
+            # Runs: GarbageFilter, CategoryFilter (with descriptions),
+            # FreshnessFilter (with enriched timestamps), GeoDistanceFilter
+            # (with coordinates from detail pages).
+            new_listings, post_rejected = self._filter_chain.filter_batch(
+                new_listings,
+                stage=FilterStage.POST_ENRICHMENT,
+                tags_by_id=tags_by_id,
+            )
+
             # Step 3: Evaluate (SmartDealRadar + InterestMatcher)
-            eval_result = await self._evaluate(new_listings, result)
+            eval_result, all_evaluated = await self._evaluate(new_listings, result)
 
             # Step 4: Notify (public channel + user DMs)
-            await self._notify(eval_result, new_listings, result)
+            # Pass all_evaluated (includes backlog) so notification can find
+            # any listing that produced a deal — not just current cycle's new listings.
+            await self._notify(eval_result, all_evaluated, result)
 
         except Exception as exc:
             log.error("Patrol cycle failed", error=str(exc))
@@ -321,24 +488,66 @@ class PatrolEngine:
     }"""
 
     async def _sweep_and_intercept(
-        self, page: object, result: PatrolCycleResult
+        self, page: object, result: PatrolCycleResult,
+        known_ids: set[str] | None = None,
     ) -> tuple[list[Listing], str]:
-        """Navigate + scroll, capture GraphQL via JS interception, fall back to DOM.
+        """Fetch listings via anonymous GraphQL first, fall back to browser DOM.
 
-        Injects a fetch wrapper before navigation that captures Facebook's
-        GraphQL responses, providing creation_time for freshness filtering.
+        Priority order:
+        1. Anonymous GraphQL direct POST (__user=0) — depersonalized, fast, rich data
+        2. Browser JS GraphQL interception — captures what the browser fetches
+        3. Browser DOM extraction — basic title/price/URL scraping
 
         Returns:
             Tuple of (listings, data_source).
         """
-        # Inject GraphQL fetch interceptor before navigation
+        # Step 1: Anonymous GraphQL category searches (__user=0)
+        # Runs broad keyword searches (electronics, furniture, etc.) to get
+        # diverse, depersonalized listings. This is the primary source.
+        anon_listings = await self._fetch_anonymous_graphql(result, known_ids=known_ids)
+
+        # Step 2: Anonymous browser DOM sweep (separate headless profile)
+        # Uses a clean browser with NO login, NO cookies, NO search history
+        # to get the true "newest listings" empty-query feed.
+        anon_dom_listings: list[Listing] = []
+        if self._anonymous_browser and getattr(
+            self._config, "patrol_anonymous_browser_enabled", True
+        ):
+            try:
+                anon_page = await self._anonymous_browser.get_page()
+                anon_dom_listings = await self._sweep_categories(anon_page, result)
+                if anon_dom_listings:
+                    log.info(
+                        "Anonymous browser DOM sweep",
+                        count=len(anon_dom_listings),
+                    )
+            except Exception as exc:
+                log.warning("Anonymous browser sweep failed", error=str(exc)[:100])
+
+        # Merge: GQL + anonymous DOM (both depersonalized)
+        combined = list(anon_listings)
+        seen_ids = {l.external_id for l in combined}
+        for l in anon_dom_listings:
+            if l.external_id not in seen_ids:
+                seen_ids.add(l.external_id)
+                combined.append(l)
+
+        if combined:
+            log.info(
+                "General browse complete (depersonalized)",
+                gql_count=len(anon_listings),
+                dom_count=len(anon_dom_listings),
+                total=len(combined),
+            )
+            self._consecutive_empty_sweeps = 0
+            return combined, "anonymous_graphql"
+
+        # Step 3: Fall back to authenticated browser DOM (last resort)
         try:
             await page.evaluate(self._INJECT_GQL_CAPTURE_JS)
         except Exception as exc:
             log.debug("GraphQL JS interceptor injection failed", error=str(exc))
 
-        # Perform the actual sweep (navigate + scroll + DOM extract)
-        # Navigation and scrolling trigger GraphQL requests that we capture
         dom_listings = await self._sweep_categories(page, result)
 
         # Re-inject after navigation (page.goto resets the document)
@@ -374,18 +583,15 @@ class PatrolEngine:
 
         # Decide which data source to use
         if graphql_listings:
-            # GraphQL data is richer — prefer it, fill gaps with DOM
             gql_ids = {l.external_id for l in graphql_listings}
             for dl in dom_listings:
                 if dl.external_id and dl.external_id not in gql_ids:
                     graphql_listings.append(dl)
                     gql_ids.add(dl.external_id)
-
             data_source = "graphql" if len(gql_ids) > len(dom_listings) else "mixed"
             self._consecutive_empty_sweeps = 0
             return graphql_listings, data_source
 
-        # GraphQL empty — fall back to DOM
         if dom_listings:
             self._consecutive_empty_sweeps = 0
             return dom_listings, "dom_fallback"
@@ -400,6 +606,87 @@ class PatrolEngine:
             )
 
         return [], "dom_fallback"
+
+    async def _fetch_anonymous_graphql(
+        self, result: PatrolCycleResult,
+        known_ids: set[str] | None = None,
+    ) -> list[Listing]:
+        """Fetch listings via anonymous GraphQL category searches.
+
+        Runs depersonalized queries with __user=0 for multiple broad categories
+        (electronics, furniture, appliances, etc.) to get diverse coverage of
+        the newest marketplace listings without personalization bias.
+
+        Returns:
+            List of Listing objects, or empty list on failure.
+        """
+        if not self._graphql_enabled or self._graphql_client.is_doc_id_broken:
+            return []
+
+        categories = getattr(
+            self._config, "patrol_anonymous_browse_categories",
+            [""],  # Fallback: just the empty browse
+        )
+
+        # Parallelize category fetches with semaphore (same pattern as
+        # _sweep_watchlist_items). Cuts category phase from ~120s to ~40-60s.
+        concurrency = getattr(self._config, "patrol_graphql_concurrency", 2)
+        semaphore = asyncio.Semaphore(concurrency)
+        all_results: list[list[GraphQLListingData]] = []
+
+        async def _fetch_category(category: str) -> list[GraphQLListingData]:
+            async with semaphore:
+                try:
+                    params = build_search_params(
+                        query=category,
+                        radius_miles=self._config.patrol_base_radius_miles,
+                        days_listed=self._config.patrol_days_since_listed,
+                        count=self._config.scan_max_listings_per_query,
+                    )
+                    return await self._graphql_client.search_all_pages(
+                        params, max_pages=2, known_ids=known_ids,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "Anonymous GraphQL category failed",
+                        category=category or "(browse)",
+                        error=str(exc)[:100],
+                    )
+                    return []
+
+        all_results = await asyncio.gather(
+            *(_fetch_category(cat) for cat in categories)
+        )
+
+        # Merge and dedup across categories
+        all_listings: list[Listing] = []
+        seen_ids: set[str] = set()
+        for cat_idx, gql_results in enumerate(all_results):
+            new_count = 0
+            for gql in gql_results:
+                if gql.external_id not in seen_ids:
+                    seen_ids.add(gql.external_id)
+                    all_listings.append(_graphql_to_listing(gql))
+                    new_count += 1
+            if new_count:
+                cat_name = categories[cat_idx] or "(browse)"
+                log.info(
+                    "Anonymous GraphQL category fetch",
+                    category=cat_name,
+                    new_listings=new_count,
+                    total_so_far=len(all_listings),
+                )
+
+        if all_listings:
+            result.categories_swept += len(categories)
+            result.total_listings_seen += len(all_listings)
+            log.info(
+                "Anonymous GraphQL browse complete",
+                categories_searched=len(categories),
+                total_listings=len(all_listings),
+            )
+
+        return all_listings
 
     async def _sweep_categories(
         self, page: object, result: PatrolCycleResult
@@ -451,12 +738,18 @@ class PatrolEngine:
         return all_listings
 
     async def _sweep_watchlist_items(
-        self, page: object, result: PatrolCycleResult
+        self, page: object, result: PatrolCycleResult,
+        known_ids: set[str] | None = None,
     ) -> list[Listing]:
         """Search Facebook for each active watchlist item.
 
-        Runs a keyword search per watchlist interest, collecting fresh listings
-        that the main category sweep might have missed.
+        Two-phase approach for speed:
+        1. Run all GraphQL searches concurrently (semaphore-limited, ~2-3 at once)
+        2. Run DOM fallback serially only for searches where GQL got < 5 results
+
+        This cuts watchlist sweep from ~8 min to ~2-3 min without sacrificing
+        coverage — GraphQL pagination gets 50-100 listings per search, and DOM
+        only kicks in when GQL fails.
 
         Args:
             page: Browser page instance.
@@ -472,49 +765,142 @@ class PatrolEngine:
         max_items = getattr(self._config, "patrol_watchlist_max_items", 10)
         interests = interests[:max_items]
 
+        gql_watchlist_enabled = (
+            self._graphql_enabled
+            and getattr(self._config, "patrol_graphql_watchlist_enabled", True)
+            and not self._graphql_client.is_doc_id_broken
+        )
+
+        # Build the full list of (item, cfg) pairs to search
+        search_tasks: list[tuple[object, dict]] = []
+        for item in interests:
+            configs = item.search_configs if item.search_configs else [{}]
+            for cfg in configs:
+                search_tasks.append((item, cfg))
+
+        # --- Phase 1: Concurrent GraphQL searches ---
+        gql_concurrency = getattr(self._config, "patrol_graphql_concurrency", 2)
+        semaphore = asyncio.Semaphore(gql_concurrency)
+        max_pages = getattr(self._config, "patrol_graphql_max_pages", 3)
+
+        # Results indexed by task position
+        gql_results_map: dict[int, list[Listing]] = {}
+
+        async def _gql_search(idx: int, item: object, cfg: dict) -> None:
+            """Run a single GraphQL search under the semaphore."""
+            if not gql_watchlist_enabled:
+                gql_results_map[idx] = []
+                return
+            async with semaphore:
+                try:
+                    location = (
+                        cfg.get("location")
+                        or item.location
+                        or getattr(self._config, "marketplace_default_location", None)
+                    )
+                    radius = cfg.get("radius_miles") or self._config.patrol_base_radius_miles
+                    gql_params = build_search_params(
+                        query=item.interest,
+                        location_slug=location,
+                        radius_miles=radius,
+                        max_price=cfg.get("max_price", item.max_price),
+                        min_price=cfg.get("min_price"),
+                        days_listed=self._config.patrol_days_since_listed,
+                        condition=cfg.get("condition"),
+                        count=self._config.scan_max_listings_per_query,
+                    )
+                    raw = await self._graphql_client.search_all_pages(
+                        gql_params, max_pages=max_pages,
+                        known_ids=known_ids,
+                    )
+                    listings = [_graphql_to_listing(g) for g in raw]
+                    gql_results_map[idx] = listings
+                    if listings:
+                        log.info(
+                            "Watchlist GraphQL success",
+                            interest=item.interest,
+                            count=len(listings),
+                        )
+                except Exception as exc:
+                    log.debug(
+                        "Watchlist GraphQL failed",
+                        interest=item.interest,
+                        error=str(exc)[:100],
+                    )
+                    gql_results_map[idx] = []
+
+        # Launch all GraphQL searches concurrently
+        gql_coros = [
+            _gql_search(i, item, cfg)
+            for i, (item, cfg) in enumerate(search_tasks)
+        ]
+        await asyncio.gather(*gql_coros)
+
+        # --- Phase 2: Serial DOM fallback for searches that need it ---
         all_search_listings: list[Listing] = []
         seen_ids: set[str] = set()
-
         searches_run = 0
-        for item in interests:
-            # Build list of search configs to run for this item.
-            # If search_configs is empty, fall back to a single default search.
-            configs = item.search_configs if item.search_configs else [{}]
+        dom_searches = 0
 
-            for cfg in configs:
-                try:
-                    listings = await self._scanner.sweep_search(
+        for idx, (item, cfg) in enumerate(search_tasks):
+            try:
+                gql_listings = gql_results_map.get(idx, [])
+
+                location = (
+                    cfg.get("location")
+                    or item.location
+                    or getattr(self._config, "marketplace_default_location", None)
+                )
+
+                # DOM fallback only when GQL got < 5 results
+                dom_listings: list[Listing] = []
+                if len(gql_listings) < 5:
+                    dom_listings = await self._scanner.sweep_search(
                         page,
                         item.interest,
                         max_price=cfg.get("max_price", item.max_price),
                         min_price=cfg.get("min_price"),
-                        location_slug=cfg.get("location"),
+                        location_slug=location,
                         condition=cfg.get("condition"),
                         radius_miles=cfg.get("radius_miles"),
                     )
-                    for listing in listings:
-                        if listing.external_id and listing.external_id not in seen_ids:
-                            seen_ids.add(listing.external_id)
-                            all_search_listings.append(listing)
-                    searches_run += 1
-
-                    # Stealth delay between searches
+                    dom_searches += 1
+                    # Stealth delay only for browser-based searches
                     await random_delay(
                         self._config.patrol_inter_category_delay_min_ms,
                         self._config.patrol_inter_category_delay_max_ms,
                     )
-                except Exception as exc:
-                    log.warning(
-                        "Watchlist search failed",
-                        interest=item.interest,
-                        config=cfg,
-                        error=str(exc),
-                    )
+
+                # Merge: GraphQL primary, DOM fills gaps
+                merged: list[Listing] = list(gql_listings)
+                gql_ids = {l.external_id for l in gql_listings if l.external_id}
+                for dl in dom_listings:
+                    if dl.external_id and dl.external_id not in gql_ids:
+                        merged.append(dl)
+                        gql_ids.add(dl.external_id)
+
+                for listing in merged:
+                    if listing.external_id and listing.external_id not in seen_ids:
+                        seen_ids.add(listing.external_id)
+                        listing.raw_data["_watch_item_id"] = item.id
+                        listing.raw_data["_watch_interest"] = item.interest
+                        all_search_listings.append(listing)
+                searches_run += 1
+
+            except Exception as exc:
+                log.warning(
+                    "Watchlist search failed",
+                    interest=item.interest,
+                    config=cfg,
+                    error=str(exc),
+                )
 
         log.info(
             "Watchlist sweep complete",
             interests_searched=len(interests),
             searches_run=searches_run,
+            gql_searches=len(search_tasks),
+            dom_fallback_searches=dom_searches,
             listings_found=len(all_search_listings),
         )
         return all_search_listings
@@ -570,104 +956,7 @@ class PatrolEngine:
         )
         return new_listings
 
-    def _filter_stale(
-        self,
-        listings: list[Listing],
-        exempt_ids: set[str] | None = None,
-    ) -> list[Listing]:
-        """Filter out sponsored, stale, and timestamp-less listings.
 
-        Sponsored listings are ALWAYS discarded — they are paid promotions
-        injected by Facebook's engagement algorithm, not organic deals.
-
-        Listings without a posted_at timestamp are kept (DOM scraper can't
-        extract dates, but the page is sorted newest-first so they're likely
-        fresh). The dedup filter prevents re-evaluation of already-seen IDs.
-
-        Args:
-            listings: Listings to filter.
-            exempt_ids: External IDs exempt from the no-timestamp discard
-                (typically watchlist-matched listings from DOM keyword searches).
-
-        Returns:
-            Listings that pass the freshness check.
-        """
-        max_age_hours = getattr(self._config, "listing_max_age_hours", 6)
-        exempt = exempt_ids or set()
-
-        # Always filter sponsored and shipping listings, even when age filter is disabled
-        filtered: list[Listing] = []
-        sponsored_count = 0
-        shipping_count = 0
-        for listing in listings:
-            if listing.is_sponsored:
-                sponsored_count += 1
-                log.debug(
-                    "Sponsored listing filtered",
-                    title=listing.title[:40],
-                    external_id=listing.external_id,
-                )
-                continue
-            # Filter "Ships to you" / non-local listings
-            loc = (listing.location or "").lower()
-            if "ship" in loc and ("you" in loc or "nationwide" in loc):
-                shipping_count += 1
-                log.debug(
-                    "Shipping listing filtered",
-                    title=listing.title[:40],
-                    location=listing.location,
-                )
-                continue
-            filtered.append(listing)
-
-        if max_age_hours <= 0:
-            if sponsored_count or shipping_count:
-                log.info(
-                    "Freshness filter applied",
-                    kept=len(filtered),
-                    sponsored=sponsored_count,
-                    shipping=shipping_count,
-                )
-            return filtered
-
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
-        fresh: list[Listing] = []
-        stale_count = 0
-        no_timestamp_count = 0
-        exempt_kept = 0
-
-        for listing in filtered:
-            if listing.posted_at is None:
-                # No timestamp = DOM scraper couldn't extract it.
-                # Since we sort by newest-first, these are likely fresh.
-                # Keep them — the dedup filter already prevents re-evaluation.
-                fresh.append(listing)
-                if listing.external_id in exempt:
-                    exempt_kept += 1
-                else:
-                    no_timestamp_count += 1
-            elif listing.posted_at >= cutoff:
-                fresh.append(listing)
-            else:
-                stale_count += 1
-                log.debug(
-                    "Stale listing filtered",
-                    title=listing.title[:40],
-                    posted_at=str(listing.posted_at),
-                )
-
-        if stale_count or no_timestamp_count or exempt_kept or sponsored_count or shipping_count:
-            log.info(
-                "Freshness filter applied",
-                kept=len(fresh),
-                stale=stale_count,
-                no_timestamp=no_timestamp_count,
-                watchlist_exempt=exempt_kept,
-                sponsored=sponsored_count,
-                shipping=shipping_count,
-            )
-
-        return fresh
 
     def _verify_sort_order(self, listings: list[Listing]) -> None:
         """Verify that listings are in descending posted_at order.
@@ -700,26 +989,222 @@ class PatrolEngine:
                 total_timestamped=len(timestamped),
             )
 
+    # Maximum concurrent tabs for detail page enrichment.
+    # 2 is safe for a single logged-in account — mimics a human opening
+    # a couple of tabs to compare listings. 3+ risks detection.
+    _ENRICHMENT_CONCURRENCY = 2
+
+    async def _enrich_listings_from_detail_pages(
+        self, page: object, listings: list[Listing]
+    ) -> list[Listing]:
+        """Visit detail pages to enrich new listings with descriptions.
+
+        Uses 2-tab parallelism to cut enrichment time by ~30-40%.
+        Tabs are staggered and inter-batch delays randomized to mimic
+        natural browsing (right-click → open in new tab pattern).
+
+        The search results grid only provides title, price, location, and a
+        thumbnail.  Descriptions, condition, seller info, and additional images
+        are only available on individual listing detail pages via Open Graph
+        meta tags and JSON-LD structured data.
+
+        Listings that already have a description (e.g. from GraphQL intercept)
+        are skipped to avoid unnecessary page navigations.
+
+        Args:
+            page: Browser page for navigation.
+            listings: All new listings from this patrol cycle.
+
+        Returns:
+            The same list with listings replaced by enriched versions.
+        """
+        from agentic_scraper.sites.facebook.detail_extractor import (
+            extract_listing_details,
+        )
+
+        if not listings:
+            return listings
+
+        # Identify which listings need enrichment.
+        # Skip listings that already have a meaningful description (GraphQL source).
+        needs_enrichment: list[int] = []
+        for i, listing in enumerate(listings):
+            if not listing.listing_url:
+                continue
+            # Already has a real description — skip
+            if listing.description and len(listing.description.strip()) > 10:
+                continue
+            needs_enrichment.append(i)
+
+        if not needs_enrichment:
+            log.info(
+                "All listings already enriched, skipping detail page visits",
+                total=len(listings),
+            )
+            return listings
+
+        concurrency = self._ENRICHMENT_CONCURRENCY
+        log.info(
+            "Enriching listings via detail pages",
+            to_enrich=len(needs_enrichment),
+            already_enriched=len(listings) - len(needs_enrichment),
+            total=len(listings),
+            concurrency=concurrency,
+        )
+
+        enriched_count = 0
+        failed_count = 0
+
+        async def _enrich_one(idx: int, tab: object) -> None:
+            """Enrich a single listing using the given browser tab."""
+            nonlocal enriched_count, failed_count
+            listing = listings[idx]
+            try:
+                enriched = await extract_listing_details(tab, listing)
+                got_new_data = (
+                    (enriched.description and not listing.description)
+                    or enriched.title != listing.title
+                    or enriched.price != listing.price
+                )
+                if got_new_data:
+                    listings[idx] = enriched
+                    enriched_count += 1
+                    try:
+                        await self._listing_repo.save(enriched)
+                    except Exception:
+                        pass
+                    log.debug(
+                        "Listing enriched from detail page",
+                        external_id=listing.external_id,
+                        title=enriched.title[:50],
+                        has_description=bool(enriched.description),
+                        desc_len=len(enriched.description or ""),
+                        price=enriched.price,
+                    )
+            except Exception as exc:
+                failed_count += 1
+                log.warning(
+                    "Detail enrichment failed",
+                    external_id=listing.external_id,
+                    error=str(exc)[:100],
+                )
+
+        session = self._browser.get_session()
+
+        # Create extra tabs for parallel enrichment.
+        # All tabs share the same BrowserContext (cookies/session).
+        extra_tabs: list[object] = []
+        try:
+            for _ in range(concurrency - 1):
+                tab = await session.new_page()
+                extra_tabs.append(tab)
+        except Exception as exc:
+            log.warning(
+                "Could not create extra tabs, falling back to sequential",
+                error=str(exc)[:100],
+            )
+
+        all_tabs = [page, *extra_tabs]
+        batch_count = 0
+        # Early bail: if the first N listings all fail to enrich, the
+        # extraction method probably doesn't work on this session's pages.
+        # Stop wasting time navigating to 50 pages that return nothing.
+        _EARLY_BAIL_THRESHOLD = 5  # Give up after 5 consecutive misses
+        consecutive_misses = 0
+
+        # Process in batches of `concurrency` with staggered starts.
+        for batch_start in range(0, len(needs_enrichment), len(all_tabs)):
+            # Early bail check
+            if consecutive_misses >= _EARLY_BAIL_THRESHOLD:
+                skipped = len(needs_enrichment) - batch_start
+                log.warning(
+                    "Detail enrichment early bail — extraction not working",
+                    consecutive_misses=consecutive_misses,
+                    attempted=batch_start,
+                    skipped=skipped,
+                )
+                break
+
+            prev_enriched = enriched_count
+            batch = needs_enrichment[batch_start : batch_start + len(all_tabs)]
+            batch_count += 1
+
+            if len(batch) == 1:
+                # Single item — no parallelism needed
+                await _enrich_one(batch[0], all_tabs[0])
+            else:
+                # Stagger tab starts by 1-2s to look natural
+                tasks = []
+                for j, idx in enumerate(batch):
+                    if j > 0:
+                        await random_delay(1000, 2000)
+                    tasks.append(asyncio.create_task(_enrich_one(idx, all_tabs[j])))
+                await asyncio.gather(*tasks)
+
+            # Track consecutive misses for early bail
+            if enriched_count > prev_enriched:
+                consecutive_misses = 0  # Reset on any success
+            else:
+                consecutive_misses += len(batch)
+
+            # Inter-batch delay: 2-4s randomized, with occasional longer pause
+            if batch_start + len(all_tabs) < len(needs_enrichment):
+                if batch_count % 7 == 0:
+                    # Every ~7th batch, take a longer break to break pattern
+                    await random_delay(4000, 7000)
+                else:
+                    await random_delay(2000, 4000)
+
+        # Clean up extra tabs
+        for tab in extra_tabs:
+            try:
+                await session.close_page(tab)
+            except Exception:
+                pass
+        log.info(
+            "Detail enrichment complete",
+            attempted=len(needs_enrichment),
+            enriched=enriched_count,
+            failed=failed_count,
+            concurrency=len(all_tabs),
+            batches=batch_count,
+        )
+        return listings
+
+    # Garbage/stale/category/location filtering is now handled by the unified
+    # FilterChain (see listing_filter.py). The old _filter_garbage_listings,
+    # _filter_stale, and _filter_excluded_categories methods have been removed.
+
     async def _evaluate(
         self, listings: list[Listing], result: PatrolCycleResult
-    ) -> EvaluationResult:
-        """Run deal evaluation pipeline on new listings.
+    ) -> tuple[EvaluationResult, list[Listing]]:
+        """Run deal evaluation pipeline on new listings + backlog.
 
         SmartDealRadar handles text triage, visual enrichment, comparable
         sales, and VLM evaluation. Watchlist matches are prioritized.
+        Unevaluated listings from previous cycles are included in the backlog.
         """
         interests = await self._watchlist_repo.list_active()
 
-        # Prioritize: watchlist-matched listings first, then the rest
+        # Prioritize: watchlist-matched listings first, then the rest.
+        # A listing is watchlist-matched if either:
+        #   1. It was found via watchlist keyword search (_watch_item_id tag), OR
+        #   2. Its title/description matches a watchlist interest (keyword matching)
         if interests:
             watchlist_matched: list[Listing] = []
             non_matched: list[Listing] = []
             for listing in listings:
-                matches = self._interest_matcher.match_single(listing, interests)
-                if matches:
+                # Primary signal: tagged during watchlist sweep
+                watch_tag = (listing.raw_data or {}).get("_watch_item_id")
+                if watch_tag:
                     watchlist_matched.append(listing)
                 else:
-                    non_matched.append(listing)
+                    # Fallback: keyword matching for general sweep results
+                    matches = self._interest_matcher.match_single(listing, interests)
+                    if matches:
+                        watchlist_matched.append(listing)
+                    else:
+                        non_matched.append(listing)
             prioritized = watchlist_matched + non_matched
             if watchlist_matched:
                 log.info(
@@ -730,13 +1215,66 @@ class PatrolEngine:
         else:
             prioritized = listings
 
-        # Limit evaluations per cycle
-        to_evaluate = prioritized[: self._max_evaluations]
+        # Fetch unevaluated backlog from previous cycles (cap overflow recovery).
+        # These are listings that were saved to DB but exceeded the eval cap.
+        # CRITICAL: Backlog listings go through the SAME filter chain as fresh
+        # listings — they are no longer exempt from category, location, or
+        # freshness checks. This was the root cause of vehicles, stale listings,
+        # and out-of-region listings reaching notifications (Issue #8).
+        backlog: list[Listing] = []
+        try:
+            raw_backlog = await self._listing_repo.get_unevaluated(
+                site="facebook_marketplace",
+                max_age_hours=24,
+                limit=20,
+            )
+            current_ids = {l.id for l in prioritized}
+            raw_backlog = [l for l in raw_backlog if l.id not in current_ids]
+
+            if raw_backlog:
+                log.info("Backlog: filtering through full pipeline", count=len(raw_backlog))
+
+                # Run both filter stages on backlog (they have enriched data from DB).
+                backlog, pre_rejected = self._filter_chain.filter_batch(
+                    raw_backlog, stage=FilterStage.PRE_ENRICHMENT,
+                )
+                backlog, post_rejected = self._filter_chain.filter_batch(
+                    backlog, stage=FilterStage.POST_ENRICHMENT,
+                )
+
+                # Mark rejected backlog as evaluated so they don't reappear.
+                rejected_ids = [
+                    l.id for l, _ in pre_rejected + post_rejected if l.id
+                ]
+                if rejected_ids:
+                    await self._listing_repo.mark_evaluated(rejected_ids)
+                    log.info(
+                        "Backlog filtered and marked evaluated",
+                        rejected=len(rejected_ids),
+                        kept=len(backlog),
+                    )
+                elif backlog:
+                    log.info(
+                        "Backlog listings recovered for evaluation",
+                        backlog_count=len(backlog),
+                    )
+        except Exception as exc:
+            log.warning("Failed to fetch backlog", error=str(exc)[:100])
+
+        # Combine: new prioritized listings first, then backlog.
+        # Reserve slots for backlog so cap overflow from previous cycles
+        # actually gets a second chance.  Without this, when new >= max_eval
+        # the backlog is entirely excluded and never evaluated.
+        backlog_slots = min(len(backlog), max(5, self._max_evaluations // 5))
+        new_slots = self._max_evaluations - backlog_slots
+        capped_new = prioritized[:new_slots]
+        capped_backlog = backlog[:backlog_slots]
+        to_evaluate = capped_new + capped_backlog
 
         eval_result = EvaluationResult()
 
         if not self._smart_deal_radar or not to_evaluate:
-            return eval_result
+            return eval_result, to_evaluate
 
         try:
             pipeline_results = await self._smart_deal_radar.evaluate_batch(
@@ -745,7 +1283,14 @@ class PatrolEngine:
         except Exception as exc:
             log.error("Pipeline evaluation failed", error=str(exc))
             result.errors.append(f"Pipeline: {exc}")
-            return eval_result
+            return eval_result, to_evaluate
+
+        # Mark all evaluated listings so they aren't retried
+        evaluated_ids = [l.id for l in to_evaluate if l.id]
+        try:
+            await self._listing_repo.mark_evaluated(evaluated_ids)
+        except Exception as exc:
+            log.warning("Failed to mark listings evaluated", error=str(exc)[:100])
 
         for deal, vlm_eval in pipeline_results:
             if deal is None:
@@ -761,10 +1306,11 @@ class PatrolEngine:
         log.info(
             "Evaluation complete",
             evaluated=len(to_evaluate),
+            backlog_included=len(capped_backlog),
             base_deals=len(eval_result.base_deals),
             watchlist_deals=len(eval_result.watchlist_deals),
         )
-        return eval_result
+        return eval_result, to_evaluate
 
     async def _load_exclusion_keywords(self) -> dict[str, set[str]]:
         """Load all active exclusion keywords grouped by user ID.
@@ -795,6 +1341,7 @@ class PatrolEngine:
         text = f"{listing.title} {listing.description}".lower()
         return any(kw in text for kw in excluded_keywords)
 
+
     async def _notify(
         self,
         eval_result: EvaluationResult,
@@ -821,16 +1368,30 @@ class PatrolEngine:
         # Public channel: non-watchlist deals at INCREDIBLE threshold
         global_excluded = exclusions.get("__global__", set())
         for deal in eval_result.base_deals:
+            listing = listing_map.get(deal.listing_id)
             if _SCORE_RANK.get(deal.score, 0) < _SCORE_RANK.get(public_min, 0):
+                log.info(
+                    "notify.skip_base_deal",
+                    title=(listing.title[:50] if listing else "?"),
+                    price=listing.price if listing else None,
+                    score=deal.score.value,
+                    required=public_min.value,
+                    reason="below_public_threshold",
+                )
                 continue
             listing = listing_map.get(deal.listing_id)
             if listing and self._is_excluded(listing, global_excluded):
                 log.debug("Deal excluded by keyword", title=listing.title[:40])
                 continue
+            # No safety nets needed — backlog listings now go through the
+            # full filter chain (category + geo + freshness + garbage) before
+            # evaluation, so excluded categories and out-of-region listings
+            # are caught upstream.
             try:
                 await self._deal_repo.save(deal)
                 if listing:
                     await self._notifier.send_deal(deal, listing)
+                    await self._deal_repo.mark_notified(deal.id)
                     result.deals_notified += 1
             except Exception as exc:
                 log.error(
@@ -866,6 +1427,14 @@ class PatrolEngine:
                 if user_threshold == "free":
                     # Only notify for free listings ($0)
                     if listing.price and listing.price > 0:
+                        log.info(
+                            "notify.skip_watchlist",
+                            title=listing.title[:50],
+                            price=listing.price,
+                            score=deal.score.value,
+                            interest=watch_item.interest,
+                            reason="threshold_is_free_but_price>0",
+                        )
                         continue
                 elif user_threshold == "all":
                     pass  # Notify for everything that matched
@@ -874,6 +1443,15 @@ class PatrolEngine:
                     deal_rank = threshold_rank.get(deal.score.value, 0)
                     min_rank = threshold_rank.get(user_threshold, 2)
                     if deal_rank < min_rank:
+                        log.info(
+                            "notify.skip_watchlist",
+                            title=listing.title[:50],
+                            price=listing.price,
+                            score=deal.score.value,
+                            interest=watch_item.interest,
+                            reason="below_user_threshold",
+                            user_threshold=user_threshold,
+                        )
                         continue
 
                 await self._deal_repo.save(deal)
@@ -883,6 +1461,7 @@ class PatrolEngine:
                     discord_user_id=int(watch_item.discord_user_id),
                     watch_interest=watch_item.interest,
                 )
+                await self._deal_repo.mark_notified(deal.id)
                 result.deals_notified += 1
             except Exception as exc:
                 log.error(

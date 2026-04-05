@@ -28,8 +28,8 @@ class TestAppConfigDefaults:
         assert app_config.google_model == "gemini-2.5-flash"
 
     def test_vision_model_default(self, app_config):
-        """Vision model defaults to qwen2.5vl:3b."""
-        assert app_config.vision_model == "qwen2.5vl:3b"
+        """Vision model defaults to qwen2.5vl:7b."""
+        assert app_config.vision_model == "qwen2.5vl:7b"
 
     def test_browser_defaults(self, app_config):
         """Browser defaults to non-headless with vision enabled."""
@@ -39,7 +39,7 @@ class TestAppConfigDefaults:
     def test_scanning_defaults(self, app_config):
         """Scanning defaults to 15-minute intervals."""
         assert app_config.scan_interval_minutes == 15
-        assert app_config.scan_max_listings_per_query == 20
+        assert app_config.scan_max_listings_per_query == 50
         assert app_config.scan_stealth_min_delay_ms == 1500
         assert app_config.scan_stealth_max_delay_ms == 4000
 
@@ -82,7 +82,7 @@ class TestPatrolConfig:
         assert app_config.patrol_radius_jitter == 4
 
     def test_patrol_timing_defaults(self, app_config):
-        assert app_config.patrol_peak_interval_seconds == 300
+        assert app_config.patrol_peak_interval_seconds == 180
         assert app_config.patrol_moderate_interval_seconds == 600
         assert app_config.patrol_offpeak_interval_seconds == 900
         assert app_config.patrol_dead_interval_seconds == 1800

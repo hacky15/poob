@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any
 
@@ -24,6 +25,58 @@ from agentic_scraper.storage.repositories.preferences_repo import UserPreference
 from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
 
 log = structlog.get_logger()
+
+# Intent-to-tool mapping for unambiguous action requests.
+# When the user's message clearly matches one of these intents, we force
+# the tool call directly instead of relying on the LLM to select it.
+# This prevents the agent brain from misinterpreting "start scan" as
+# "show me recent deals" (a known Groq/Llama instruction-following gap).
+_FORCED_INTENTS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b(?:start|run|trigger|do)\s+(?:a\s+)?(?:scan|patrol|sweep)\b", re.I), "trigger_scan"),
+    (re.compile(r"\b(?:scan|patrol|sweep)\s+(?:now|marketplace|please|again|asap)\b", re.I), "trigger_scan"),
+    (re.compile(r"^(?:scan|patrol|sweep)$", re.I), "trigger_scan"),
+    (re.compile(r"\bpause\s+(?:the\s+)?(?:scan|patrol|sweep)", re.I), "pause_patrol"),
+    (re.compile(r"\bresume\s+(?:the\s+)?(?:scan|patrol|sweep)", re.I), "resume_patrol"),
+    # Wishlist display — LLMs frequently misroute or drop the data
+    (re.compile(r"\b(?:show|list|display|view|what(?:'?s| is| are))\s+(?:my\s+)?(?:wish\s*list|watch\s*list|interests?)\b", re.I), "show_wishlist"),
+    (re.compile(r"^(?:wish\s*list|watch\s*list)$", re.I), "show_wishlist"),
+]
+
+# Tools whose output contains structured data that MUST reach the user verbatim.
+# For these tools, the runner uses a split-channel architecture:
+#   - The tool's output IS the primary response (data channel).
+#   - The LLM generates only a brief comment (commentary channel).
+#   - The runner composes them deterministically: data + commentary.
+# This guarantees data visibility without relying on the LLM to echo it.
+_DATA_DISPLAY_TOOLS: frozenset[str] = frozenset({
+    "show_wishlist",
+    "get_recent_deals",
+    "get_deal_details",
+    "search_listings",
+    "get_preferences",
+    "get_scan_history",
+})
+
+# Injected after a data-display tool result to instruct the LLM to produce
+# ONLY a brief comment — the data itself will be shown separately.
+_COMMENTARY_ONLY_INSTRUCTION = (
+    "[SYSTEM] The above data has ALREADY been shown to the user. "
+    "Do NOT repeat, summarize, or list the data. "
+    "Write ONLY a brief 1-sentence friendly comment or follow-up question. "
+    "Example: 'Let me know if you want to add anything!' or 'Want me to search for any of these?'"
+)
+
+
+def _detect_forced_intent(message: str) -> str | None:
+    """Match user message against unambiguous action patterns.
+
+    Returns the tool name to force, or None if the LLM should decide.
+    """
+    text = message.strip()
+    for pattern, tool_name in _FORCED_INTENTS:
+        if pattern.search(text):
+            return tool_name
+    return None
 
 
 class AgentRunner:
@@ -60,6 +113,7 @@ class AgentRunner:
         max_iterations: int = 10,
         scan_log_repo: Any = None,
         exclusion_repo: Any = None,
+        personality: bool = True,
     ) -> None:
         self._llm = llm
         self._prefs_repo = prefs_repo
@@ -71,6 +125,7 @@ class AgentRunner:
         self._max_iterations = max_iterations
         self._scan_log_repo = scan_log_repo
         self._exclusion_repo = exclusion_repo
+        self._personality = personality
 
     async def run(
         self,
@@ -116,10 +171,45 @@ class AgentRunner:
         # 5. Bind tools to LLM
         bound_llm = self._llm.bind_tools(tools)
 
-        # 6. Tool-calling loop
-        response_text, tools_were_called = await self._run_loop(
-            bound_llm, messages, tools_by_name,
-        )
+        # 5b. Force tool call for unambiguous action requests.
+        # The LLM sometimes misinterprets "start scan" as "show deals" —
+        # this ensures deterministic tool selection for clear commands.
+        # After forcing, we run the LLM WITHOUT tools so it can only
+        # compose a text response (no additional tool calls like get_recent_deals).
+        forced_tool = _detect_forced_intent(user_message)
+        if forced_tool and forced_tool in tools_by_name:
+            log.info("agent.forced_intent", tool=forced_tool, message=user_message[:60])
+            try:
+                tool_result = await tools_by_name[forced_tool].ainvoke({})
+            except Exception as exc:
+                tool_result = f"Error: {exc}"
+            tool_result_str = str(tool_result)
+
+            # Inject the tool result and let the LLM compose a text-only response
+            messages.append(AIMessage(
+                content="",
+                tool_calls=[{"name": forced_tool, "args": {}, "id": "forced_0"}],
+            ))
+            messages.append(ToolMessage(content=tool_result_str, tool_call_id="forced_0"))
+
+            # Split-channel: data-display tools use deterministic composition.
+            # The tool output IS the response; the LLM only adds commentary.
+            if forced_tool in _DATA_DISPLAY_TOOLS and tool_result_str.strip():
+                messages.append(HumanMessage(content=_COMMENTARY_ONLY_INSTRUCTION))
+                commentary: AIMessage = await self._llm.ainvoke(messages)
+                commentary_text = _extract_text(commentary.content)
+                response_text = _compose_data_response(tool_result_str, commentary_text)
+            else:
+                # Non-data tools: LLM responds normally with NO tools bound
+                response: AIMessage = await self._llm.ainvoke(messages)
+                response_text = _extract_text(response.content)
+
+            tools_were_called = True
+        else:
+            # 6. Normal tool-calling loop
+            response_text, tools_were_called = await self._run_loop(
+                bound_llm, messages, tools_by_name,
+            )
 
         # 7. Save conversation
         # Mark tool-call turns so they don't pollute history.
@@ -152,6 +242,7 @@ class AgentRunner:
         """
         any_tools_called = False
         last_tool_result = ""
+        last_data_tool_result = ""  # Authoritative output from last data-display tool
 
         model = _model_id(bound_llm)
         for iteration in range(self._max_iterations):
@@ -177,6 +268,14 @@ class AgentRunner:
                 if not text.strip() or text == _EMPTY_FALLBACK:
                     if last_tool_result:
                         return last_tool_result, any_tools_called
+
+                # Split-channel: if a data-display tool ran, compose
+                # deterministically instead of trusting the LLM's text.
+                if last_data_tool_result:
+                    # The LLM's text is treated as commentary.
+                    # Request commentary-only on next iteration would be ideal,
+                    # but since we're already at the final answer, compose now.
+                    text = _compose_data_response(last_data_tool_result, text)
                 return text, any_tools_called
 
             # Execute each tool call
@@ -208,9 +307,17 @@ class AgentRunner:
                         )
 
                 last_tool_result = str(tool_result)
+                if tool_name in _DATA_DISPLAY_TOOLS:
+                    last_data_tool_result = last_tool_result
                 messages.append(
                     ToolMessage(content=last_tool_result, tool_call_id=tool_call_id)
                 )
+
+            # After executing data-display tools, inject the commentary-only
+            # instruction so the LLM knows NOT to repeat the data on the next
+            # iteration (where it will produce the final text response).
+            if last_data_tool_result:
+                messages.append(HumanMessage(content=_COMMENTARY_ONLY_INSTRUCTION))
 
         # Hit max iterations — return whatever we have
         log.warning(
@@ -237,6 +344,7 @@ class AgentRunner:
             wishlist=wishlist,
             location=location,
             search_priorities=priorities,
+            personality=self._personality,
         )
 
     async def _load_history(self, discord_user_id: str) -> list[BaseMessage]:
@@ -266,6 +374,33 @@ class AgentRunner:
 
 
 _EMPTY_FALLBACK = "I'm not sure how to respond to that."
+
+
+def _compose_data_response(tool_data: str, llm_commentary: str) -> str:
+    """Deterministically compose a data-display response.
+
+    Split-channel architecture: the tool's output is the authoritative data
+    and always appears first. The LLM's text is treated as optional commentary
+    appended after the data. No heuristics, no dedup — just concatenation.
+
+    Args:
+        tool_data: Authoritative output from a data-display tool.
+        llm_commentary: LLM-generated commentary (may be empty or redundant).
+
+    Returns:
+        Combined response: data first, then commentary.
+    """
+    data = tool_data.strip()
+    commentary = llm_commentary.strip()
+
+    if not data:
+        return commentary or _EMPTY_FALLBACK
+
+    # If the LLM produced no meaningful commentary, return data alone.
+    if not commentary or commentary == _EMPTY_FALLBACK:
+        return data
+
+    return f"{data}\n\n{commentary}"
 
 
 def _extract_text(content: str | list) -> str:

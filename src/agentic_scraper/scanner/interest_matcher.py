@@ -86,6 +86,34 @@ def _score_from_discount(discount_pct: float) -> DealScore:
     return DealScore.UNKNOWN
 
 
+def _word_in_text_fuzzy_plural(word: str, text: str) -> bool:
+    """Check if ``word`` appears in ``text``, tolerating plural/singular mismatch.
+
+    Handles common English plural forms:
+    - word ends in 's' → also try without 's' (legos → lego)
+    - word ends in 'es' → also try without 'es' (dishes → dish)
+    - word ends in 'ies' → also try with 'y' (batteries → battery)
+    - word does NOT end in 's' → also try with 's' appended (lego → legos)
+    """
+    if word in text:
+        return True
+    # Try de-pluralizing
+    if word.endswith("ies") and len(word) > 4:
+        if word[:-3] + "y" in text:
+            return True
+    if word.endswith("es") and len(word) > 3:
+        if word[:-2] in text:
+            return True
+    if word.endswith("s") and len(word) > 2:
+        if word[:-1] in text:
+            return True
+    # Try pluralizing
+    if not word.endswith("s"):
+        if word + "s" in text:
+            return True
+    return False
+
+
 class InterestMatcher:
     """Matches listings against user watchlist interests.
 
@@ -302,6 +330,14 @@ class InterestMatcher:
         # Stage 1: Exact word matching (fast path)
         interest_words = interest_lower.split()
         if all(word in title_lower for word in interest_words):
+            return True
+
+        # Stage 1b: Plural/singular normalization — "legos" matches "lego"
+        # and vice versa. Covers the most common English plural forms.
+        if all(
+            _word_in_text_fuzzy_plural(word, title_lower)
+            for word in interest_words
+        ):
             return True
 
         # Stage 2: Whole-phrase synonym lookup

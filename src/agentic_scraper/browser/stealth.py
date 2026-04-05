@@ -31,11 +31,20 @@ def random_scroll_pattern(steps: int = 5) -> list[tuple[str, int, int]]:
         List of (direction, pixels, pause_ms) tuples.
     """
     pattern: list[tuple[str, int, int]] = []
-    for _ in range(steps):
-        # 80% chance of scrolling down, 20% up (mimics real browsing)
-        direction = "down" if random.random() < 0.8 else "up"
-        pixels = random.randint(100, 600)
-        pause_ms = random.randint(200, 1500)
+    for i in range(steps):
+        # 90% down, 10% small up correction (was 80/20 — too much upward wasted)
+        # First 3 steps always go down to get past sponsored listings quickly
+        if i < 3 or random.random() < 0.9:
+            direction = "down"
+            # Larger scroll jumps to cover more ground: 400-1000px
+            pixels = random.randint(400, 1000)
+        else:
+            direction = "up"
+            pixels = random.randint(50, 200)  # Small corrections only
+
+        # Longer pauses between scrolls to let Facebook's lazy-load fire
+        # Facebook triggers new batch fetch when scrolled past ~80% of content
+        pause_ms = random.randint(800, 2500)
         pattern.append((direction, pixels, pause_ms))
     return pattern
 
@@ -54,6 +63,78 @@ async def apply_scroll_pattern(page: object, steps: int = 5) -> None:
 
     pattern = random_scroll_pattern(steps)
     await scroll_page(page, pattern)
+
+
+async def scroll_until_stable(
+    page: object,
+    *,
+    max_scrolls: int = 30,
+    stable_checks: int = 3,
+    scroll_pixels: int = 800,
+    pause_ms_min: int = 1200,
+    pause_ms_max: int = 3000,
+) -> int:
+    """Scroll down until no new content loads (infinite scroll exhaustion).
+
+    Keeps scrolling and checking if the page height increases. When the page
+    height stops increasing for `stable_checks` consecutive scrolls, we know
+    Facebook has no more listings to lazy-load.
+
+    This is how Facebook Marketplace infinite scroll works:
+    - Initial load: ~24 listings
+    - Each scroll past 80% triggers a GraphQL fetch for ~24 more
+    - Eventually the feed runs out and scrollHeight plateaus
+
+    A small upward jitter is inserted every ~5 scrolls to look human.
+
+    Args:
+        page: A browser-use Page instance.
+        max_scrolls: Safety cap on total scroll actions.
+        stable_checks: Stop after this many scrolls with no height change.
+        scroll_pixels: Base pixels to scroll per step.
+        pause_ms_min: Min pause between scrolls (ms).
+        pause_ms_max: Max pause between scrolls (ms).
+
+    Returns:
+        Total number of scroll actions performed.
+    """
+    from agentic_scraper.browser.page_actions import scroll_page
+
+    last_height = 0
+    stable_count = 0
+    total_scrolls = 0
+
+    for i in range(max_scrolls):
+        # Occasional small upward jitter (every ~5-7 scrolls)
+        if i > 0 and i % random.randint(5, 7) == 0:
+            jitter = [("up", random.randint(50, 150), random.randint(300, 600))]
+            await scroll_page(page, jitter)
+            total_scrolls += 1
+
+        # Main downward scroll with randomized distance
+        pixels = scroll_pixels + random.randint(-200, 200)
+        pattern = [("down", max(pixels, 300), random.randint(pause_ms_min, pause_ms_max))]
+        await scroll_page(page, pattern)
+        total_scrolls += 1
+
+        # Check current page height
+        try:
+            raw_height = await page.evaluate(
+                "() => document.documentElement.scrollHeight"
+            )
+            current_height = int(raw_height) if raw_height else 0
+        except (Exception, ValueError, TypeError):
+            break
+
+        if current_height <= last_height:
+            stable_count += 1
+            if stable_count >= stable_checks:
+                break
+        else:
+            stable_count = 0
+            last_height = current_height
+
+    return total_scrolls
 
 
 async def simulate_mouse_movement(page: object, movements: int = 2) -> None:

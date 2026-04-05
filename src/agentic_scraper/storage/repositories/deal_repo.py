@@ -25,8 +25,9 @@ class DealRepository:
             """
             INSERT INTO deals
                 (id, listing_id, watch_item_id, score, estimated_market_price,
-                 discount_pct, llm_reasoning, notified, notified_at, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 discount_pct, llm_reasoning, provenance_json,
+                 notified, notified_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 deal.id,
@@ -36,6 +37,7 @@ class DealRepository:
                 deal.estimated_market_price,
                 deal.discount_pct,
                 deal.llm_reasoning,
+                deal.provenance_json,
                 int(deal.notified),
                 deal.notified_at.isoformat() if deal.notified_at else None,
                 deal.created_at.isoformat(),
@@ -86,7 +88,8 @@ class DealRepository:
             UPDATE deals SET
                 listing_id = ?, watch_item_id = ?, score = ?,
                 estimated_market_price = ?, discount_pct = ?,
-                llm_reasoning = ?, notified = ?, notified_at = ?
+                llm_reasoning = ?, provenance_json = ?,
+                notified = ?, notified_at = ?
             WHERE id = ?
             """,
             (
@@ -96,6 +99,7 @@ class DealRepository:
                 deal.estimated_market_price,
                 deal.discount_pct,
                 deal.llm_reasoning,
+                deal.provenance_json,
                 int(deal.notified),
                 deal.notified_at.isoformat() if deal.notified_at else None,
                 deal.id,
@@ -106,6 +110,12 @@ class DealRepository:
     @staticmethod
     def _row_to_deal(row: aiosqlite.Row) -> Deal:
         """Convert a database row to a Deal dataclass."""
+        # provenance_json may not exist in older DBs before migration runs
+        try:
+            provenance_json = row["provenance_json"] or ""
+        except (IndexError, KeyError):
+            provenance_json = ""
+
         return Deal(
             id=row["id"],
             listing_id=row["listing_id"],
@@ -114,6 +124,7 @@ class DealRepository:
             estimated_market_price=row["estimated_market_price"],
             discount_pct=row["discount_pct"],
             llm_reasoning=row["llm_reasoning"],
+            provenance_json=provenance_json,
             notified=bool(row["notified"]),
             notified_at=(
                 datetime.fromisoformat(row["notified_at"]) if row["notified_at"] else None

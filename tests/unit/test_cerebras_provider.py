@@ -29,17 +29,17 @@ def _mock_test_failure() -> MagicMock:
 class TestCerebrasProvider:
     """Tests for CerebrasProvider initialization and protocol compliance."""
 
-    @patch("agentic_scraper.llm.cerebras_provider._detect_best_model", return_value="qwen-3-235b")
+    @patch("agentic_scraper.llm.cerebras_provider._detect_best_model", return_value="qwen-3-235b-a22b-instruct-2507")
     @patch("agentic_scraper.llm.cerebras_provider.ChatOpenAI")
     def test_creates_chat_model(self, mock_chat_cls, mock_detect):
         """CerebrasProvider creates a ChatOpenAI instance with Cerebras base URL."""
         from agentic_scraper.llm.cerebras_provider import CEREBRAS_BASE_URL, CerebrasProvider
 
         provider = CerebrasProvider(
-            api_key="test-key", model="qwen-3-235b", temperature=0.3
+            api_key="test-key", model="qwen-3-235b-a22b-instruct-2507", temperature=0.3
         )
         mock_chat_cls.assert_called_once_with(
-            model="qwen-3-235b",
+            model="qwen-3-235b-a22b-instruct-2507",
             api_key="test-key",
             base_url=CEREBRAS_BASE_URL,
             temperature=0.3,
@@ -48,18 +48,18 @@ class TestCerebrasProvider:
         )
         assert provider.chat_model is mock_chat_cls.return_value
 
-    @patch("agentic_scraper.llm.cerebras_provider._detect_best_model", return_value="qwen-3-235b")
+    @patch("agentic_scraper.llm.cerebras_provider._detect_best_model", return_value="qwen-3-235b-a22b-instruct-2507")
     @patch("agentic_scraper.llm.cerebras_provider.ChatOpenAI")
     def test_model_name(self, mock_chat_cls, mock_detect):
         """model_name returns the resolved model string."""
         from agentic_scraper.llm.cerebras_provider import CerebrasProvider
 
         provider = CerebrasProvider(
-            api_key="test-key", model="qwen-3-235b", temperature=0.3
+            api_key="test-key", model="qwen-3-235b-a22b-instruct-2507", temperature=0.3
         )
-        assert provider.model_name == "qwen-3-235b"
+        assert provider.model_name == "qwen-3-235b-a22b-instruct-2507"
 
-    @patch("agentic_scraper.llm.cerebras_provider._detect_best_model", return_value="qwen-3-235b")
+    @patch("agentic_scraper.llm.cerebras_provider._detect_best_model", return_value="qwen-3-235b-a22b-instruct-2507")
     @patch("agentic_scraper.llm.cerebras_provider.ChatOpenAI")
     @patch("agentic_scraper.llm.cerebras_provider._test_model", return_value=True)
     def test_is_available_success(self, mock_test, mock_chat_cls, mock_detect):
@@ -67,23 +67,22 @@ class TestCerebrasProvider:
         from agentic_scraper.llm.cerebras_provider import CerebrasProvider
 
         provider = CerebrasProvider(
-            api_key="test-key", model="qwen-3-235b", temperature=0.3
+            api_key="test-key", model="qwen-3-235b-a22b-instruct-2507", temperature=0.3
         )
         assert provider.is_available() is True
 
-    @patch("agentic_scraper.llm.cerebras_provider._detect_best_model", return_value="qwen-3-235b")
+    @patch("agentic_scraper.llm.cerebras_provider._detect_best_model", return_value="llama3.1-8b")
     @patch("agentic_scraper.llm.cerebras_provider.ChatOpenAI")
-    @patch("agentic_scraper.llm.cerebras_provider._test_model", return_value=False)
-    def test_is_available_failure(self, mock_test, mock_chat_cls, mock_detect):
-        """is_available returns False when model fails test call."""
+    def test_is_available_failure(self, mock_chat_cls, mock_detect):
+        """is_available returns False when only a weak model is available."""
         from agentic_scraper.llm.cerebras_provider import CerebrasProvider
 
         provider = CerebrasProvider(
-            api_key="test-key", model="qwen-3-235b", temperature=0.3
+            api_key="test-key", model="qwen-3-235b-a22b-instruct-2507", temperature=0.3
         )
         assert provider.is_available() is False
 
-    @patch("agentic_scraper.llm.cerebras_provider._detect_best_model", return_value="qwen-3-235b")
+    @patch("agentic_scraper.llm.cerebras_provider._detect_best_model", return_value="qwen-3-235b-a22b-instruct-2507")
     @patch("agentic_scraper.llm.cerebras_provider.ChatOpenAI")
     def test_satisfies_llm_provider_protocol(self, mock_chat_cls, mock_detect):
         """CerebrasProvider satisfies the LLMProvider protocol."""
@@ -91,7 +90,7 @@ class TestCerebrasProvider:
         from agentic_scraper.llm.provider import LLMProvider
 
         provider = CerebrasProvider(
-            api_key="test-key", model="qwen-3-235b", temperature=0.3
+            api_key="test-key", model="qwen-3-235b-a22b-instruct-2507", temperature=0.3
         )
         assert isinstance(provider, LLMProvider)
 
@@ -134,10 +133,10 @@ class TestDetectBestModel:
         from agentic_scraper.llm.cerebras_provider import _detect_best_model
 
         mock_httpx.get.return_value = _mock_models_response(
-            "llama3.1-8b", "qwen-3-235b-a22b-instruct-2507", "gpt-oss-120b"
+            "llama3.1-8b", "qwen-3-235b-a22b-instruct-2507-a22b-instruct-2507", "gpt-oss-120b"
         )
-        result = _detect_best_model("key", preferred="qwen-3-235b-a22b-instruct-2507")
-        assert result == "qwen-3-235b-a22b-instruct-2507"
+        result = _detect_best_model("key", preferred="qwen-3-235b-a22b-instruct-2507-a22b-instruct-2507")
+        assert result == "qwen-3-235b-a22b-instruct-2507-a22b-instruct-2507"
 
     @patch("agentic_scraper.llm.cerebras_provider._test_model")
     @patch("agentic_scraper.llm.cerebras_provider.httpx")
@@ -146,11 +145,11 @@ class TestDetectBestModel:
         from agentic_scraper.llm.cerebras_provider import _detect_best_model
 
         mock_httpx.get.return_value = _mock_models_response(
-            "llama3.1-8b", "qwen-3-235b-a22b-instruct-2507", "gpt-oss-120b"
+            "llama3.1-8b", "qwen-3-235b-a22b-instruct-2507-a22b-instruct-2507", "gpt-oss-120b"
         )
         # Preferred fails, gpt-oss-120b works
-        mock_test.side_effect = lambda key, model: model != "qwen-3-235b-a22b-instruct-2507"
-        result = _detect_best_model("key", preferred="qwen-3-235b-a22b-instruct-2507")
+        mock_test.side_effect = lambda key, model: model != "qwen-3-235b-a22b-instruct-2507-a22b-instruct-2507"
+        result = _detect_best_model("key", preferred="qwen-3-235b-a22b-instruct-2507-a22b-instruct-2507")
         assert result == "gpt-oss-120b"
 
     @patch("agentic_scraper.llm.cerebras_provider._test_model")
@@ -164,7 +163,7 @@ class TestDetectBestModel:
         )
         # Only llama3.1-8b works
         mock_test.side_effect = lambda key, model: model == "llama3.1-8b"
-        result = _detect_best_model("key", preferred="qwen-3-235b")
+        result = _detect_best_model("key", preferred="qwen-3-235b-a22b-instruct-2507")
         assert result == "llama3.1-8b"
 
     @patch("agentic_scraper.llm.cerebras_provider._test_model", return_value=False)
@@ -200,14 +199,14 @@ class TestAutoDetectIntegration:
         from agentic_scraper.llm.cerebras_provider import CEREBRAS_BASE_URL, CerebrasProvider
 
         mock_httpx.get.return_value = _mock_models_response(
-            "gpt-oss-120b", "qwen-3-235b-a22b-instruct-2507", "llama3.1-8b"
+            "gpt-oss-120b", "qwen-3-235b-a22b-instruct-2507-a22b-instruct-2507", "llama3.1-8b"
         )
         # Only gpt-oss-120b works
         mock_test.side_effect = lambda key, model: model == "gpt-oss-120b"
 
         provider = CerebrasProvider(
             api_key="test-key",
-            model="qwen-3-235b-a22b-instruct-2507",  # Configured but doesn't work
+            model="qwen-3-235b-a22b-instruct-2507-a22b-instruct-2507",  # Configured but doesn't work
             temperature=0.3,
         )
         assert provider.model_name == "gpt-oss-120b"
@@ -228,11 +227,11 @@ class TestAutoDetectIntegration:
         from agentic_scraper.llm.cerebras_provider import CerebrasProvider
 
         mock_httpx.get.return_value = _mock_models_response(
-            "gpt-oss-120b", "qwen-3-235b-a22b-instruct-2507"
+            "gpt-oss-120b", "qwen-3-235b-a22b-instruct-2507-a22b-instruct-2507"
         )
         provider = CerebrasProvider(
             api_key="test-key",
-            model="qwen-3-235b-a22b-instruct-2507",
+            model="qwen-3-235b-a22b-instruct-2507-a22b-instruct-2507",
             temperature=0.3,
         )
-        assert provider.model_name == "qwen-3-235b-a22b-instruct-2507"
+        assert provider.model_name == "qwen-3-235b-a22b-instruct-2507-a22b-instruct-2507"

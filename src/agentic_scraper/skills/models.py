@@ -203,3 +203,66 @@ class VLMEvaluation:
     confidence: float = 0.0
     reasoning: str = ""
     red_flags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class DealProvenance:
+    """Lightweight provenance trail for a deal evaluation.
+
+    Accumulates data as a listing flows through the pipeline stages.
+    Serialized to JSON for storage and rendered in Discord embeds so
+    the user can see exactly which models/services contributed to the
+    deal score.
+    """
+
+    # Stage 1: Triage
+    triage_bypass_reason: str = ""  # "watchlist" | "garbage_title" | ""
+    scam_signals: list[str] = field(default_factory=list)
+    urgency_signals: list[str] = field(default_factory=list)
+
+    # Stage 2: Enrichment
+    enrichment_tier: int = 3  # 1=Vision API, 2=Google Lens, 3=none
+    enrichment_product: str = ""  # identified product name
+
+    # Stage 2b: Price lookup
+    price_source: str = ""  # "ebay_sold" | "retail" | ""
+    price_confidence: float = 0.0
+    price_sample_count: int = 0
+
+    # Stage 3: VLM evaluation
+    vlm_providers: list[str] = field(default_factory=list)
+    vlm_agreement: float | None = None  # voting confidence
+    vlm_raw_quality: str = ""  # VLM's original score BEFORE enforcement
+    vlm_condition: str = ""  # mint|excellent|good|fair|poor|unknown
+    vlm_condition_notes: str = ""
+    vlm_confidence: float = 0.0
+    vlm_item_identified: str = ""
+
+    # Stage 3b: Web context
+    web_search_used: bool = False
+    web_search_provider: str = ""
+
+    # Stage 4: Programmatic enforcement
+    score_adjustments: list[str] = field(default_factory=list)
+    final_score: str = ""
+
+    def to_json(self) -> str:
+        """Serialize for database storage."""
+        import json
+        from dataclasses import asdict
+
+        return json.dumps(asdict(self), separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, raw: str) -> DealProvenance:
+        """Deserialize from database storage. Gracefully handles empty/unknown fields."""
+        import json
+
+        if not raw:
+            return cls()
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return cls()
+        known = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in data.items() if k in known})

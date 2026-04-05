@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
@@ -56,6 +56,10 @@ def mock_browser_manager():
     mgr = AsyncMock()
     page = AsyncMock()
     mgr.get_page = AsyncMock(return_value=page)
+    session = AsyncMock()
+    session.new_page = AsyncMock(return_value=AsyncMock())
+    session.close_page = AsyncMock()
+    mgr.get_session = Mock(return_value=session)
     return mgr
 
 

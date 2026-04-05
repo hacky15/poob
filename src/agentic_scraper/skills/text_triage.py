@@ -5,6 +5,10 @@ are worth investigating further.  Filters ~60-70% of listings before expensive
 VLM evaluation.
 
 Provider cascade: Cerebras → Groq → Ollama.
+
+Includes a minimum investigate floor: if the LLM is too aggressive (< 15%
+pass rate), branded/promising rejects are rescued programmatically. This
+prevents complete whiffs when models differ in conservatism.
 """
 
 from __future__ import annotations
@@ -25,6 +29,30 @@ if TYPE_CHECKING:
     from agentic_scraper.storage.models import Listing, WatchItem
 
 log = get_logger("skills.text_triage")
+
+# Minimum percentage of listings that should survive triage.
+# If the LLM filters more aggressively than this, the most promising
+# rejects are rescued programmatically.
+_MIN_INVESTIGATE_PCT = 0.15  # 15%
+_MIN_INVESTIGATE_FLOOR = 3  # Always let at least 3 through
+
+# Brands that signal resale value — used by the rescue heuristic
+# to prioritize branded rejects over generic ones.
+_TRIAGE_RESCUE_BRANDS = frozenset({
+    "apple", "samsung", "sony", "lg", "dell", "hp", "lenovo", "bose", "jbl",
+    "kitchenaid", "kitchen aid", "cuisinart", "ninja", "dyson", "breville",
+    "vitamix", "keurig", "nespresso", "le creuset", "lodge", "all-clad",
+    "herman miller", "steelcase", "ikea", "pottery barn",
+    "dewalt", "milwaukee", "makita", "bosch", "ryobi",
+    "nike", "adidas", "lululemon", "patagonia", "north face",
+    "canon", "nikon", "gopro", "dji", "nintendo", "playstation", "xbox",
+    "whirlpool", "ge", "kenmore", "nest", "ring", "peloton",
+    "lego", "trek", "fender", "gibson", "yamaha",
+    "rae dunn", "pyrex", "corningware", "fiesta", "scentsy",
+    "rca", "jensen", "ihome", "oster", "hamilton beach", "chefman",
+    "pampered chef", "calphalon", "instant pot", "weber", "traeger",
+    "yeti", "hydro flask", "stanley", "cricut", "roomba",
+})
 
 TRIAGE_SYSTEM_PROMPT = """\
 You are a marketplace listing pre-screener. For each listing below, determine \
@@ -56,18 +84,32 @@ INVESTIGATE = true when:
 - Price seems notably below what the item category typically sells for
 - Seller shows urgency/motivation (moving, must sell, OBO, need gone)
 - Item is free ($0) and appears to have real value
-- Item matches a user's watchlist interest (check PREFS if specified)
+- Item matches a user's watchlist interest AND satisfies ALL PREFS constraints. \
+PREFS are ALL hard requirements. "bulk listings, many cards" means only investigate lots/bulk, \
+NOT single items. "seller unaware" means the seller must appear unaware of the value. \
+"extremely cheap" means the price must be very low. If ANY PREF is unmet, investigate=false.
 - Misspelled brand names (seller may not know the value)
 
 INVESTIGATE = false when:
 - Price is at or above typical market value for the category
 - Listing appears to be spam or keyword stuffing
 - Description demands off-platform communication (scam signal)
-- Item is clearly junk with no resale value (stained mattress, broken IKEA shelving)
+- Item is clearly junk with no resale value: stained mattresses, \
+broken IKEA shelving, stuffed toys, artificial flowers, literal food/candy, \
+dollar-store goods, loose hardware, single-use consumables.
+- IMPORTANT: Branded items (KitchenAid, Le Creuset, Cuisinart, RCA, HP, etc.) \
+should almost always be investigate=true even at modest prices — they have resale \
+value that generic items don't. When in doubt about a branded item, investigate=true.
 - Price is suspiciously low (<20% of obvious value) with no explanation (bait-and-switch)
+- **MISLEADING LISTINGS**: Description says "trades only", "looking to trade", "pop up", \
+"vendor event", or otherwise indicates the item is NOT actually for sale at the listed price. \
+Sellers who list at $0 but describe trades, auctions, or "make an offer" are bait pricing. \
+Set investigate=false.
 - Item matches a watchlist keyword BUT contradicts the user's PREFS — this is a \
 HARD RULE: if PREFS say "not metal" and the listing title/description contains "metal", \
 set investigate=false REGARDLESS of price. Same for any "not X" / "no X" / "avoid X" in PREFS.
+- PREFS say "only X" (e.g. "only cups") and the listing is clearly NOT that item type \
+(e.g. it's a vase, plate, or bowl). This is also a HARD RULE.
 
 SCAM SIGNALS to flag:
 - "Text me at [number]" or "Email me at" (off-platform)
@@ -100,17 +142,45 @@ def _build_listings_block(listings: list[Listing]) -> str:
     """Format listings into a numbered text block for the triage prompt."""
     parts: list[str] = []
     for i, listing in enumerate(listings, 1):
-        price_str = f"${listing.price}" if listing.price else "FREE"
+        if listing.price is not None and listing.price > 0:
+            price_str = f"${listing.price}"
+        elif listing.price is not None and listing.price == 0:
+            price_str = "FREE"
+        else:
+            price_str = "Price not listed"
         desc = (listing.description or "")[:300]
-        parts.append(
-            f"---\n"
-            f"Listing {i}:\n"
-            f"  Title: {listing.title}\n"
-            f"  Price: {price_str}\n"
-            f"  Description: {desc}\n"
-            f"  Location: {listing.location}\n"
-            f"---"
-        )
+        condition = listing.raw_data.get("condition", "")
+        seller = listing.seller_name or ""
+        lines = [
+            f"---",
+            f"Listing {i}:",
+            f"  Title: {listing.title}",
+            f"  Price: {price_str}",
+        ]
+        if desc:
+            lines.append(f"  Description: {desc}")
+        if condition:
+            lines.append(f"  Condition: {condition}")
+        # Freshness context helps triage weight urgency by recency
+        if listing.posted_at:
+            from datetime import datetime, timezone
+
+            age = datetime.now(timezone.utc) - listing.posted_at
+            hours = age.total_seconds() / 3600
+            if hours < 1:
+                posted_str = f"{int(hours * 60)} minutes ago"
+            elif hours < 24:
+                posted_str = f"{hours:.1f} hours ago"
+            else:
+                posted_str = f"{hours / 24:.1f} days ago"
+            lines.append(f"  Posted: {posted_str}")
+        else:
+            lines.append(f"  Posted: Unknown")
+        lines.append(f"  Location: {listing.location}")
+        if seller:
+            lines.append(f"  Seller: {seller}")
+        lines.append(f"---")
+        parts.append("\n".join(lines))
     return "\n".join(parts)
 
 
@@ -205,6 +275,82 @@ def _parse_triage_response(
     return results
 
 
+def _rescue_promising_rejects(
+    listings: list[Listing],
+    results: list[TriageResult],
+    target: int,
+) -> int:
+    """Rescue the most promising rejected listings when the LLM is too aggressive.
+
+    Scores each rejected listing by heuristic signals (brand recognition, price,
+    seller urgency) and flips the top ``target`` rejects to investigate=True.
+
+    Args:
+        listings: Original listings (same order as results).
+        results: Triage results to mutate in-place.
+        target: Number of rejects to rescue.
+
+    Returns:
+        Number of listings actually rescued.
+    """
+    # Build (index, score) for each rejected listing
+    reject_scores: list[tuple[int, float]] = []
+    for i, (listing, result) in enumerate(zip(listings, results)):
+        if result.investigate:
+            continue
+
+        score = 0.0
+        title_lower = (listing.title or "").lower()
+        desc_lower = (listing.description or "").lower()
+        text = f"{title_lower} {desc_lower}"
+
+        # Brand recognition is the strongest signal
+        for brand in _TRIAGE_RESCUE_BRANDS:
+            if brand in text:
+                score += 50.0
+                break
+
+        # Higher price = more deal potential (log scale to avoid bias)
+        price = listing.price or 0.0
+        if price >= 20:
+            score += min(price / 5, 30.0)
+        elif price > 0:
+            score += price / 2
+
+        # Urgency signals suggest motivated seller
+        urgency_words = ("must sell", "moving", "obo", "need gone", "make offer", "asap")
+        if any(w in text for w in urgency_words):
+            score += 15.0
+
+        # Model/part numbers suggest specific, identifiable items
+        if re.search(r"[A-Z]{2,}\d{2,}", listing.title or ""):
+            score += 10.0
+
+        # Penalize obvious garbage
+        garbage_signals = ("free", "scammer", "snow removal", "trades only")
+        if any(g in title_lower for g in garbage_signals):
+            score -= 100.0
+
+        if score > 0:
+            reject_scores.append((i, score))
+
+    # Sort by score descending, rescue the top N
+    reject_scores.sort(key=lambda x: x[1], reverse=True)
+    rescued = 0
+    for idx, score in reject_scores[:target]:
+        results[idx].investigate = True
+        results[idx].reasoning += f" [rescued: score={score:.0f}]"
+        rescued += 1
+        log.debug(
+            "triage.rescued",
+            title=listings[idx].title[:50],
+            price=listings[idx].price,
+            score=round(score, 1),
+        )
+
+    return rescued
+
+
 class TextTriageService:
     """Batched text triage — first stage of the deal evaluation pipeline.
 
@@ -263,6 +409,24 @@ class TextTriageService:
                 result.reasoning = f"Auto-rejected: {', '.join(result.scam_signals)}"
 
         investigated = sum(1 for r in all_results if r.investigate)
+
+        # Minimum investigate floor: rescue promising rejects if the LLM
+        # was too aggressive.  Different models vary wildly (Cerebras filters
+        # 97%, Groq 33%) — this ensures we always evaluate enough listings.
+        min_target = max(_MIN_INVESTIGATE_FLOOR, int(len(listings) * _MIN_INVESTIGATE_PCT))
+        if investigated < min_target:
+            rescued = _rescue_promising_rejects(
+                listings, all_results, target=min_target - investigated,
+            )
+            if rescued:
+                investigated += rescued
+                log.info(
+                    "triage.rescue_applied",
+                    rescued=rescued,
+                    new_investigate=investigated,
+                    reason="LLM filter rate exceeded safety threshold",
+                )
+
         log.info(
             "triage.complete",
             total=len(listings),
@@ -290,7 +454,17 @@ class TextTriageService:
 
         try:
             response = await llm_call(self._llm, messages, skill="text_triage")
-            return _parse_triage_response(str(response.content), listings)
+            results = _parse_triage_response(str(response.content), listings)
+            # Log per-listing decisions for debugging triage aggressiveness
+            for listing, result in zip(listings, results):
+                log.debug(
+                    "triage.decision",
+                    title=listing.title[:50],
+                    price=listing.price,
+                    investigate=result.investigate,
+                    reasoning=result.reasoning[:80],
+                )
+            return results
         except Exception as exc:
             log.warning(
                 "triage batch failed, marking all as investigate=True",

@@ -173,6 +173,65 @@ class TestParseGraphQLListings:
         results = parse_graphql_listings(body)
         assert "12345" in results[0].listing_url
 
+    def test_cents_conversion_amount_with_offset_in_currency(self):
+        """amount_with_offset_in_currency is CENTS — must divide by 100."""
+        edge = _make_feed_edge("001", "Table", 0.0)
+        edge["node"]["listing"]["listing_price"] = {
+            "amount_with_offset_in_currency": "1850",
+            "currency": "USD",
+        }
+        body = json.dumps(_make_feed_response(edge))
+        results = parse_graphql_listings(body)
+        assert len(results) == 1
+        assert results[0].price == 18.50
+
+    def test_cents_conversion_amount_with_offset_amount(self):
+        """amount_with_offset_amount is CENTS — must divide by 100."""
+        edge = _make_feed_edge("002", "Chair", 0.0)
+        edge["node"]["listing"]["listing_price"] = {
+            "amount_with_offset_amount": "5000",
+            "currency": "USD",
+        }
+        body = json.dumps(_make_feed_response(edge))
+        results = parse_graphql_listings(body)
+        assert len(results) == 1
+        assert results[0].price == 50.0
+
+    def test_cents_conversion_amount_with_offset(self):
+        """amount_with_offset is CENTS — must divide by 100."""
+        edge = _make_feed_edge("003", "Lamp", 0.0)
+        edge["node"]["listing"]["listing_price"] = {
+            "amount_with_offset": "2599",
+            "currency": "USD",
+        }
+        body = json.dumps(_make_feed_response(edge))
+        results = parse_graphql_listings(body)
+        assert len(results) == 1
+        assert results[0].price == 25.99
+
+    def test_amount_dollars_preferred_over_cents(self):
+        """When both 'amount' (dollars) and offset (cents) present, use dollars."""
+        edge = _make_feed_edge("004", "Both", 0.0)
+        edge["node"]["listing"]["listing_price"] = {
+            "amount": "18.50",
+            "amount_with_offset_in_currency": "1850",
+            "currency": "USD",
+        }
+        body = json.dumps(_make_feed_response(edge))
+        results = parse_graphql_listings(body)
+        assert results[0].price == 18.50
+
+    def test_formatted_amount_fallback(self):
+        """formatted_amount should be used when amount and offset are missing."""
+        edge = _make_feed_edge("005", "Widget", 0.0)
+        edge["node"]["listing"]["listing_price"] = {
+            "formatted_amount": "$42.00",
+            "currency": "USD",
+        }
+        body = json.dumps(_make_feed_response(edge))
+        results = parse_graphql_listings(body)
+        assert results[0].price == 42.0
+
 
 # ---------------------------------------------------------------------------
 # GraphQLInterceptor tests

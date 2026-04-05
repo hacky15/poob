@@ -105,7 +105,7 @@ class TestPatrolScanner:
 
     @pytest.fixture
     def scanner(self):
-        return PatrolScanner(scroll_steps=2, days_since_listed=1)
+        return PatrolScanner(scroll_steps=2, days_since_listed=1, scroll_until_stable=False)
 
     @pytest.mark.asyncio
     async def test_sweep_returns_listings(self, scanner, mock_page):

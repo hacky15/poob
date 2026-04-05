@@ -1,0 +1,872 @@
+"""Voice session orchestrator — ties STT, LLM, and TTS together.
+
+Manages the full pipeline: audio utterance → transcription → LLM response
+→ speech synthesis → Discord playback. Handles interrupt (user speaks while
+bot is talking), queuing, and thread-safe bridging between Discord's voice
+thread and the asyncio event loop.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import glob
+import os
+import shutil
+from typing import Any, TYPE_CHECKING
+
+import discord
+
+
+def _find_ffmpeg() -> str:
+    """Find the ffmpeg executable, checking common install locations on Windows.
+
+    Returns:
+        Full path to ffmpeg, or 'ffmpeg' if not found (will rely on PATH).
+    """
+    # Check PATH first
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+
+    # Check WinGet install location (where winget install Gyan.FFmpeg puts it)
+    winget_pattern = os.path.expanduser(
+        "~/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg*/ffmpeg-*-full_build/bin/ffmpeg.exe"
+    )
+    matches = glob.glob(winget_pattern)
+    if matches:
+        return matches[0]
+
+    # Check common locations
+    for candidate in [
+        r"C:\ffmpeg\bin\ffmpeg.exe",
+        r"C:\ProgramData\chocolatey\bin\ffmpeg.exe",
+        r"C:\tools\ffmpeg\bin\ffmpeg.exe",
+    ]:
+        if os.path.isfile(candidate):
+            return candidate
+
+    return "ffmpeg"  # Fall back to PATH lookup
+
+
+FFMPEG_PATH = _find_ffmpeg()
+
+from agentic_scraper.utils.logging import get_logger
+from agentic_scraper.voice.audio_buffer import (
+    BYTES_PER_FRAME,
+    FRAME_DURATION_MS,
+    UserAudioBuffer,
+    VADConfig,
+)
+from agentic_scraper.voice.address_detector import MultiSignalAddressDetector
+from agentic_scraper.voice.fillers import FillerPlayer
+from agentic_scraper.voice.silero_vad import (
+    DISCORD_FRAME_BYTES,
+    DISCORD_FRAME_MS,
+    SileroVADConfig,
+    SileroVADProcessor,
+    SpeechDetector,
+)
+from agentic_scraper.voice.stt import STTProvider
+from agentic_scraper.voice.tts import TTSProvider
+
+if TYPE_CHECKING:
+    from agentic_scraper.brain.poob import PoobBrain
+
+log = get_logger("voice.session")
+log.info("ffmpeg resolved", path=FFMPEG_PATH)
+
+
+class VoiceSession:
+    """Manages a single voice channel session.
+
+    One VoiceSession per guild/channel the bot is connected to.
+    Handles multiple users speaking (per-user buffers), processes
+    utterances sequentially, and plays responses back.
+
+    Args:
+        voice_client: Discord voice client (connected to a channel).
+        stt_providers: Ordered list of STT providers (try first, fallback).
+        tts_providers: Ordered list of TTS providers.
+        brain: Unified PoobBrain — handles personality, casual chat, and
+            deal routing for voice interactions.
+        vad_config: Voice activity detection config.
+        loop: The asyncio event loop (for thread-safe scheduling).
+    """
+
+    def __init__(
+        self,
+        voice_client: discord.VoiceClient,
+        stt_providers: list[STTProvider],
+        tts_providers: list[TTSProvider],
+        brain: PoobBrain,
+        vad_config: VADConfig | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
+        dual_pipeline_config: dict | None = None,
+    ) -> None:
+        self.voice_client = voice_client
+        self.stt_providers = stt_providers
+        self.tts_providers = tts_providers
+        self.brain = brain
+        self.vad_config = vad_config or VADConfig()
+        self._loop = loop or asyncio.get_event_loop()
+
+        # --- Dual Pipeline (Porcupine + Deepgram streaming) ---
+        # When configured, replaces the old batch STT pipeline with:
+        # 1. Porcupine wake word detection (~50ms, from raw audio)
+        # 2. Deepgram streaming STT (transcript ready when speech ends)
+        self._dual_pipeline = None
+        if dual_pipeline_config:
+            dg_key = dual_pipeline_config.get("deepgram_api_key", "")
+            model_path = dual_pipeline_config.get("porcupine_keyword_path", "")
+            if dg_key:
+                from agentic_scraper.voice.dual_pipeline import DualPipelineProcessor
+                self._dual_pipeline = DualPipelineProcessor(
+                    porcupine_access_key="",  # Not used — OpenWakeWord is local
+                    porcupine_keyword_path=model_path or None,
+                    deepgram_api_key=dg_key,
+                    on_addressed_utterance=self._on_dual_addressed,
+                    on_passive_utterance=self._on_dual_passive,
+                )
+                self._dual_pipeline.set_loop(self._loop)
+                log.info(
+                    "Dual pipeline enabled (OpenWakeWord + Deepgram streaming)",
+                    wake_model=os.path.basename(model_path) if model_path else "hey_jarvis (testing)",
+                )
+
+        # Silero VAD disabled — creates per-user model instances that are too slow
+        # to initialize in multi-user channels. Energy-based VAD with packet gap
+        # detection is reliable. Silero can be re-enabled once we solve:
+        # 1. Shared model instance with per-user state management
+        # 2. Lazy initialization (not on every new user join)
+        self._silero_vad = None
+        self._use_silero = False
+
+        self._user_buffers: dict[int, UserAudioBuffer] = {}
+        self._speech_detectors: dict[int, SpeechDetector] = {}
+        self._is_speaking = False
+        self._listening = True
+        self._pending_utterances: list[tuple[int, bytes]] = []
+        self.is_stage: bool = False
+        # Music player reference — set by MusicCog when music starts.
+        # When set, TTS is injected as overlay instead of replacing audio.
+        self.music_player: Any = None  # GuildMusicPlayer (avoid circular import)
+        # Pending utterance counter — caps fire-and-forget tasks to prevent
+        # API rate limit exhaustion. Replaces removed asyncio.Queue guard.
+        self._pending_utterance_count = 0
+        self.filler_player: FillerPlayer = FillerPlayer()
+        # Response lock — only one LLM→TTS→play pipeline at a time
+        # STT runs in parallel (fire-and-forget), but responses serialize
+        self._response_lock = asyncio.Lock()
+
+        # --- Passive context + multi-signal address detection ---
+        # Rolling transcript of recent conversation (all users, attributed).
+        self._transcript: list[dict] = []  # [{user_id, name, text, time}]
+        self._max_transcript = 25  # Keep last 25 messages
+        # User ID → display name cache
+        self._user_names: dict[int, str] = {}
+        # Multi-signal fusion address detector (research-backed)
+        self._address_detector = MultiSignalAddressDetector()
+
+    def _resolve_user_name(self, user_id: int) -> str:
+        """Resolve a Discord user ID to their display name.
+
+        Checks channel members first, then guild cache. Caches results.
+        """
+        if user_id == 0:
+            return "Poob"
+        if user_id in self._user_names:
+            return self._user_names[user_id]
+
+        # Try channel members
+        channel = self.voice_client.channel
+        if channel:
+            for member in channel.members:
+                if member.id == user_id:
+                    name = f"{member.display_name} ({member.name})"
+                    self._user_names[user_id] = name
+                    return name
+
+        # Try guild member cache
+        if channel and hasattr(channel, "guild") and channel.guild:
+            member = channel.guild.get_member(user_id)
+            if member:
+                name = f"{member.display_name} ({member.name})"
+                self._user_names[user_id] = name
+                return name
+
+        # Try voice states (Pycord populates these from VOICE_STATE_UPDATE)
+        if channel and hasattr(channel, "voice_states"):
+            for vs in channel.voice_states:
+                if hasattr(vs, "id") and vs.id == user_id:
+                    name = getattr(vs, "display_name", None) or getattr(vs, "name", None)
+                    if name:
+                        full = f"{name} ({getattr(vs, 'name', '?')})"
+                        self._user_names[user_id] = full
+                        return full
+
+        # Try the bot's user cache directly
+        if hasattr(self.voice_client, "client"):
+            user = self.voice_client.client.get_user(user_id)
+            if user:
+                name = f"{user.display_name} ({user.name})"
+                self._user_names[user_id] = name
+                return name
+
+        # Don't cache fallback — retry next time
+        return f"User-{user_id}"
+
+    def _add_to_transcript(self, user_id: int, text: str) -> None:
+        """Add an attributed message to the rolling transcript."""
+        import time as _time
+        name = self._resolve_user_name(user_id)
+        self._transcript.append({
+            "user_id": user_id,
+            "name": name,
+            "text": text,
+            "time": _time.monotonic(),
+        })
+        if len(self._transcript) > self._max_transcript:
+            self._transcript = self._transcript[-self._max_transcript:]
+
+    def _build_context(self) -> str:
+        """Build an attributed conversation transcript for the LLM.
+
+        Returns lines like:
+            Ben (hacky15): yeah thats what I was saying
+            Simon (holyhhaze21): Okay I see we are on the same page
+            Poob: bro what are you guys even talking about
+        """
+        if not self._transcript:
+            return ""
+        lines = []
+        for entry in self._transcript[-15:]:
+            lines.append(f"{entry['name']}: {entry['text']}")
+        return "\n".join(lines)
+
+    def _is_solo(self) -> bool:
+        """Check if it's just the bot + one human.
+
+        TODO: Set to False for testing — always require wake word.
+        Change back to actual check when testing is done.
+        """
+        return False  # TESTING: always require wake word
+
+    # --- Dual Pipeline Callbacks ---
+    # These are called from the DualPipelineProcessor when it detects
+    # addressed (wake word) or passive (no wake word) utterances.
+    # The transcript is ALREADY READY (built by Deepgram streaming).
+
+    def _on_dual_addressed(self, user_id: int, user_name: str, transcript: str) -> None:
+        """Called when wake word detected + speech ended. Transcript is ready."""
+        import time as _time
+
+        log.info(
+            "Dual: wake word addressed",
+            user=user_name,
+            text=transcript[:100],
+        )
+
+        # Add to passive context
+        self._add_to_transcript(user_id, transcript)
+        self._address_detector.mark_human_spoke(addressed_bot=True)
+
+        if hasattr(self, "_last_utterance_time"):
+            self._last_utterance_time = _time.monotonic()
+
+        # Build prompt and respond — transcript already available, no STT needed
+        self._loop.call_soon_threadsafe(
+            lambda: self._loop.create_task(
+                self._respond_to_transcript(user_id, user_name, transcript)
+            )
+        )
+
+    def _on_dual_passive(self, user_id: int, user_name: str, transcript: str) -> None:
+        """Called for non-wake-word utterances. Just add to passive context."""
+        import time as _time
+
+        log.info(
+            "Dual: passive heard",
+            user=user_name,
+            text=transcript[:60],
+        )
+        self._add_to_transcript(user_id, transcript)
+        self._address_detector.mark_human_spoke(addressed_bot=False)
+
+        if hasattr(self, "_last_utterance_time"):
+            self._last_utterance_time = _time.monotonic()
+
+    async def _respond_to_transcript(self, user_id: int, user_name: str, transcript: str) -> None:
+        """Generate and play a response to a transcribed utterance.
+
+        Called when the dual pipeline detects an addressed utterance.
+        The transcript is already complete — no STT step needed.
+        """
+        import time as _time
+        t0 = _time.monotonic()
+
+        if self._response_lock.locked():
+            log.info("Skipping response (another playing)", user=user_name)
+            return
+
+        async with self._response_lock:
+            # Build context prompt
+            conv_context = self._build_context()
+            if conv_context:
+                prompt = (
+                    f"[Recent conversation you've been listening to:\n{conv_context}]\n\n"
+                    f"{user_name} said to you: {transcript}"
+                )
+            else:
+                prompt = f"{user_name}: {transcript}"
+
+            # Generate response
+            full_response = ""
+            first_sentence = True
+            self._is_speaking = True
+
+            try:
+                # Collect all sentences first (LLM returns full response, split into sentences)
+                sentences = []
+                async for sentence in self.brain.respond_streaming(
+                    prompt, str(user_id),
+                ):
+                    full_response += sentence + " "
+                    sentences.append(sentence)
+
+                    if first_sentence:
+                        t_llm = _time.monotonic()
+                        log.info(
+                            "First sentence ready",
+                            llm_ms=int((t_llm - t0) * 1000),
+                            sentence=sentence[:60],
+                        )
+                        first_sentence = False
+
+                # Pipeline: synthesize sentence N+1 while sentence N plays.
+                # This eliminates the ~800ms TTS gap between sentences.
+                next_audio_task = None
+                for i, sentence in enumerate(sentences):
+                    # If we pre-synthesized this sentence, await it
+                    if next_audio_task is not None:
+                        audio = await next_audio_task
+                    else:
+                        audio = await self._synthesize(sentence)
+
+                    # Start synthesizing the NEXT sentence in background
+                    if i + 1 < len(sentences):
+                        next_audio_task = asyncio.create_task(
+                            self._synthesize(sentences[i + 1])
+                        )
+                    else:
+                        next_audio_task = None
+
+                    if audio:
+                        while self.voice_client.is_playing():
+                            await asyncio.sleep(0.02)
+                        await self._play_audio(audio)
+
+                # Update state
+                self._address_detector.mark_bot_spoke(full_response.strip())
+                if full_response.strip():
+                    self._add_to_transcript(0, full_response.strip()[:200])
+
+                t_done = _time.monotonic()
+                log.info(
+                    "Response complete",
+                    user=user_name,
+                    response=full_response.strip()[:100],
+                    total_ms=int((t_done - t0) * 1000),
+                )
+            except Exception as exc:
+                log.error("Response failed", user=user_name, error=str(exc)[:150])
+            finally:
+                self._is_speaking = False
+
+    @property
+    def is_listening(self) -> bool:
+        return self._listening
+
+    def toggle_listening(self) -> bool:
+        """Toggle voice listening on/off. Returns new state."""
+        self._listening = not self._listening
+        log.info("Voice listening toggled", listening=self._listening)
+        return self._listening
+
+    @property
+    def uses_dual_pipeline(self) -> bool:
+        """Whether the dual pipeline (Porcupine + Deepgram) is active."""
+        return self._dual_pipeline is not None
+
+    def process_audio_frame(self, user_id: int, pcm_data: bytes) -> None:
+        """Route an audio frame to the appropriate pipeline.
+
+        If dual pipeline is active, feeds both Porcupine (wake word)
+        and Deepgram (streaming STT) in parallel. Otherwise falls back
+        to the old energy-based VAD + batch STT approach.
+
+        Args:
+            user_id: Discord user ID.
+            pcm_data: Raw PCM bytes (48kHz stereo from Discord).
+        """
+        if self._dual_pipeline:
+            user_name = self._resolve_user_name(user_id)
+            self._dual_pipeline.process_audio_frame(user_id, pcm_data, user_name)
+        else:
+            # Legacy path: energy-based VAD → batch STT
+            buffer = self.get_or_create_buffer(user_id)
+            buffer.add_frame(pcm_data)
+
+    def get_or_create_buffer(self, user_id: int) -> UserAudioBuffer | SpeechDetector:
+        """Get or create an audio buffer/detector for a user (legacy path).
+
+        Only used when dual pipeline is not active.
+        """
+        if self._use_silero:
+            if user_id not in self._speech_detectors:
+                self._speech_detectors[user_id] = SpeechDetector(
+                    user_id=user_id,
+                    on_utterance=self._on_utterance_detected,
+                )
+            return self._speech_detectors[user_id]
+
+        if user_id not in self._user_buffers:
+            self._user_buffers[user_id] = UserAudioBuffer(
+                user_id=user_id,
+                config=self.vad_config,
+                on_utterance=self._on_utterance_detected,
+            )
+        return self._user_buffers[user_id]
+
+    def _on_utterance_detected(self, user_id: int, pcm_audio: bytes) -> None:
+        """Callback from VAD when a complete utterance is detected.
+
+        Called from Discord's voice thread — must be thread-safe.
+
+        ALWAYS transcribes into passive context. Only responds if addressed.
+        If bot is busy speaking, the utterance still gets transcribed (for
+        context) but Poob won't try to respond until he's done talking.
+        """
+        if not self._listening:
+            return
+
+        import time as _time
+        self._last_utterance_time = _time.monotonic()
+
+        duration_ms = len(pcm_audio) / DISCORD_FRAME_BYTES * DISCORD_FRAME_MS
+        if duration_ms < 300:
+            return  # Too short — noise/breath
+
+        # Drop if too many utterances pending — prevents API rate limit exhaustion
+        if self._pending_utterance_count > 4:
+            return
+
+        log.info(
+            "Utterance detected, scheduling processing",
+            user=user_id,
+            audio_bytes=len(pcm_audio),
+        )
+
+        # Enqueue for sequential processing (thread-safe)
+        self._loop.call_soon_threadsafe(
+            self._enqueue_utterance, user_id, pcm_audio
+        )
+
+    def _enqueue_utterance(self, user_id: int, pcm_audio: bytes) -> None:
+        """Fire-and-forget: start processing immediately as a new task.
+
+        No queue. Each utterance gets its own task. If the bot is already
+        responding, the task will detect that and just add to passive context.
+        This eliminates the sequential bottleneck where one slow STT blocks
+        everyone else.
+        """
+        self._pending_utterance_count += 1
+        self._loop.create_task(self._process_utterance(user_id, pcm_audio))
+
+    async def _process_utterance(self, user_id: int, pcm_audio: bytes) -> None:
+        """Full pipeline: STT → passive context → address check → LLM → TTS.
+
+        EVERY utterance is transcribed and added to the attributed transcript.
+        Address detection determines if Poob should respond — using wake words,
+        reply patterns, or an LLM classifier for ambiguous cases.
+        When responding, the full conversation context is included.
+        """
+        try:
+            import time as _time
+
+            t0 = _time.monotonic()
+            speaker_name = self._resolve_user_name(user_id)
+
+            # 1. Speech-to-text with timeout (always — needed for passive context)
+            try:
+                text = await asyncio.wait_for(self._transcribe(pcm_audio), timeout=5.0)
+            except asyncio.TimeoutError:
+                log.warning("STT timeout (5s)", user=user_id, audio_bytes=len(pcm_audio))
+                return
+            except Exception as stt_err:
+                log.error("STT failed", user=user_id, error=str(stt_err)[:100])
+                return
+            if not text or len(text.strip()) < 2:
+                log.info("Empty STT", user=speaker_name, audio_bytes=len(pcm_audio))
+                return
+
+            t_stt = _time.monotonic()
+            log.info(
+                "STT result",
+                user=speaker_name,
+                text=text[:80],
+                stt_ms=int((t_stt - t0) * 1000),
+            )
+
+            # 2. Add to attributed transcript (passive listening — always)
+            self._add_to_transcript(user_id, text)
+
+            if hasattr(self, "_last_utterance_time"):
+                self._last_utterance_time = _time.monotonic()
+
+            # 2b. If bot is currently speaking, just add to context and return.
+            if self._is_speaking or self.voice_client.is_playing():
+                log.info("Heard while speaking", user=speaker_name, text=text[:60])
+                self._address_detector.mark_human_spoke(addressed_bot=False)
+                return
+
+            # 2c. Update member names for negative signal detection
+            channel = self.voice_client.channel
+            if channel:
+                member_names = set()
+                for m in channel.members:
+                    if not m.bot:
+                        member_names.add(m.display_name.lower())
+                        member_names.add(m.name.lower())
+                self._address_detector.update_member_names(member_names)
+
+            # 3. Multi-signal fusion address detection
+            addressed, score, signals = self._address_detector.should_respond(
+                text=text,
+                is_solo=self._is_solo(),
+            )
+
+            if not addressed:
+                log.info(
+                    "Heard (passive)",
+                    user=speaker_name,
+                    text=text[:60],
+                    score=f"{score:.2f}",
+                )
+                self._address_detector.mark_human_spoke(addressed_bot=False)
+                return
+
+            # Log which signals triggered the response
+            active_signals = {k: f"{v:.2f}" for k, v in signals.items() if v > 0.01}
+            log.info(
+                "Addressed by user",
+                user=speaker_name,
+                text=text[:100],
+                stt_ms=int((t_stt - t0) * 1000),
+                score=f"{score:.2f}",
+                signals=active_signals,
+            )
+
+            # 4. Acquire response lock — only one response at a time
+            # If another response is already playing, skip (we're passive)
+            if self._response_lock.locked():
+                log.info("Skipping response (another playing)", user=speaker_name)
+                self._address_detector.mark_human_spoke(addressed_bot=True)
+                return
+
+            async with self._response_lock:
+                # Build context-enriched prompt with attributed messages
+                conv_context = self._build_context()
+                if conv_context:
+                    prompt = (
+                        f"[Recent conversation you've been listening to:\n{conv_context}]\n\n"
+                        f"{speaker_name} said to you: {text}"
+                    )
+                else:
+                    prompt = f"{speaker_name}: {text}"
+
+                # 5. Set guild context for music routing
+                channel = self.voice_client.channel
+                if channel and hasattr(channel, "guild"):
+                    self.brain._voice_guild_id = channel.guild.id
+
+                # 6. Generate response with sentence streaming
+                full_response = ""
+                first_sentence = True
+                self._is_speaking = True
+
+                async for sentence in self.brain.respond_streaming(
+                    prompt, str(user_id),
+                ):
+                    full_response += sentence + " "
+
+                    if first_sentence:
+                        t_llm = _time.monotonic()
+                        log.info(
+                            "First sentence ready",
+                            llm_ms=int((t_llm - t_stt) * 1000),
+                            sentence=sentence[:60],
+                        )
+                        first_sentence = False
+
+                    # 6. Synthesize and play each sentence
+                    audio = await self._synthesize(sentence)
+                    if audio:
+                        while self.voice_client.is_playing():
+                            await asyncio.sleep(0.05)
+                        await self._play_audio(audio)
+
+                # Update address detector state — Poob spoke
+                self._address_detector.mark_bot_spoke(full_response.strip())
+
+                # Add Poob's response to transcript for continuity
+                if full_response.strip():
+                    self._add_to_transcript(0, full_response.strip()[:200])
+
+            t_done = _time.monotonic()
+            log.info(
+                "Response complete",
+                user=speaker_name,
+                response=full_response.strip()[:100],
+                total_ms=int((t_done - t0) * 1000),
+            )
+
+            # Discard queued utterances — they're already in the transcript
+            if self._pending_utterances:
+                self._pending_utterances.clear()
+
+        except asyncio.CancelledError:
+            log.debug("Processing cancelled", user=user_id)
+        except Exception as exc:
+            log.error("Processing failed", user=user_id, error=str(exc)[:150])
+        finally:
+            self._is_speaking = False
+            self._pending_utterance_count = max(0, self._pending_utterance_count - 1)
+
+    async def _drain_pending_utterances(self) -> None:
+        """Transcribe and process utterances that arrived while the bot was speaking.
+
+        Waits for conversation to settle (1.5s of no new utterances) before
+        draining. This prevents the bot from firing endlessly in active channels.
+        Batches all queued utterances into one combined context for the LLM.
+        """
+        if not self._pending_utterances:
+            return
+
+        # Wait for conversation to settle — if people are still talking,
+        # let them finish before responding
+        settle_ms = 1500
+        for _ in range(15):  # Max 15 * 100ms = 1.5s settle wait
+            await asyncio.sleep(0.1)
+            # Check if queue grew (someone still talking)
+            queue_size = len(self._pending_utterances)
+            if queue_size == 0:
+                return  # Queue was cleared externally
+            await asyncio.sleep(0.1)
+            if len(self._pending_utterances) == queue_size:
+                # Queue stable for 200ms — conversation has settled
+                break
+
+        if not self._pending_utterances:
+            return
+
+        # Grab and clear the queue
+        queued = self._pending_utterances[:]
+        self._pending_utterances.clear()
+
+        log.info("Draining queued utterances", count=len(queued))
+
+        # Transcribe all queued utterances in parallel
+        transcription_tasks = [
+            self._transcribe(pcm) for _uid, pcm in queued
+        ]
+        transcriptions = await asyncio.gather(*transcription_tasks, return_exceptions=True)
+
+        # Build combined context
+        combined_parts: list[str] = []
+        last_user_id = None
+        for (uid, _pcm), result in zip(queued, transcriptions):
+            if isinstance(result, Exception) or not result or len(str(result).strip()) < 2:
+                continue
+            text = str(result).strip()
+            combined_parts.append(text)
+            last_user_id = uid
+
+        if not combined_parts or last_user_id is None:
+            return
+
+        combined_text = " ".join(combined_parts)
+        log.info(
+            "Processing combined queued input",
+            text=combined_text[:120],
+            user=last_user_id,
+            utterances=len(combined_parts),
+        )
+
+        # Process the combined input
+        import time as _time
+        t0 = _time.monotonic()
+
+        full_response = ""
+        first_sentence = True
+
+        async for sentence in self.brain.respond_streaming(
+            combined_text, str(last_user_id),
+        ):
+            full_response += sentence + " "
+
+            if first_sentence:
+                t_llm = _time.monotonic()
+                log.info(
+                    "First sentence ready",
+                    llm_ms=int((t_llm - t0) * 1000),
+                    sentence=sentence[:60],
+                )
+                first_sentence = False
+
+            audio = await self._synthesize(sentence)
+            if audio:
+                while self.voice_client.is_playing():
+                    await asyncio.sleep(0.05)
+                await self._play_audio(audio)
+
+        if full_response:
+            log.info(
+                "Response complete (queued)",
+                user=last_user_id,
+                response=full_response.strip()[:100],
+            )
+
+    async def _transcribe(self, pcm_audio: bytes) -> str:
+        """Try STT providers in cascade order."""
+        for provider in self.stt_providers:
+            try:
+                text = await provider.transcribe(pcm_audio)
+                if text:
+                    return text
+            except Exception as exc:
+                log.warning(
+                    "STT provider failed, trying next",
+                    provider=provider.name,
+                    error=str(exc)[:80],
+                )
+        return ""
+
+    async def _synthesize(self, text: str) -> bytes:
+        """Try TTS providers in cascade order."""
+        for provider in self.tts_providers:
+            try:
+                audio = await provider.synthesize(text)
+                if audio:
+                    log.info("TTS synthesized", provider=provider.name, bytes=len(audio))
+                    return audio
+            except Exception as exc:
+                log.warning(
+                    "TTS provider failed, trying next",
+                    provider=provider.name,
+                    error=str(exc)[:80],
+                )
+        return b""
+
+    async def _play_audio(self, audio_data: bytes) -> None:
+        """Play audio bytes through the Discord voice client.
+
+        When music is playing (self.music_player is set and has an active mixer),
+        TTS is injected as an overlay — music ducks automatically and Poob speaks
+        over it. When no music is playing, TTS plays directly as before.
+
+        Handles both MP3 (Edge TTS/Google TTS) and WAV (Kokoro) formats
+        by routing through ffmpeg.
+
+        Args:
+            audio_data: Audio bytes (MP3 or WAV format).
+        """
+        if not audio_data or not self.voice_client.is_connected():
+            return
+
+        self._is_speaking = True
+        log.info("Playing audio", bytes=len(audio_data))
+
+        try:
+            import tempfile
+            import os
+
+            # Write TTS audio to temp file — more reliable than pipe for ffmpeg
+            tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+            tmp.write(audio_data)
+            tmp.close()
+            tmp_path = tmp.name
+
+            tts_source = discord.FFmpegPCMAudio(
+                tmp_path,
+                executable=FFMPEG_PATH,
+            )
+
+            # --- Music overlay path ---
+            # If music is playing, inject TTS as overlay into the mixer.
+            # Music ducks automatically (MixingAudioSource handles gain ramps).
+            if (
+                self.music_player is not None
+                and self.music_player.mixer is not None
+                and self.voice_client.is_playing()
+            ):
+                # Wrap TTS with volume boost for clarity over music
+                boosted_tts = discord.PCMVolumeTransformer(tts_source, volume=2.0)
+                self.music_player.inject_tts_overlay(boosted_tts)
+                log.info("TTS injected as overlay on music")
+
+                # Wait for overlay to finish (mixer auto-cleans up)
+                await self.music_player.wait_overlay_done(timeout=30.0)
+
+                # Clean up temp file
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                self._is_speaking = False
+                return
+
+            # --- Standard path (no music) ---
+            source = discord.PCMVolumeTransformer(tts_source, volume=2.0)
+
+            # Create a future to await playback completion
+            play_done = self._loop.create_future()
+
+            def after_play(error: Exception | None) -> None:
+                self._is_speaking = False
+                if error:
+                    log.warning("Playback error", error=str(error)[:80])
+                # Clean up temp file
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                if not play_done.done():
+                    self._loop.call_soon_threadsafe(play_done.set_result, None)
+
+            vc = self.voice_client
+            vc.play(source, after=after_play)
+            log.info("Playback started", file=tmp_path)
+            await play_done
+
+        except Exception as exc:
+            self._is_speaking = False
+            log.error("Audio playback failed", error=str(exc)[:150])
+
+    async def cleanup(self) -> None:
+        """Clean up resources when leaving voice channel."""
+        if self._current_task and not self._current_task.done():
+            self._current_task.cancel()
+
+        # Flush all user buffers/detectors
+        for buffer in self._user_buffers.values():
+            buffer.flush()
+        self._user_buffers.clear()
+        for detector in self._speech_detectors.values():
+            detector.flush()
+        self._speech_detectors.clear()
+
+        # Unlink music player (MusicCog handles its own cleanup)
+        self.music_player = None
+
+        # Clear conversation histories for all users in this session
+        log.info("Voice session cleaned up")

@@ -74,6 +74,54 @@ async def migrate_schema(conn: aiosqlite.Connection) -> None:
         )
         await conn.commit()
 
+    # Add evaluated flag to listings (backlog queue for eval cap overflow)
+    cursor = await conn.execute("PRAGMA table_info(listings)")
+    columns = [row[1] for row in await cursor.fetchall()]
+    if "evaluated" not in columns:
+        await conn.execute(
+            "ALTER TABLE listings ADD COLUMN evaluated INTEGER NOT NULL DEFAULT 0"
+        )
+        # Mark all existing listings as evaluated (they've already been processed)
+        await conn.execute("UPDATE listings SET evaluated = 1")
+        await conn.commit()
+
+    # Add effort to watch_items (evaluation thoroughness control)
+    cursor = await conn.execute("PRAGMA table_info(watch_items)")
+    columns = [row[1] for row in await cursor.fetchall()]
+    if "effort" not in columns:
+        await conn.execute(
+            "ALTER TABLE watch_items ADD COLUMN effort TEXT DEFAULT 'normal'"
+        )
+        await conn.commit()
+
+    # Add enriched feedback columns for learning pipeline (Phase 1.5)
+    cursor = await conn.execute("PRAGMA table_info(deal_feedback)")
+    fb_columns = [row[1] for row in await cursor.fetchall()]
+    enriched_cols = {
+        "listing_title": "TEXT DEFAULT ''",
+        "listing_price": "REAL DEFAULT 0",
+        "vlm_output": "TEXT DEFAULT '{}'",
+        "deal_quality": "TEXT DEFAULT ''",
+        "estimated_value": "REAL DEFAULT 0",
+        "provider_used": "TEXT DEFAULT ''",
+        "enrichment_data": "TEXT DEFAULT '{}'",
+    }
+    for col_name, col_type in enriched_cols.items():
+        if col_name not in fb_columns:
+            await conn.execute(
+                f"ALTER TABLE deal_feedback ADD COLUMN {col_name} {col_type}"
+            )
+
+    # Add provenance_json to deals table
+    cursor = await conn.execute("PRAGMA table_info(deals)")
+    deal_columns = {row[1] for row in await cursor.fetchall()}
+    if "provenance_json" not in deal_columns:
+        await conn.execute(
+            "ALTER TABLE deals ADD COLUMN provenance_json TEXT DEFAULT ''"
+        )
+
+    await conn.commit()
+
 
 async def init_schema(conn: aiosqlite.Connection) -> None:
     """Create all tables if they don't exist."""
@@ -95,6 +143,7 @@ async def init_schema(conn: aiosqlite.Connection) -> None:
             scraped_at TEXT NOT NULL,
             raw_data TEXT NOT NULL DEFAULT '{}',
             is_sponsored INTEGER NOT NULL DEFAULT 0,
+            evaluated INTEGER NOT NULL DEFAULT 0,
             UNIQUE(site, external_id)
         );
 
@@ -112,6 +161,7 @@ async def init_schema(conn: aiosqlite.Connection) -> None:
             discord_channel_id TEXT NOT NULL DEFAULT '',
             notification_threshold TEXT DEFAULT 'good',
             notes TEXT DEFAULT '',
+            effort TEXT DEFAULT 'normal',
             search_configs TEXT DEFAULT '[]'
         );
 
@@ -123,6 +173,7 @@ async def init_schema(conn: aiosqlite.Connection) -> None:
             estimated_market_price REAL,
             discount_pct REAL,
             llm_reasoning TEXT NOT NULL DEFAULT '',
+            provenance_json TEXT DEFAULT '',
             notified INTEGER NOT NULL DEFAULT 0,
             notified_at TEXT,
             created_at TEXT NOT NULL

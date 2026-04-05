@@ -20,6 +20,7 @@ def mock_config():
         patrol_dead_interval_seconds=900,
         patrol_peak_hours_start=16,
         patrol_peak_hours_end=21,
+        display_timezone="America/Chicago",
     )
 
 

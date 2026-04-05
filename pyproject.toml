@@ -16,8 +16,14 @@ dependencies = [
     "langchain-google-genai>=2.1.0",
     "langchain-groq>=0.3.0",
 
-    # Discord
-    "discord.py>=2.3.0",
+    # Discord (Pycord — native voice receive + DAVE E2EE via voice_compat patch)
+    "py-cord[voice]==2.7.0",
+    "PyNaCl>=1.6.0,<1.7",           # Voice encryption (py-cord 2.7 requires >=1.6)
+    "davey>=0.1.4",                  # DAVE E2EE protocol (mandatory for Discord voice since March 2026)
+    "edge-tts>=6.1.0",              # Free cloud TTS (Microsoft Edge Read Aloud)
+    "numpy>=1.26.0",                # Audio processing
+    "silero-vad>=6.0.0",            # Neural VAD for speech detection (replaces energy-based)
+    "onnxruntime>=1.18.0",          # ONNX inference for Silero VAD
 
     # Configuration
     "pydantic>=2.5.0",
@@ -28,6 +34,7 @@ dependencies = [
 
     # HTTP
     "httpx>=0.25.0",
+    "brotli>=1.1.0",  # Brotli decompression for httpx (Facebook uses br encoding)
 
     # Search
     "tavily-python>=0.5.0",
@@ -36,11 +43,35 @@ dependencies = [
     "google-cloud-vision>=3.7.0",
     "google-search-results>=2.4.0",
 
+    # Neural TTS (Google Cloud Text-to-Speech — flagship quality voices)
+    "google-cloud-texttospeech>=2.34.0",
+
+    # Music (YouTube audio streaming)
+    "yt-dlp>=2024.12.0",
+
     # Logging
     "structlog>=23.2.0",
 
     # Utilities
     "python-dotenv>=1.0.0",
+
+    # Persistent quota tracking (survives restarts)
+    "pyrate-limiter>=3.0.0",
+
+    # Perceptual hash caching (image dedup, API result caching)
+    "diskcache>=5.6.0",
+    "imagehash>=4.3.0",
+    "Pillow>=10.0.0",
+
+    # Circuit breakers for external API resilience
+    "aiobreaker>=1.2.0",
+    "tenacity>=8.2.0",
+
+    # Structured constraint parsing from watchlist notes
+    "rapidfuzz>=3.6.0",
+
+    # Timezone data (required on Windows where system tzdata is absent)
+    "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

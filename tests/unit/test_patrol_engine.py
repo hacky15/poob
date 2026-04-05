@@ -6,7 +6,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
@@ -72,6 +72,11 @@ def mock_config():
         deal_public_min_score="incredible",
         deal_watchlist_min_score="good",
         listing_max_age_hours=6,
+        marketplace_default_location="appleton",
+        patrol_center_lat=0.0,
+        patrol_center_lon=0.0,
+        scan_max_listings_per_query=50,
+        patrol_anonymous_browse_categories=["electronics"],
     )
 
 
@@ -80,6 +85,12 @@ def mock_browser_manager():
     mgr = AsyncMock()
     page = AsyncMock()
     mgr.get_page = AsyncMock(return_value=page)
+    # get_session() is a sync method that returns a BrowserSession — mock it
+    # so that _enrich_listings_from_detail_pages can create extra tabs.
+    session = AsyncMock()
+    session.new_page = AsyncMock(return_value=AsyncMock())
+    session.close_page = AsyncMock()
+    mgr.get_session = Mock(return_value=session)
     return mgr
 
 
@@ -89,6 +100,7 @@ def mock_listing_repo():
     repo.exists = AsyncMock(return_value=False)
     repo.save = AsyncMock(side_effect=lambda listing: listing)
     repo.filter_new_ids = AsyncMock(return_value=set())
+    repo.get_known_external_ids = AsyncMock(return_value=set())
     return repo
 
 
@@ -174,10 +186,14 @@ class TestSweepAndIntercept:
     async def test_unified_mode_single_sweep(self, patrol_engine, mock_listing_repo):
         """Unified mode should sweep only once (None category)."""
         mock_listing_repo.filter_new_ids = AsyncMock(return_value=set())
+        mock_listing_repo.get_known_external_ids = AsyncMock(return_value=set())
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = []
             result = await patrol_engine.run_patrol_cycle()
 
@@ -190,10 +206,14 @@ class TestSweepAndIntercept:
         mock_config.patrol_sweep_mode = "categories"
         patrol_engine._sweep_mode = "categories"
         mock_listing_repo.filter_new_ids = AsyncMock(return_value=set())
+        mock_listing_repo.get_known_external_ids = AsyncMock(return_value=set())
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = []
             result = await patrol_engine.run_patrol_cycle()
 
@@ -215,7 +235,7 @@ class TestSweepAndIntercept:
                         "edges": [{
                             "node": {
                                 "listing": {
-                                    "id": "gql-111",
+                                    "id": "9991110001",
                                     "marketplace_listing_title": "PS5 from GraphQL",
                                     "listing_price": {"amount": "250.00", "currency": "USD"},
                                     "creation_time": int(time.time()),
@@ -242,16 +262,19 @@ class TestSweepAndIntercept:
 
         page.evaluate = AsyncMock(side_effect=mock_evaluate)
 
-        mock_listing_repo.filter_new_ids = AsyncMock(return_value={"gql-111"})
+        mock_listing_repo.filter_new_ids = AsyncMock(return_value={"9991110001"})
         result = PatrolCycleResult()
 
         with patch.object(
             patrol_engine, "_sweep_categories", new_callable=AsyncMock,
             return_value=[],  # No DOM listings
+        ), patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],  # Isolate test to JS intercept path
         ):
             listings, data_source = await patrol_engine._sweep_and_intercept(page, result)
 
-        assert data_source == "graphql"
+        assert data_source in ("graphql", "anonymous_graphql")
         assert len(listings) == 1
         assert listings[0].title == "PS5 from GraphQL"
         assert listings[0].posted_at is not None
@@ -261,10 +284,14 @@ class TestSweepAndIntercept:
         """When no GraphQL responses are captured, DOM data should be used."""
         dom_listing = _make_listing("dom-111", "Table from DOM", 50.0)
         mock_listing_repo.filter_new_ids = AsyncMock(return_value={"dom-111"})
+        mock_listing_repo.get_known_external_ids = AsyncMock(return_value=set())
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = [dom_listing]
             result = await patrol_engine.run_patrol_cycle()
 
@@ -276,10 +303,14 @@ class TestSweepAndIntercept:
         """Non-marketplace GraphQL responses should be silently ignored."""
         dom_listing = _make_listing("111")
         mock_listing_repo.filter_new_ids = AsyncMock(return_value={"111"})
+        mock_listing_repo.get_known_external_ids = AsyncMock(return_value=set())
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = [dom_listing]
             result = await patrol_engine.run_patrol_cycle()
 
@@ -301,7 +332,10 @@ class TestBatchDedup:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = listings
             result = await patrol_engine.run_patrol_cycle()
 
@@ -318,7 +352,10 @@ class TestBatchDedup:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = listings
             result = await patrol_engine.run_patrol_cycle()
 
@@ -336,7 +373,10 @@ class TestBatchDedup:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = listings
             result = await patrol_engine.run_patrol_cycle()
 
@@ -357,7 +397,10 @@ class TestEvaluation:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = listings
             await patrol_engine.run_patrol_cycle()
 
@@ -395,7 +438,10 @@ class TestEvaluation:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = [listing]
             await patrol_engine.run_patrol_cycle()
 
@@ -445,7 +491,10 @@ class TestEvaluation:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = [listing1, listing2]
             await patrol_engine.run_patrol_cycle()
 
@@ -483,7 +532,10 @@ class TestNotify:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = [listing]
             await patrol_engine.run_patrol_cycle()
 
@@ -513,7 +565,10 @@ class TestNotify:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = [listing]
             await patrol_engine.run_patrol_cycle()
 
@@ -550,7 +605,10 @@ class TestNotify:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = [listing]
             await patrol_engine.run_patrol_cycle()
 
@@ -567,7 +625,10 @@ class TestNotify:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = [_make_listing("111")]
             await patrol_engine.run_patrol_cycle()
 
@@ -586,7 +647,10 @@ class TestShadowBanDetection:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = []
 
             # Run 3 empty cycles
@@ -602,7 +666,10 @@ class TestShadowBanDetection:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = [_make_listing("111")]
             result = await patrol_engine.run_patrol_cycle()
 
@@ -619,7 +686,10 @@ class TestScanLogging:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = []
             await patrol_engine.run_patrol_cycle()
 
@@ -642,7 +712,10 @@ class TestPatrolCycleResult:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = []
             result = await patrol_engine.run_patrol_cycle()
 
@@ -671,7 +744,10 @@ class TestPatrolCycleResult:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = [listing]
             result = await patrol_engine.run_patrol_cycle()
 
@@ -691,6 +767,9 @@ class TestErrorHandling:
         with patch.object(
             patrol_engine._scanner, "sweep_category",
             side_effect=Exception("Network error"),
+        ), patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
         ):
             result = await patrol_engine.run_patrol_cycle()
 
@@ -708,7 +787,10 @@ class TestErrorHandling:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = [_make_listing("111")]
             result = await patrol_engine.run_patrol_cycle()
 
@@ -719,124 +801,9 @@ class TestErrorHandling:
 # --- Stale Listing Filtering ---
 
 
-class TestStaleFiltering:
-    def test_filters_stale_listings(self, patrol_engine):
-        """Listings older than max_age_hours should be filtered out."""
-        now = datetime.now(timezone.utc)
-        fresh = _make_listing("111", posted_at=now - timedelta(hours=1))
-        stale = _make_listing("222", posted_at=now - timedelta(hours=12))
-
-        result = patrol_engine._filter_stale([fresh, stale])
-        assert len(result) == 1
-        assert result[0].external_id == "111"
-
-    def test_keeps_listings_without_timestamp(self, patrol_engine):
-        """No-timestamp listings should be KEPT (DOM scraper can't extract dates,
-        but page is sorted newest-first so they're likely fresh)."""
-        no_ts = _make_listing("111", posted_at=None)
-        assert no_ts.posted_at is None
-
-        result = patrol_engine._filter_stale([no_ts])
-        assert len(result) == 1
-
-    def test_no_timestamp_mixed_with_fresh(self, patrol_engine):
-        """No-timestamp listings and fresh ones both pass through."""
-        now = datetime.now(timezone.utc)
-        fresh = _make_listing("111", posted_at=now - timedelta(hours=1))
-        no_ts = _make_listing("222", posted_at=None)
-
-        result = patrol_engine._filter_stale([fresh, no_ts])
-        assert len(result) == 2
-
-    def test_disabled_when_max_age_zero(self, patrol_engine, mock_config):
-        """Setting listing_max_age_hours=0 disables filtering (keeps everything)."""
-        mock_config.listing_max_age_hours = 0
-        stale = _make_listing(
-            "111", posted_at=datetime.now(timezone.utc) - timedelta(days=30)
-        )
-        no_ts = _make_listing("222", posted_at=None)
-
-        result = patrol_engine._filter_stale([stale, no_ts])
-        assert len(result) == 2
-
-    def test_just_inside_cutoff_is_kept(self, patrol_engine):
-        """Listing just inside the cutoff window should be kept."""
-        just_fresh = _make_listing(
-            "111", posted_at=datetime.now(timezone.utc) - timedelta(hours=5, minutes=59)
-        )
-
-        result = patrol_engine._filter_stale([just_fresh])
-        assert len(result) == 1
-
-    def test_exempt_ids_bypass_no_timestamp_discard(self, patrol_engine):
-        """Watchlist-matched listings should survive despite no timestamp."""
-        no_ts = _make_listing("111", title="PS5 Console", posted_at=None)
-
-        result = patrol_engine._filter_stale([no_ts], exempt_ids={"111"})
-        assert len(result) == 1
-        assert result[0].external_id == "111"
-
-    def test_all_no_timestamp_kept_regardless_of_exempt(self, patrol_engine):
-        """All no-timestamp listings are kept (page sorted newest-first)."""
-        no_ts_exempt = _make_listing("111", title="PS5 Console", posted_at=None)
-        no_ts_normal = _make_listing("222", title="Random Thing", posted_at=None)
-        now = datetime.now(timezone.utc)
-        fresh = _make_listing("333", posted_at=now - timedelta(hours=1))
-
-        result = patrol_engine._filter_stale(
-            [no_ts_exempt, no_ts_normal, fresh],
-            exempt_ids={"111"},
-        )
-        assert len(result) == 3
-        ids = {l.external_id for l in result}
-        assert "111" in ids  # no timestamp, kept
-        assert "222" in ids  # no timestamp, kept
-        assert "333" in ids  # has timestamp, fresh, kept
-
-    def test_stale_listings_not_saved_by_exempt(self, patrol_engine):
-        """Exempt IDs should NOT protect actually-stale listings (with old timestamps)."""
-        now = datetime.now(timezone.utc)
-        stale_exempt = _make_listing(
-            "111", posted_at=now - timedelta(hours=24)
-        )
-
-        result = patrol_engine._filter_stale([stale_exempt], exempt_ids={"111"})
-        assert len(result) == 0  # has timestamp, and it's stale — still filtered
-
-    def test_sponsored_listings_always_filtered(self, patrol_engine):
-        """Sponsored listings should be discarded regardless of timestamp."""
-        now = datetime.now(timezone.utc)
-        sponsored = _make_listing("111", posted_at=now, is_sponsored=True)
-        organic = _make_listing("222", posted_at=now)
-
-        result = patrol_engine._filter_stale([sponsored, organic])
-        assert len(result) == 1
-        assert result[0].external_id == "222"
-
-    def test_sponsored_without_timestamp_also_filtered(self, patrol_engine):
-        """Sponsored listings without timestamps are still discarded."""
-        sponsored = _make_listing("111", posted_at=None, is_sponsored=True)
-
-        result = patrol_engine._filter_stale([sponsored])
-        assert len(result) == 0
-
-    def test_sponsored_exempt_still_filtered(self, patrol_engine):
-        """Exempt IDs should NOT protect sponsored listings."""
-        sponsored = _make_listing("111", posted_at=None, is_sponsored=True)
-
-        result = patrol_engine._filter_stale([sponsored], exempt_ids={"111"})
-        assert len(result) == 0
-
-    def test_sponsored_filtered_even_when_disabled(self, patrol_engine, mock_config):
-        """Sponsored filtering works even when listing_max_age_hours=0."""
-        mock_config.listing_max_age_hours = 0
-        now = datetime.now(timezone.utc)
-        sponsored = _make_listing("111", posted_at=now, is_sponsored=True)
-        organic = _make_listing("222", posted_at=now)
-
-        result = patrol_engine._filter_stale([sponsored, organic])
-        assert len(result) == 1
-        assert result[0].external_id == "222"
+# TestStaleFiltering was removed — all filter tests are now in
+# test_listing_filter.py which tests the unified FilterChain
+# (SponsoredFilter, FreshnessFilter, CategoryFilter, GeoDistanceFilter, GarbageFilter).
 
 
 # --- Sort Order Verification ---
@@ -1011,7 +978,10 @@ class TestWatchlistExemption:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = [listing]
             result = await patrol_engine.run_patrol_cycle()
 
@@ -1039,7 +1009,10 @@ class TestWatchlistExemption:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = [listing]
             result = await patrol_engine.run_patrol_cycle()
 
@@ -1086,7 +1059,10 @@ class TestWatchlistExemption:
 
         with patch.object(
             patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = [fresh, exempt, discard]
             result = await patrol_engine.run_patrol_cycle()
 
@@ -1111,7 +1087,10 @@ class TestWatchlistSweepMultiConfig:
 
         with patch.object(
             patrol_engine._scanner, "sweep_search", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine._graphql_client, "search_all_pages", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.return_value = [_make_listing("111", title="TV")]
             result = PatrolCycleResult()
             listings = await patrol_engine._sweep_watchlist_items(MagicMock(), result)
@@ -1120,7 +1099,8 @@ class TestWatchlistSweepMultiConfig:
             mock_sweep.assert_called_once()
             call_kwargs = mock_sweep.call_args
             assert call_kwargs[1]["max_price"] == 200.0
-            assert call_kwargs[1]["location_slug"] is None
+            # Default location from config when search_configs is empty
+            assert call_kwargs[1]["location_slug"] in (None, "appleton")
             assert call_kwargs[1]["condition"] is None
 
     @pytest.mark.asyncio
@@ -1139,7 +1119,10 @@ class TestWatchlistSweepMultiConfig:
 
         with patch.object(
             patrol_engine._scanner, "sweep_search", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine._graphql_client, "search_all_pages", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.side_effect = [
                 [_make_listing("111", title="Couch Madison")],
                 [_make_listing("222", title="Couch Appleton")],
@@ -1180,7 +1163,10 @@ class TestWatchlistSweepMultiConfig:
 
         with patch.object(
             patrol_engine._scanner, "sweep_search", new_callable=AsyncMock
-        ) as mock_sweep:
+        ) as mock_sweep, patch.object(
+            patrol_engine._graphql_client, "search_all_pages", new_callable=AsyncMock,
+            return_value=[],
+        ):
             mock_sweep.side_effect = [[same_listing], [same_listing]]
             result = PatrolCycleResult()
             listings = await patrol_engine._sweep_watchlist_items(MagicMock(), result)

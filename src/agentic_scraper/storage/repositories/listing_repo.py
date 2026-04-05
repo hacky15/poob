@@ -31,15 +31,17 @@ class ListingRepository:
             INSERT INTO listings
                 (id, site, external_id, title, price, currency, description,
                  location, seller_name, image_urls, listing_url, posted_at,
-                 scraped_at, raw_data, is_sponsored)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 scraped_at, raw_data, is_sponsored, evaluated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(site, external_id) DO UPDATE SET
-                title = excluded.title,
-                price = excluded.price,
-                location = excluded.location,
-                seller_name = excluded.seller_name,
+                title = CASE WHEN excluded.title != '' THEN excluded.title ELSE listings.title END,
+                description = COALESCE(excluded.description, listings.description),
+                price = CASE WHEN excluded.price IS NOT NULL THEN excluded.price ELSE listings.price END,
+                location = CASE WHEN excluded.location != '' THEN excluded.location ELSE listings.location END,
+                seller_name = COALESCE(excluded.seller_name, listings.seller_name),
                 image_urls = excluded.image_urls,
                 listing_url = excluded.listing_url,
+                posted_at = COALESCE(excluded.posted_at, listings.posted_at),
                 scraped_at = excluded.scraped_at,
                 raw_data = excluded.raw_data,
                 is_sponsored = excluded.is_sponsored
@@ -60,6 +62,7 @@ class ListingRepository:
                 listing.scraped_at.isoformat(),
                 json.dumps(listing.raw_data),
                 int(listing.is_sponsored),
+                int(listing.evaluated),
             ),
         )
         await self._conn.commit()
@@ -115,6 +118,29 @@ class ListingRepository:
             existing.update(row["external_id"] for row in rows)
 
         return all_ids - existing
+
+    async def get_known_external_ids(
+        self, site: str, max_age_hours: int = 48,
+    ) -> set[str]:
+        """Return all known external_ids for a site within a time window.
+
+        Used by the patrol engine to pass known IDs into GraphQL pagination,
+        enabling early exit when a page is mostly duplicates.
+
+        Args:
+            site: Site identifier (e.g. 'facebook_marketplace').
+            max_age_hours: Only include listings scraped within this window.
+
+        Returns:
+            Set of known external_ids.
+        """
+        cursor = await self._conn.execute(
+            "SELECT external_id FROM listings "
+            "WHERE site = ? AND scraped_at > datetime('now', ?)",
+            [site, f"-{max_age_hours} hours"],
+        )
+        rows = await cursor.fetchall()
+        return {row["external_id"] for row in rows}
 
     async def list_recent(self, limit: int = 20) -> list[Listing]:
         """List the most recently scraped listings."""
@@ -185,4 +211,54 @@ class ListingRepository:
             scraped_at=datetime.fromisoformat(row["scraped_at"]),
             raw_data=json.loads(row["raw_data"]),
             is_sponsored=bool(row["is_sponsored"]) if "is_sponsored" in row.keys() else False,
+            evaluated=bool(row["evaluated"]) if "evaluated" in row.keys() else False,
         )
+
+    async def get_unevaluated(
+        self,
+        site: str,
+        max_age_hours: int = 24,
+        limit: int = 20,
+    ) -> list[Listing]:
+        """Fetch listings that were saved but never evaluated (evaluation cap overflow).
+
+        Args:
+            site: Site identifier.
+            max_age_hours: Maximum age of listings to consider.
+            limit: Maximum number of listings to return.
+
+        Returns:
+            Unevaluated listings, newest first.
+        """
+        cursor = await self._conn.execute(
+            """
+            SELECT * FROM listings
+            WHERE site = ?
+              AND evaluated = 0
+              AND is_sponsored = 0
+              AND scraped_at >= datetime('now', ?)
+            ORDER BY scraped_at DESC
+            LIMIT ?
+            """,
+            (site, f"-{max_age_hours} hours", limit),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_listing(row) for row in rows]
+
+    async def mark_evaluated(self, listing_ids: list[str]) -> None:
+        """Mark listings as evaluated so they aren't retried.
+
+        Args:
+            listing_ids: List of listing IDs to mark.
+        """
+        if not listing_ids:
+            return
+        batch_size = 900
+        for i in range(0, len(listing_ids), batch_size):
+            batch = listing_ids[i : i + batch_size]
+            placeholders = ",".join("?" * len(batch))
+            await self._conn.execute(
+                f"UPDATE listings SET evaluated = 1 WHERE id IN ({placeholders})",
+                batch,
+            )
+        await self._conn.commit()

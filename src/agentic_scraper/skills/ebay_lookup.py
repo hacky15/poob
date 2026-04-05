@@ -14,6 +14,7 @@ from agentic_scraper.skills.models import PriceLookupResult
 from agentic_scraper.utils.logging import get_logger
 
 if TYPE_CHECKING:
+    from agentic_scraper.cache.hash_cache import ResultCache
     from agentic_scraper.skills.web_search import SearchProvider
 
 log = get_logger("skills.ebay_lookup")
@@ -97,6 +98,23 @@ def compute_price_stats(
         )
 
     sorted_prices = sorted(prices)
+
+    # IQR-based outlier removal: drop prices outside 1.5×IQR.
+    # This prevents a mix of $20 baby plates and $663 fine china from
+    # inflating the median when eBay returns results across categories.
+    if len(sorted_prices) >= 4:
+        q1_idx = len(sorted_prices) // 4
+        q3_idx = 3 * len(sorted_prices) // 4
+        q1 = sorted_prices[q1_idx]
+        q3 = sorted_prices[q3_idx]
+        iqr = q3 - q1
+        lower_fence = q1 - 1.5 * iqr
+        upper_fence = q3 + 1.5 * iqr
+        filtered = [p for p in sorted_prices if lower_fence <= p <= upper_fence]
+        if filtered:
+            sorted_prices = filtered
+        # else: all prices are "outliers" — keep originals
+
     n = len(sorted_prices)
 
     median = statistics.median(sorted_prices)
@@ -143,8 +161,14 @@ class EbayLookupTool:
         search_provider: Tavily web search provider.
     """
 
-    def __init__(self, search_provider: SearchProvider) -> None:
+    def __init__(
+        self,
+        search_provider: SearchProvider,
+        *,
+        result_cache: ResultCache | None = None,
+    ) -> None:
         self._search = search_provider
+        self._cache = result_cache
 
     async def run(
         self, query: str, condition: str | None = None
@@ -178,6 +202,17 @@ class EbayLookupTool:
         search_parts.append("sold price site:ebay.com")
         search_query = " ".join(search_parts)
 
+        # Check eBay cache first
+        cache_key: str | None = None
+        if self._cache:
+            from agentic_scraper.cache.hash_cache import compute_text_hash
+
+            cache_key = compute_text_hash(search_query)
+            cached = self._cache.get_ebay(cache_key)
+            if cached:
+                log.info("ebay.cache_hit", query=search_query[:40])
+                return PriceLookupResult(**cached)
+
         try:
             text = await self._search.search(search_query)
 
@@ -196,9 +231,24 @@ class EbayLookupTool:
                 prices_found=len(prices),
             )
 
-            return compute_price_stats(
+            result = compute_price_stats(
                 prices, query=search_query, source="ebay_sold"
             )
+
+            # Cache positive results
+            if self._cache and cache_key and result.sample_count > 0:
+                self._cache.set_ebay(cache_key, {
+                    "median_price": result.median_price,
+                    "average_price": result.average_price,
+                    "min_price": result.min_price,
+                    "max_price": result.max_price,
+                    "sample_count": result.sample_count,
+                    "source": result.source,
+                    "search_query": result.search_query,
+                    "confidence": result.confidence,
+                })
+
+            return result
 
         except Exception as exc:
             log.warning(

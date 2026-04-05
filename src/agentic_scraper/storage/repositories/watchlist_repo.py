@@ -27,8 +27,8 @@ class WatchlistRepository:
             INSERT OR REPLACE INTO watch_items
                 (id, interest, max_price, location, radius_miles, category,
                  sites, is_active, created_at, discord_user_id, discord_channel_id,
-                 notification_threshold, notes, search_configs)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 notification_threshold, notes, effort, search_configs)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item.id,
@@ -44,6 +44,7 @@ class WatchlistRepository:
                 item.discord_channel_id,
                 item.notification_threshold,
                 item.notes,
+                item.effort,
                 json.dumps(item.search_configs),
             ),
         )
@@ -121,5 +122,6 @@ class WatchlistRepository:
             discord_channel_id=row["discord_channel_id"],
             notification_threshold=row["notification_threshold"] or "good",
             notes=row["notes"] if "notes" in row.keys() else "",
+            effort=row["effort"] if "effort" in row.keys() else "normal",
             search_configs=json.loads(row["search_configs"]) if "search_configs" in row.keys() else [],
         )

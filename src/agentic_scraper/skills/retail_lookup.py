@@ -106,26 +106,42 @@ class RetailLookupTool:
 
     @staticmethod
     def _parse_llm_response(content: str, search_query: str) -> PriceLookupResult:
-        """Parse LLM response to extract retail price."""
+        """Parse LLM response to extract retail price.
+
+        Handles edge cases: missing keys, non-numeric values, nested structures,
+        and markdown-fenced JSON.
+        """
+        empty = PriceLookupResult(
+            sample_count=0, source="retail",
+            search_query=search_query, confidence=0.0,
+        )
+
         fence_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", content, re.DOTALL)
         json_str = fence_match.group(1).strip() if fence_match else content.strip()
 
         try:
             data = json.loads(json_str)
-        except json.JSONDecodeError:
-            return PriceLookupResult(
-                sample_count=0, source="retail",
-                search_query=search_query, confidence=0.0,
-            )
+        except (json.JSONDecodeError, TypeError):
+            return empty
 
-        price = float(data.get("retail_price", 0))
-        confidence = float(data.get("confidence", 0))
+        if not isinstance(data, dict):
+            return empty
+
+        # Safely extract numeric values — guard against None, strings, nested dicts
+        try:
+            raw_price = data.get("retail_price")
+            price = float(raw_price) if raw_price is not None else 0.0
+        except (TypeError, ValueError):
+            return empty
+
+        try:
+            raw_conf = data.get("confidence")
+            confidence = float(raw_conf) if raw_conf is not None else 0.0
+        except (TypeError, ValueError):
+            confidence = 0.0
 
         if price <= 0:
-            return PriceLookupResult(
-                sample_count=0, source="retail",
-                search_query=search_query, confidence=0.0,
-            )
+            return empty
 
         return PriceLookupResult(
             median_price=price,

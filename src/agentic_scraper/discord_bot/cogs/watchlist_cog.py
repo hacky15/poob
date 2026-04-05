@@ -42,6 +42,7 @@ class WatchlistCog(commands.Cog, name="Watchlist"):
           !watch "free stuff" free            — only free items
 
         Notification levels: all, good, great, incredible, free
+        Effort level: managed via natural language (DM me "max effort on TVs")
         """
         await self._do_watch(
             ctx,

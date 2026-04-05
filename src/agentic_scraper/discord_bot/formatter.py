@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import discord
 
+from agentic_scraper.skills.models import DealProvenance
 from agentic_scraper.storage.models import Deal, DealScore, Listing, WatchItem
+from agentic_scraper.utils.content import clean_fb_description
 
 # Color coding by deal score
 SCORE_COLORS: dict[DealScore, discord.Colour] = {
@@ -24,6 +27,56 @@ SCORE_EMOJI: dict[DealScore, str] = {
     DealScore.GREAT: "[!!]",
     DealScore.INCREDIBLE: "[!!!]",
 }
+
+
+def _format_provenance_field(deal: Deal) -> str | None:
+    """Build compact provenance summary for the Discord embed.
+
+    Returns None if no provenance data is available (old deals).
+    """
+    if not deal.provenance_json:
+        return None
+
+    prov = DealProvenance.from_json(deal.provenance_json)
+    lines: list[str] = []
+
+    # Item identified by VLM
+    if prov.vlm_item_identified:
+        lines.append(f"**Item:** {prov.vlm_item_identified}")
+
+    # Condition
+    if prov.vlm_condition and prov.vlm_condition != "unknown":
+        cond_str = prov.vlm_condition.capitalize()
+        if prov.vlm_condition_notes:
+            cond_str += f" ({prov.vlm_condition_notes[:60]})"
+        lines.append(f"**Condition:** {cond_str}")
+
+    # VLM providers
+    if prov.vlm_providers:
+        prov_str = ", ".join(prov.vlm_providers)
+        if prov.vlm_agreement is not None:
+            prov_str += f" (agreement: {prov.vlm_agreement:.2f})"
+        lines.append(f"**Evaluated by:** {prov_str}")
+
+    # Price source
+    if prov.price_source:
+        price_str = prov.price_source
+        if prov.price_sample_count:
+            price_str += f" ({prov.price_sample_count} samples"
+            if prov.price_confidence:
+                price_str += f", conf: {prov.price_confidence:.1f}"
+            price_str += ")"
+        lines.append(f"**Price data:** {price_str}")
+
+    # Score adjustments
+    if prov.score_adjustments:
+        lines.append(f"**Adjusted:** {'; '.join(prov.score_adjustments)}")
+
+    # Scam signals
+    if prov.scam_signals:
+        lines.append(f"**Scam signals:** {', '.join(prov.scam_signals)}")
+
+    return "\n".join(lines) if lines else None
 
 
 def format_deal_embed(
@@ -68,8 +121,24 @@ def format_deal_embed(
     if watch_interest:
         embed.add_field(name="Matched Interest", value=watch_interest, inline=True)
 
+    # Seller's description — strip FB UI chrome, truncate to Discord limit
+    desc = clean_fb_description(listing.description)
+    if desc:
+        if len(desc) > 300:
+            desc = desc[:297] + "..."
+        embed.add_field(name="Seller Description", value=desc, inline=False)
+
     if deal.llm_reasoning:
-        embed.add_field(name="Why it's a deal", value=deal.llm_reasoning, inline=False)
+        embed.add_field(name="Why it's a deal", value=deal.llm_reasoning[:1024], inline=False)
+
+    # Provenance: show evaluation details when available
+    provenance_text = _format_provenance_field(deal)
+    if provenance_text:
+        embed.add_field(
+            name="Evaluation Details",
+            value=provenance_text[:1024],
+            inline=False,
+        )
 
     if listing.image_urls:
         embed.set_image(url=listing.image_urls[0])
@@ -134,10 +203,12 @@ def format_watchlist_embed(watch_items: list[WatchItem]) -> discord.Embed:
         status = "Active" if item.is_active else "Paused"
         threshold = item.notification_threshold or "good"
         threshold_str = f" | Notify: {threshold}" if threshold != "good" else ""
+        effort = getattr(item, "effort", "normal")
+        effort_str = " | **MAX EFFORT**" if effort == "max" else ""
 
         embed.add_field(
             name=f"{item.interest}{price_str}",
-            value=f"ID: `{item.id}`{location_str} | {status}{threshold_str}",
+            value=f"ID: `{item.id}`{location_str} | {status}{threshold_str}{effort_str}",
             inline=False,
         )
 
@@ -151,6 +222,7 @@ def format_status_embed(
     last_scan_time: datetime | None,
     next_scan_time: datetime | None,
     registered_sites: list[str],
+    display_timezone: str = "America/Chicago",
 ) -> discord.Embed:
     """Build a Discord embed showing scanner status.
 
@@ -177,10 +249,20 @@ def format_status_embed(
     embed = discord.Embed(title="Patrol Status", color=color)
     embed.add_field(name="Status", value=status_str, inline=True)
 
-    last_str = last_scan_time.strftime("%Y-%m-%d %H:%M UTC") if last_scan_time else "Never"
+    tz = ZoneInfo(display_timezone)
+    tz_abbrev = "CT"  # Central Time
+    if last_scan_time:
+        last_local = last_scan_time.astimezone(tz)
+        last_str = last_local.strftime(f"%Y-%m-%d %H:%M {tz_abbrev}")
+    else:
+        last_str = "Never"
     embed.add_field(name="Last Patrol", value=last_str, inline=True)
 
-    next_str = next_scan_time.strftime("%Y-%m-%d %H:%M UTC") if next_scan_time else "N/A"
+    if next_scan_time:
+        next_local = next_scan_time.astimezone(tz)
+        next_str = next_local.strftime(f"%Y-%m-%d %H:%M {tz_abbrev}")
+    else:
+        next_str = "N/A"
     embed.add_field(name="Next Patrol", value=next_str, inline=True)
 
     embed.add_field(

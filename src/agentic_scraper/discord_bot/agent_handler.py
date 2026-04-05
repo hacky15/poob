@@ -1,4 +1,4 @@
-"""Discord message handler for the conversational agent."""
+"""Discord message handler — routes @mentions and DMs through PoobBrain."""
 
 from __future__ import annotations
 
@@ -10,25 +10,28 @@ from discord.ext import commands
 from agentic_scraper.utils.logging import get_logger
 
 if TYPE_CHECKING:
-    from agentic_scraper.agent.runner import AgentRunner
+    from agentic_scraper.brain.poob import PoobBrain
 
 log = get_logger("discord.agent")
 
 
 class AgentMessageHandler(commands.Cog):
-    """Listens for @mentions and DMs, routes them to the AgentRunner.
+    """Listens for @mentions and DMs, routes them through PoobBrain.
+
+    PoobBrain handles personality and routes deal-related requests
+    to the deal sub-agent automatically.
 
     Ignores messages with the command prefix (those are handled by existing cogs)
     and messages from other bots.
 
     Args:
         bot: The Discord bot instance.
-        agent_runner: The conversational agent runner.
+        brain: The unified PoobBrain personality layer.
     """
 
-    def __init__(self, bot: commands.Bot, agent_runner: AgentRunner) -> None:
+    def __init__(self, bot: commands.Bot, brain: PoobBrain) -> None:
         self._bot = bot
-        self._runner = agent_runner
+        self._brain = brain
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -68,11 +71,13 @@ class AgentMessageHandler(commands.Cog):
             content_length=len(content),
         )
 
-        log.info("agent.calling_runner", user=user_id, content=content[:80])
+        log.info("agent.calling_brain", user=user_id, content=content[:80])
         try:
             async with message.channel.typing():
-                response = await self._runner.run(content, user_id, channel_id)
-            log.info("agent.runner_done", user=user_id, response_length=len(response))
+                response = await self._brain.respond(
+                    content, user_id, channel_id, voice=False,
+                )
+            log.info("agent.brain_done", user=user_id, response_length=len(response))
         except Exception:
             log.exception("agent.run_error", user=user_id)
             response = "Sorry, something went wrong processing your request."

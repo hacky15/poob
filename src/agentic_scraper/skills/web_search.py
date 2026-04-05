@@ -9,12 +9,18 @@ Serper.dev free tier: 2,500 searches (one-time credit).
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import httpx
 
 from agentic_scraper.skills.search_throttle import SearchRateLimiter
 from agentic_scraper.utils.logging import get_logger
+
+from aiobreaker import CircuitBreakerError
+
+if TYPE_CHECKING:
+    from agentic_scraper.cache.hash_cache import ResultCache
+    from agentic_scraper.resilience.circuit_breaker import ServiceCircuitBreaker
 
 log = get_logger("skills.web_search")
 
@@ -228,7 +234,7 @@ class SerperSearchProvider:
                     query=query[:60],
                     response_body=body,
                 )
-                if response.status_code in (401, 403, 429):
+                if response.status_code in (400, 401, 403, 429):
                     self._quota_exhausted = True
                 return ""
 
@@ -305,6 +311,290 @@ class SerperSearchProvider:
             return []
 
 
+class SearXNGSearchProvider:
+    """Web search via self-hosted SearXNG instance.
+
+    Unlimited free searches — no API key, no quota.  Aggregates Google, Bing,
+    and DuckDuckGo results.  Requires SearXNG running in Docker:
+        docker run --rm -d -p 8080:8080 searxng/searxng
+
+    Args:
+        base_url: SearXNG instance URL (default: http://localhost:8080).
+        rate_limiter: Optional shared rate limiter.
+        max_results: Maximum results per query.
+        timeout_seconds: HTTP request timeout.
+    """
+
+    name = "searxng"
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8080",
+        rate_limiter: SearchRateLimiter | None = None,
+        max_results: int = 5,
+        timeout_seconds: int = 15,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._rate_limiter = rate_limiter
+        self._max_results = max_results
+        self._timeout = timeout_seconds
+        self._unavailable = False
+
+    async def search(self, query: str, include_domains: list[str] | None = None) -> str:
+        """Run a web search and return concatenated text snippets."""
+        if self._unavailable:
+            return ""
+
+        results = await self.search_results(query, include_domains)
+        if not results:
+            return ""
+
+        parts: list[str] = []
+        for r in results:
+            title = r.get("title", "")
+            content = r.get("content", "")
+            url = r.get("url", "")
+            if title or content:
+                parts.append(f"{title}\n{content}\n{url}")
+
+        text = "\n\n".join(parts)
+        log.info(
+            "SearXNG search complete",
+            query=query[:60],
+            results=len(results),
+            text_len=len(text),
+        )
+        return text
+
+    async def search_results(
+        self, query: str, include_domains: list[str] | None = None
+    ) -> list[dict]:
+        """Run a web search and return raw result dicts."""
+        if self._unavailable:
+            return []
+
+        if self._rate_limiter:
+            await self._rate_limiter.acquire()
+
+        # Append site: filter if include_domains specified
+        effective_query = query
+        if include_domains:
+            sites = " OR ".join(f"site:{d}" for d in include_domains)
+            effective_query = f"{query} ({sites})"
+
+        params = {
+            "q": effective_query,
+            "format": "json",
+            "pageno": 1,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                response = await client.get(
+                    f"{self._base_url}/search", params=params
+                )
+
+            if response.status_code != 200:
+                log.warning(
+                    "SearXNG search failed",
+                    status=response.status_code,
+                    query=query[:60],
+                )
+                # Connection refused or server error — mark unavailable
+                if response.status_code >= 500:
+                    self._unavailable = True
+                return []
+
+            data = response.json()
+            raw_results = data.get("results", [])
+
+            # Normalize to same format as Tavily/Serper
+            results = [
+                {
+                    "title": r.get("title", ""),
+                    "content": r.get("content", ""),
+                    "url": r.get("url", ""),
+                }
+                for r in raw_results[: self._max_results]
+            ]
+            return results
+
+        except httpx.ConnectError:
+            log.info("SearXNG not running, skipping")
+            self._unavailable = True
+            return []
+        except Exception as exc:
+            log.warning("SearXNG search error", error=str(exc), query=query[:60])
+            return []
+
+
+class GoogleCSESearchProvider:
+    """Web search via Google Custom Search Engine (100 queries/day free).
+
+    Highest quality results from Google's index.
+
+    Args:
+        api_key: Google API key with Custom Search JSON API enabled.
+        cx: Custom Search Engine ID.
+        rate_limiter: Optional shared rate limiter.
+        max_results: Maximum results per query.
+    """
+
+    name = "google_cse"
+
+    def __init__(
+        self,
+        api_key: str,
+        cx: str,
+        rate_limiter: SearchRateLimiter | None = None,
+        max_results: int = 5,
+    ) -> None:
+        self._api_key = api_key
+        self._cx = cx
+        self._rate_limiter = rate_limiter
+        self._max_results = max_results
+        self._quota_exhausted = False
+
+    async def search(self, query: str, include_domains: list[str] | None = None) -> str:
+        if self._quota_exhausted:
+            return ""
+        results = await self.search_results(query, include_domains)
+        if not results:
+            return ""
+        parts = [f"{r['title']}\n{r['content']}\n{r['url']}" for r in results if r.get("title")]
+        text = "\n\n".join(parts)
+        log.info("Google CSE search complete", query=query[:60], results=len(results), text_len=len(text))
+        return text
+
+    async def search_results(
+        self, query: str, include_domains: list[str] | None = None
+    ) -> list[dict]:
+        if self._quota_exhausted:
+            return []
+        if self._rate_limiter:
+            await self._rate_limiter.acquire()
+
+        params = {
+            "key": self._api_key,
+            "cx": self._cx,
+            "q": query,
+            "num": min(self._max_results, 10),
+        }
+        if include_domains:
+            params["siteSearch"] = include_domains[0]
+
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    "https://www.googleapis.com/customsearch/v1", params=params
+                )
+            if resp.status_code in (429, 403):
+                # 429 = quota exhausted, 403 = API not enabled or key restricted
+                # Either way, stop retrying for this session
+                log.warning(
+                    "Google CSE disabled for session",
+                    status=resp.status_code,
+                    hint="403=enable Custom Search JSON API in Cloud Console" if resp.status_code == 403 else "429=daily quota hit",
+                )
+                self._quota_exhausted = True
+                return []
+            if resp.status_code != 200:
+                log.warning("Google CSE search failed", status=resp.status_code)
+                return []
+            data = resp.json()
+            items = data.get("items", [])
+            return [
+                {
+                    "title": item.get("title", ""),
+                    "content": item.get("snippet", ""),
+                    "url": item.get("link", ""),
+                }
+                for item in items[: self._max_results]
+            ]
+        except Exception as exc:
+            log.warning("Google CSE search error", error=str(exc)[:100])
+            return []
+
+
+class MojeekSearchProvider:
+    """Web search via Mojeek API (2,000 queries/day free).
+
+    Independent search index — not Google/Bing dependent.
+
+    Args:
+        api_key: Mojeek API key.
+        rate_limiter: Optional shared rate limiter.
+        max_results: Maximum results per query.
+    """
+
+    name = "mojeek"
+
+    def __init__(
+        self,
+        api_key: str,
+        rate_limiter: SearchRateLimiter | None = None,
+        max_results: int = 5,
+    ) -> None:
+        self._api_key = api_key
+        self._rate_limiter = rate_limiter
+        self._max_results = max_results
+        self._quota_exhausted = False
+
+    async def search(self, query: str, include_domains: list[str] | None = None) -> str:
+        if self._quota_exhausted:
+            return ""
+        results = await self.search_results(query, include_domains)
+        if not results:
+            return ""
+        parts = [f"{r['title']}\n{r['content']}\n{r['url']}" for r in results if r.get("title")]
+        text = "\n\n".join(parts)
+        log.info("Mojeek search complete", query=query[:60], results=len(results), text_len=len(text))
+        return text
+
+    async def search_results(
+        self, query: str, include_domains: list[str] | None = None
+    ) -> list[dict]:
+        if self._quota_exhausted:
+            return []
+        if self._rate_limiter:
+            await self._rate_limiter.acquire()
+
+        params = {
+            "q": query,
+            "api_key": self._api_key,
+            "fmt": "json",
+            "t": self._max_results,
+        }
+        if include_domains:
+            params["q"] = f"{query} site:{include_domains[0]}"
+
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    "https://api.mojeek.com/search", params=params
+                )
+            if resp.status_code == 429:
+                log.warning("Mojeek quota exhausted")
+                self._quota_exhausted = True
+                return []
+            if resp.status_code != 200:
+                log.warning("Mojeek search failed", status=resp.status_code)
+                return []
+            data = resp.json()
+            raw = data.get("response", {}).get("results", [])
+            return [
+                {
+                    "title": item.get("title", ""),
+                    "content": item.get("desc", ""),
+                    "url": item.get("url", ""),
+                }
+                for item in raw[: self._max_results]
+            ]
+        except Exception as exc:
+            log.warning("Mojeek search error", error=str(exc)[:100])
+            return []
+
+
 class SearchProviderCascade:
     """Cascade of search providers — tries each in order until one succeeds.
 
@@ -312,19 +602,65 @@ class SearchProviderCascade:
     it automatically falls through to the next provider. Providers that hit quota
     limits are marked as exhausted for the session.
 
+    Optionally caches search results using ResultCache to avoid redundant queries.
+
     Args:
         providers: Ordered list of search providers (first = primary).
+        result_cache: Optional perceptual/text hash cache for deduplication.
     """
 
-    def __init__(self, providers: list[TavilySearchProvider | SerperSearchProvider]) -> None:
+    def __init__(
+        self,
+        providers: list[
+            TavilySearchProvider | SerperSearchProvider | SearXNGSearchProvider
+            | GoogleCSESearchProvider | MojeekSearchProvider
+        ],
+        result_cache: ResultCache | None = None,
+        breakers: dict[str, ServiceCircuitBreaker] | None = None,
+    ) -> None:
         self._providers = providers
+        self._cache = result_cache
+        self._breakers = breakers or {}
 
     async def search(self, query: str, include_domains: list[str] | None = None) -> str:
         """Try each provider in order until one returns results."""
+        # Check cache first
+        if self._cache:
+            from agentic_scraper.cache.hash_cache import compute_text_hash
+
+            cache_key = compute_text_hash(f"{query}|{include_domains or ''}")
+            cached = self._cache.get_search(cache_key)
+            if cached:
+                log.debug("search.cache_hit", query=query[:40])
+                return cached
+
         for provider in self._providers:
-            result = await provider.search(query, include_domains)
-            if result:
-                return result
+            breaker = self._breakers.get(provider.name)
+            if breaker and breaker.is_open:
+                log.debug("search.breaker_open", provider=provider.name)
+                continue
+            try:
+                if breaker:
+                    result = await breaker.call(
+                        provider.search, query, include_domains
+                    )
+                else:
+                    result = await provider.search(query, include_domains)
+                if result:
+                    # Cache the result
+                    if self._cache:
+                        self._cache.set_search(cache_key, result)
+                    return result
+            except CircuitBreakerError:
+                log.warning("search.breaker_tripped", provider=provider.name)
+                continue
+            except Exception as exc:
+                log.debug(
+                    "search.provider_error",
+                    provider=provider.name,
+                    error=str(exc)[:100],
+                )
+                continue
         return ""
 
     async def search_results(
@@ -332,7 +668,26 @@ class SearchProviderCascade:
     ) -> list[dict]:
         """Try each provider in order until one returns results."""
         for provider in self._providers:
-            results = await provider.search_results(query, include_domains)
-            if results:
-                return results
+            breaker = self._breakers.get(provider.name)
+            if breaker and breaker.is_open:
+                continue
+            try:
+                if breaker:
+                    results = await breaker.call(
+                        provider.search_results, query, include_domains
+                    )
+                else:
+                    results = await provider.search_results(query, include_domains)
+                if results:
+                    return results
+            except CircuitBreakerError:
+                log.warning("search_results.breaker_tripped", provider=provider.name)
+                continue
+            except Exception as exc:
+                log.debug(
+                    "search_results.provider_error",
+                    provider=provider.name,
+                    error=str(exc)[:100],
+                )
+                continue
         return []

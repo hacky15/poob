@@ -81,6 +81,7 @@ def build_tools(
         priority: str = "normal",
         category: str | None = None,
         notes: str = "",
+        effort: str = "normal",
         search_configs: str = "[]",
     ) -> str:
         """Add an interest to the watchlist so the patrol system looks out for it.
@@ -104,6 +105,11 @@ def build_tools(
             category: Item category like "furniture", "electronics", "clothing".
             notes: User preferences for this item (e.g. "not metal", "modern style",
                 "ideally wood finish"). Passed to the deal evaluator as context.
+            effort: Evaluation thoroughness. "normal" = standard pipeline,
+                "max" = all listing images sent to VLM, best providers used,
+                no unbranded value cap, OCR text extracted from every image.
+                Use "max" for high-value or hard-to-evaluate items the user
+                really cares about (TVs, electronics, appliances, etc.).
             search_configs: JSON string of search configurations. Each config is a dict
                 with optional keys:
                 - "location": FB city slug (e.g. "madison", "appleton", "green-bay")
@@ -126,6 +132,11 @@ def build_tools(
             )
         notification_level = resolved
 
+        # Validate effort
+        valid_efforts = {"normal", "max"}
+        if effort not in valid_efforts:
+            effort = "normal"
+
         # Parse search_configs from JSON string
         try:
             configs = json.loads(search_configs) if search_configs else []
@@ -144,6 +155,7 @@ def build_tools(
             # Update the existing item instead of creating a duplicate
             existing.max_price = max_price
             existing.notification_threshold = notification_level
+            existing.effort = effort
             if category:
                 existing.category = category
             if notes:
@@ -158,6 +170,7 @@ def build_tools(
                 max_price=max_price,
                 notification_threshold=notification_level,
                 category=category,
+                effort=effort,
                 discord_user_id=discord_user_id,
                 discord_channel_id=discord_channel_id,
                 notes=notes,
@@ -172,6 +185,7 @@ def build_tools(
             "name": item_name,
             "priority": priority,
             "notification_level": notification_level,
+            "effort": effort,
         }
         if max_price is not None:
             entry["max_price"] = max_price
@@ -195,6 +209,7 @@ def build_tools(
 
         price_str = f" (max ${max_price})" if max_price else ""
         level_str = f", notify for {notification_level} deals"
+        effort_str = " [MAX EFFORT]" if effort == "max" else ""
         notes_str = f" ({notes})" if notes else ""
         configs_str = ""
         if configs:
@@ -211,7 +226,7 @@ def build_tools(
                     parts.append(f"max ${c['max_price']}")
                 cfg_parts.append(" ".join(parts))
             configs_str = f"\nSearches: {' | '.join(cfg_parts)}"
-        return f"Added '{item_name}'{price_str}{level_str}{notes_str} to your watchlist.{configs_str}"
+        return f"Added '{item_name}'{price_str}{level_str}{effort_str}{notes_str} to your watchlist.{configs_str}"
 
     # ------------------------------------------------------------------
     # remove_from_wishlist
@@ -259,19 +274,23 @@ def build_tools(
         notification_level: str | None = None,
         max_price: float | None = None,
         notes: str | None = None,
+        effort: str | None = None,
         search_configs: str | None = None,
     ) -> str:
-        """Update an existing watchlist item's notification level, max price, notes, or search configs.
+        """Update an existing watchlist item's settings.
 
         Use this when the user wants to change settings on an item already on
         their watchlist — e.g. "only incredible deals" or "raise my budget to $200"
-        or "not metal and old looking" or "add a search in Appleton".
+        or "not metal and old looking" or "add a search in Appleton"
+        or "max effort on that one" or "go all out on TVs".
 
         Args:
             item_name: The item to update (must already be on the watchlist).
             notification_level: New notification level (all/good/great/incredible/free).
             max_price: New max price, or None to leave unchanged.
             notes: New preferences/notes for this item, or None to leave unchanged.
+            effort: Evaluation thoroughness — "normal" or "max". None to leave unchanged.
+                "max" = all images analyzed, best VLMs, no unbranded cap, full OCR.
             search_configs: New search configs as JSON string, or None to leave unchanged.
                 Same format as add_to_wishlist.
         """
@@ -298,6 +317,12 @@ def build_tools(
         if notes is not None:
             matched.notes = notes
             changes.append(f"notes → {notes}")
+        if effort is not None:
+            if effort in {"normal", "max"}:
+                matched.effort = effort
+                changes.append(f"effort → {effort}")
+            else:
+                return f"Invalid effort '{effort}'. Use: normal, max."
         if search_configs is not None:
             try:
                 configs = json.loads(search_configs)
@@ -307,7 +332,7 @@ def build_tools(
                 return "Invalid search_configs JSON."
 
         if not changes:
-            return "Nothing to update. Specify notification_level, max_price, or notes."
+            return "Nothing to update. Specify notification_level, max_price, notes, or effort."
 
         await watchlist_repo.save(matched)
 
@@ -323,6 +348,8 @@ def build_tools(
                         entry["max_price"] = max_price
                     if notes is not None:
                         entry["notes"] = notes
+                    if effort is not None:
+                        entry["effort"] = effort
                     if search_configs is not None:
                         try:
                             entry["search_configs"] = json.loads(search_configs)
@@ -353,6 +380,8 @@ def build_tools(
                 line += f" (max ${item.max_price})"
             notif = item.notification_threshold or "good"
             line += f" -- notify: {notif}"
+            if getattr(item, "effort", "normal") == "max":
+                line += " -- [MAX EFFORT]"
             if item.notes:
                 line += f" -- prefs: {item.notes}"
             if item.search_configs:

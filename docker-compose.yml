@@ -1,0 +1,9 @@
+services:
+  searxng:
+    image: searxng/searxng
+    container_name: agentic-searxng
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./docker/searxng:/etc/searxng
+    restart: unless-stopped
