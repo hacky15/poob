@@ -5,9 +5,12 @@ venv/
 # Environment secrets
 .env
 
-# Runtime data
+# Runtime data. Root-level data/* ignores contents while letting us force-track
+# hey_poob.onnx. src/**/data/ ignores the accidental nested data/ dirs that
+# show up when poob is run from a subdirectory as cwd.
 data/*
 !data/hey_poob.onnx
+src/**/data/
 browser_profiles/
 
 # Python
