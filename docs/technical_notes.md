@@ -222,7 +222,9 @@ Listing age distribution  timestamped=45  min_hours=0.2  max_hours=4.8  avg_hour
 1. **Tavily**: Free tier exhausted (1,000/month limit hit)
 2. **Serper.dev**: Free credits exhausted (2,500 one-time)
 3. **SearXNG**: Self-hosted Docker, unlimited. Now handling all search traffic.
-   - `docker run --rm -d -p 8080:8080 searxng/searxng`
+   - Runs as a service in `deploy/compose.yml` alongside scraper + ollama (single Komodo stack)
+   - On homelab: scraper reaches it via service-name DNS — set `SEARXNG_BASE_URL=http://searxng:8080` in the Komodo stack env
+   - Local dev: `docker compose -f deploy/compose.yml up -d searxng` exposes `http://localhost:8080` for the natively-running scraper; default `searxng_base_url` in `config.py` already points there, no override needed
    - Gracefully skips if container not running (ConnectError → unavailable)
 
 ### SerpAPI
@@ -571,6 +573,7 @@ PoobBrain (tiny ~500 char prompt + deal_assistant tool)
 - **Multi-turn deal sessions**: `_deal_context` dict tracks active deal sessions per user. When the deal agent asks follow-up questions (response contains "?"), context is preserved so the LLM routes subsequent answers back to the deal agent.
 - **Voice streaming**: `respond_streaming()` checks for tool calls first (non-streaming, fast), then streams the personality wrap sentence-by-sentence for TTS.
 - **Shared conversation history**: PoobBrain maintains one in-memory history per user, shared across text and voice. The deal agent maintains its own DB-backed history for tool-calling continuity.
+- **Channel context for text channels**: `AgentMessageHandler` fetches the last ~15 messages from the Discord channel via `channel.history()` and formats them as an attributed transcript (same `[Recent conversation you've been listening to:\n...]` format voice uses). This is injected into the *current* LLM turn only — `_split_context()` separates the context block from the clean user text before storing in history, preventing history bloat. This means Poob always knows what was just said in the channel, even when the user sends a bare `@Poob` mention with no text.
 
 ### Latency Profile
 - **Casual text**: ~200-400ms (Groq single call, no tools)
@@ -594,6 +597,8 @@ PoobBrain (tiny ~500 char prompt + deal_assistant tool)
 - **Data-heavy responses should not be personality-wrapped**: Tables, lists, deal details lose formatting if run through a personality LLM. The >500 char / newline heuristic handles this.
 - **Voice deal sessions add ~2s latency**: Filler audio infrastructure exists (`voice/fillers.py`) but isn't yet triggered during deal routing. Future work: play filler while deal agent runs.
 - **8B models may struggle with routing**: If `llama-3.1-8b-instant` fails to call `deal_assistant` for obvious deal requests, switch to `llama-3.3-70b-versatile` (still fast on Groq).
+- **Channel context must be ephemeral**: The `[Recent conversation...]` block is injected into the LLM prompt for the current turn only. `_split_context()` in `poob.py` strips it before saving to per-user `_histories`. Without this, every history entry would contain 15 lines of channel context, ballooning token usage across turns.
+- **Bare mentions default to context inference**: When a user sends just `@Poob` (no text), content becomes `"(responding to the conversation above)"` instead of `"hi"` — but only when channel context is available. This lets the LLM infer intent from what was just said.
 
 ---
 
@@ -652,38 +657,60 @@ These listings are NOT filtered pre-enrichment because detail enrichment is desi
 
 ## Music Bot Integration (April 2026)
 
-### Architecture: yt-dlp + FFmpeg + numpy PCM Mixer (No Lavalink)
+### Architecture: yt-dlp + FFmpeg + audioop PCM Mixer (No Lavalink)
 
 **Decision:** Direct yt-dlp + FFmpeg instead of Lavalink. Rationale: single-server bot, no JVM overhead (300-500MB RAM saved), FFmpeg already a dependency, and we need raw PCM access for the TTS mixing pipeline. Lavalink's seeking/filters advantages don't apply — we need mixing, which Lavalink doesn't support natively (only NodeLink does).
 
 **Key files:**
 - `src/agentic_scraper/music/queue.py` — Track dataclass, MusicQueue with loop/shuffle
-- `src/agentic_scraper/music/ytdl.py` — AsyncYTDL wrapper (all yt-dlp in ThreadPoolExecutor)
-- `src/agentic_scraper/music/player.py` — MixingAudioSource + GuildMusicPlayer
+- `src/agentic_scraper/music/ytdl.py` — AsyncYTDL wrapper (all yt-dlp in ThreadPoolExecutor) + pre-download
+- `src/agentic_scraper/music/player.py` — MixingAudioSource + BufferedAudioSource + GuildMusicPlayer
 - `src/agentic_scraper/discord_bot/cogs/music_cog.py` — Commands + agentic handler
 
-### MixingAudioSource — The Core Innovation
+### Audio Pipeline — Four-Layer Anti-Stutter Architecture (April 2026)
 
-Discord allows exactly ONE audio stream per bot per guild. `VoiceClient.play()` raises `ClientException` if called while playing. Our solution: a custom `discord.AudioSource` that mixes music + TTS in real-time using numpy.
+Choppy audio had four independent causes, each fixed at the right layer:
+
+**Layer 1 — Pre-download (eliminates YouTube TLS termination):**
+YouTube CDN kills TLS sessions after ~3-4 minutes (yt-dlp #8854). FFmpeg reconnect can't fully recover because the URL may be expired. Fix: `AsyncYTDL.download_track()` pre-downloads audio to a temp file before playback. FFmpeg reads from local disk — zero network dependency during playback. Livestreams fall back to streaming with reconnect flags. Temp files are cleaned up after each track finishes or on stop/destroy.
+
+**Layer 2 — BufferedAudioSource (absorbs I/O jitter):**
+Pycord's audio thread calls `read()` every 20ms. If FFmpeg's pipe blocks, the frame is late. `BufferedAudioSource` wraps FFmpegPCMAudio with a dedicated reader thread filling a 100-frame (2-second) queue. The audio thread reads from the queue (always fast), never from the pipe. Returns silence on underrun (not empty bytes — empty signals EOF to Pycord). Prefills 10 frames (200ms) before playback starts.
+
+**Layer 3 — audioop mixer (eliminates per-frame allocations):**
+Replaced numpy with `audioop` (C extension, `audioop-lts` on Python 3.13+). `audioop.mul()` for volume scaling, `audioop.add()` for mixing — both operate directly on bytes with built-in int16 clipping. Zero per-frame allocations, ~5-10x faster than numpy for 1920-sample buffers. Eliminates GC pressure that caused frame drops.
+
+**Layer 4 — Python 3.13 timer resolution:**
+Python 3.13 uses `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` on Windows — ~100ns sleep accuracy vs the old 15.6ms default. No code changes needed, just requires Python 3.11+.
+
+### MixingAudioSource — PCM Mixer
+
+Discord allows exactly ONE audio stream per bot per guild. `VoiceClient.play()` raises `ClientException` if called while playing. Our solution: a custom `discord.AudioSource` that mixes music + TTS in real-time using audioop.
 
 **How it works:**
 1. Music plays through `MixingAudioSource` as the primary source
 2. When Poob needs to speak, TTS audio is injected as an "overlay" via `play_overlay()`
-3. The mixer's `read()` method (called 50x/sec by Pycord) reads both sources, ducks music to 25% volume, sums the PCM samples, clips to int16 range, returns mixed frame
+3. The mixer's `read()` method (called 50x/sec by Pycord) reads both sources, ducks music to 25% volume via `audioop.mul()`, sums with `audioop.add()` (built-in int16 clipping), returns mixed frame
 4. When TTS ends (grace period of 8 empty reads = 160ms), music volume ramps back up
 
 **Critical details:**
-- **Upcast to float32 before summing** — int16 overflow wraps silently, producing harsh distortion
-- **Gain ramps** — 15 frames (300ms) logarithmic fade prevents audible click/pop on volume changes
+- **audioop handles clipping** — `audioop.add(a, b, 2)` clips int16 overflow internally in C, no manual clip step needed
+- **Gain ramps** — 15 frames (300ms) fade prevents audible click/pop on volume changes
 - **Grace period** — 8 empty overlay reads before cleanup, prevents premature TTS kill during FFmpeg buffering
 - **Frame size** — exactly 3840 bytes per read() (20ms at 48kHz stereo 16-bit), enforced by Pycord
 - **Thread safety** — `read()` runs in Pycord's audio daemon thread; overlay injection from asyncio thread is safe because Python GIL makes single-pointer writes atomic
 
-### yt-dlp Streaming Architecture
+### yt-dlp: Pre-Download + Streaming Fallback
 
-**Stream via URL, never download to disk.** `extract_info(url, download=False)` gets the direct googlevideo.com URL, which is passed to `FFmpegPCMAudio`. The FFmpeg reconnect flags (`-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5`) are non-negotiable — without them, any network hiccup kills playback.
+**Primary path — pre-download to temp file:** `download_track()` downloads audio-only to a temp `.webm` file (2-5 seconds for typical tracks). FFmpeg reads from disk — immune to CDN jitter, TLS termination, and URL expiration. Download latency is hidden by the pre-fetch system: next track downloads while current plays. Temp files cleaned up after playback.
 
-**URL expiration:** YouTube stream URLs expire ~6 hours. Queue stores permanent `webpage_url`. Stream URL resolved lazily at play time via `resolve_stream_url()`. Pre-fetching: next track's URL is resolved during current playback for near-gapless transitions.
+**Fallback — stream via URL:** For livestreams (`track.is_stream`) or download failures, falls back to `resolve_stream_url()` + network streaming with full FFmpeg reconnect flags. Both paths go through `BufferedAudioSource` so even streaming benefits from the read-ahead buffer.
+
+**FFmpeg flags (streaming path):** `-nostdin -probesize 1000000 -analyzeduration 0 -reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 -reconnect_delay_max 5`. The `-probesize 1000000 -analyzeduration 0` eliminates the initial burst-then-stall pattern. `-reconnect_on_network_error 1` handles TCP/TLS resets. `-nostdin` prevents FFmpeg from blocking on stdin (Windows issue).
+
+**FFmpeg flags (local file path):** Just `-nostdin`. No reconnect, no probe tuning — disk reads are instant.
+
+**URL expiration:** YouTube stream URLs expire ~6 hours. Queue stores permanent `webpage_url`. Pre-download eliminates this concern for most tracks. Stream URL resolved only as a fallback.
 
 **Playlists:** `extract_flat: 'in_playlist'` mode grabs only metadata (title, ID, duration) without resolving stream URLs — turns a 60-second 50-track extraction into 2 seconds.
 
@@ -695,17 +722,34 @@ Discord allows exactly ONE audio stream per bot per guild. `VoiceClient.play()` 
 
 `FFmpegOpusAudio` is more CPU-efficient (Opus passthrough, no re-encoding) but is **incompatible with PCM mixing**. Our mixer needs raw int16 samples to sum. CPU cost of PCM decode→encode for one stream on modern hardware is negligible.
 
-### Agentic Voice Integration
+### Agentic Music Integration (Voice + Text Channels)
 
-Music commands flow through the same PoobBrain tool-routing as deals:
+Music commands flow through the same PoobBrain tool-routing as deals. Three paths, one handler:
+
+**Voice path:**
 1. User speaks → STT → "hey Poob play some chill beats"
 2. Wake word detected → PoobBrain receives message
 3. Groq 70B with `music_assistant` tool → tool call detected
 4. `MusicCog.handle_music_request()` parses intent → searches YouTube → queues track
-5. Response wrapped in Poob personality → TTS → injected as overlay on music
-6. Music ducks → Poob says "queued up chill beats" → music restores
+5. Response wrapped in Toob personality → TTS → injected as overlay on music
+6. Music ducks → Toob speaks → music restores
 
-**Fallback text commands:** `!play`, `!skip`, `!queue`, `!pause`, `!stop`, `!shuffle`, `!loop`, `!volume`, `!np` — all delegate to the same `handle_music_request()`.
+**Text channel path (agentic — @mention):**
+1. User types `@Poob play some chill beats` in any text channel
+2. `AgentMessageHandler` passes `guild_id` + message to `PoobBrain.respond()`
+3. Groq 70B with `music_assistant` tool → tool call detected
+4. `_handle_music()` resolves guild via explicit `guild_id` (not `_voice_guild_id`)
+5. `handle_music_request()` finds bot's voice client in guild, or auto-joins
+6. Response wrapped in Poob personality → posted as text reply in channel
+7. Control commands (skip/pause/etc.) return status text instead of `[SILENT]` empty
+
+**Auto-join:** If the bot isn't in any voice channel when a text-channel music request arrives, `_auto_join_voice()` connects to the voice channel with the most human members. This is a lightweight join — no VoiceSession (STT/recording). Users `!join` for full voice interaction.
+
+**Guild ID routing:** `brain.respond()` accepts `guild_id` from callers. Text channels pass `message.guild.id` explicitly. Voice sessions set `_voice_guild_id` during utterance processing. `_handle_music()` prefers the explicit guild_id, falls back to `_voice_guild_id`.
+
+**`[SILENT]` protocol — voice vs. text:** Control commands return `[SILENT]Status message` from the music handler. In voice mode, the brain returns empty string (no TTS). In text mode, the brain strips the prefix and returns the status text so the user sees feedback like "Skipped Bohemian Rhapsody."
+
+**Fallback text commands:** `!play`, `!skip`, `!queue`, `!pause`, `!stop`, `!shuffle`, `!loop`, `!volume`, `!np` — all delegate to the same `handle_music_request()`. The `!play` command no longer requires the user to be in a voice channel — `handle_music_request` handles auto-join.
 
 ### Queue Architecture
 
@@ -719,12 +763,134 @@ List-backed (not deque) — per Wavelink 3.x migration rationale: music queues n
 
 ### Common Pitfalls
 
-1. **Integer overflow in mixing** — summing two int16 values without upcasting wraps silently, producing harsh static. Always cast to float32/int32 before addition.
+1. **Integer overflow in mixing** — `audioop.add()` handles clipping internally. The old numpy path required manual float32 upcasting + `np.clip()`. Don't regress to numpy.
 2. **Instant volume changes click** — stepping from 100% to 25% in a single frame causes a transient pop. Gain ramps (300ms) fix this.
 3. **yt-dlp on event loop** — blocks heartbeat, Discord disconnects. Always `run_in_executor`.
-4. **Stale stream URLs** — YouTube URLs expire ~6 hours. Never cache them in the queue.
+4. **Stale stream URLs** — YouTube URLs expire ~6 hours. Pre-download eliminates this for normal tracks. Stream URLs only used for livestream fallback.
 5. **`play()` while playing** — raises `ClientException`. The mixer prevents this by being the sole source.
 6. **Grace period on overlay** — cloud TTS may buffer; first few `read()` returns empty. Without grace period, mixer kills overlay before audio starts.
+7. **BufferedAudioSource: silence vs empty bytes** — returning `b""` from `read()` tells Pycord the track ended. On buffer underrun, return silence (`b"\x00" * 3840`) to keep the stream alive while the buffer refills.
+8. **Temp file cleanup** — `download_track()` creates temp files. They MUST be cleaned up after playback (`cleanup_track_file()`). The player loop, `stop()`, and `destroy()` all handle this. Forgetting cleanup causes disk exhaustion.
+9. **yt-dlp download extension mismatch** — yt-dlp may change the output file extension (e.g., `.webm` → `.opus`). `download_track()` checks multiple candidates.
+
+## Voice Architecture — Toob, Deferred Playback, Multi-Provider Cascade (April 7, 2026)
+
+### Toob — Evil Music Spirit
+
+**What:** When Poob handles a music *play/queue* command, his evil cousin Toob responds instead. Toob has a separate personality prompt and a deep, pitch-shifted warlord voice. Music *control* commands (skip, pause, stop, volume) execute silently — no TTS, no personality wrap.
+
+**Voice signal routing (structural, not string-based):**
+- `VOICE_TOOB = "__VOICE_TOOB__"` — a constant yielded as the FIRST item from `respond_streaming()` when Toob should speak
+- Session detects this signal in its async iteration loop and switches the synth function: `synth = self._synthesize_toob if use_toob_voice else self._synthesize`
+- **No string prefixes, no `[TOOB]` markers, no regex parsing** — the tool call itself is the routing signal
+
+**Toob's voice pipeline:**
+1. Google Chirp3-HD Enceladus voice at 0.95x speaking rate
+2. FFmpeg warlord filter: `asetrate=16000,aresample=24000,atempo=1.7,bass=g=10:f=80,aecho=0.8:0.85:40:0.3`
+   - `asetrate=16000` on 24kHz source → pitch DOWN (voice deepens)
+   - `atempo=1.7` → compensates duration stretch + faster delivery
+   - `bass=g=10:f=80` → heavy bass boost (rumble)
+   - `aecho` → cavernous reverb
+3. FFmpeg processing adds ~100-230ms latency (first run ~770ms cold start)
+4. Fallback: if FFmpeg fails → raw Enceladus audio; if TTS fails entirely → regular Poob voice
+
+**Why asetrate < native rate = pitch down:** FFmpeg interprets the source as 16kHz but it's actually 24kHz. When resampled to 24kHz output, the audio gets stretched (lower pitch). `atempo` then compensates the speed change so duration stays reasonable.
+
+### Silent Music Controls
+
+Control commands (skip, pause, resume, stop, volume, shuffle, loop) return `[SILENT]` prefix from the music handler. The brain detects this prefix, returns empty string to the session → no TTS generated, no personality wrap. The action executes instantly (~600ms end-to-end).
+
+**Why `[SILENT]` is not a bandaid:** It's a structured protocol between the music handler and the brain. The handler decides which commands are silent (controls) vs. verbose (play/queue). The brain doesn't parse content — it checks a prefix on the handler's return value.
+
+### Deferred Playback — Session-Level Orchestration
+
+**Problem:** When a user says "play X" in voice, the music should start AFTER Toob finishes speaking, not immediately.
+
+**Solution:** Pure state inspection in the session, no flags, no cross-layer coupling:
+1. Music handler queues the track with `deferred=True` → URL pre-resolves but playback doesn't start
+2. Toob responds → TTS plays → session checks: `music_player.is_playing == False AND queue not empty`
+3. If true → `music_player.start_deferred()` → music begins
+
+**Why not flags:** The previous `_music_deferred_pending` flag on PoobBrain was shared mutable state across all users/guilds — a race condition. The session now observes player state directly. No flags, no callbacks, no coupling between brain and session.
+
+### Multi-Provider Tool-Calling Cascade
+
+**Problem:** Groq 70B (primary tool-caller) hits 429 rate limits constantly in multi-user voice sessions. The fallback to Scout 17B misrouted almost everything to `music_assistant`.
+
+**Benchmarked results (April 7, 2026):**
+
+| Provider / Model | Play Latency | Skip Correct? | Tool Support |
+|---|---|---|---|
+| Groq llama-3.3-70b-versatile | 925ms | Yes | Full |
+| Groq llama-4-scout-17b | 858ms | Yes | Full but over-aggressive |
+| Cerebras qwen-3-235b | 752ms | Yes | Full |
+| NVIDIA qwen3-next-80b | 930ms | Yes | Full |
+| Groq llama-3.1-8b-instant | 518ms | ERR 400 | Partial (fails on short msgs) |
+| Groq llama-3.3-70b-specdec | - | ERR 400 | Broken |
+
+**Cascade order (in `_groq_with_tools`):**
+1. Groq llama-3.3-70b-versatile (best accuracy)
+2. Cerebras qwen-3-235b (different provider, avoids Groq rate limits)
+3. NVIDIA NIM qwen3-next-80b (third provider)
+4. Groq llama-4-scout-17b (last resort only)
+
+Three different providers. If Groq is rate-limited, Cerebras picks it up immediately — no falling through to the weak Scout model.
+
+### Music State Context in System Prompt
+
+When music is playing, the system prompt is dynamically extended with:
+```
+[MUSIC IS CURRENTLY PLAYING: {title} [{duration}].
+CRITICAL: When music is playing and the user says ANY of these,
+you MUST call music_assistant: stop, skip, pause, resume, volume,
+turn down, turn up, max volume, mute, next, shuffle, loop, what's playing...]
+```
+
+This gives the LLM the context to route "skip" correctly without keyword matching. Without music playing, "skip" is just a word. With music playing, the LLM understands it's a control command.
+
+### Wake Word Stripping in Music Handler
+
+The tool-caller passes the FULL user message including "Hey, Poob." to the music handler. Without stripping, YouTube searches for "Hey, Poob. Stop." and finds random videos.
+
+Fix: regex strip at the top of `handle_music_request()`:
+```python
+cleaned = re.sub(r'^(?:hey[,.]?\s*)?(?:poob|poop|pub|boob)[,.]?\s*', '', request, flags=re.IGNORECASE).strip()
+```
+
+### Programmatic Personality Variance (90 POOB_STATES)
+
+**Problem:** LLMs with monolithic personality prompts degrade into repetitive caricatures. The model sees its own intense responses in chat history and overfits to them (context compaction / echo chamber).
+
+**Solution:** 90 random "vibe" states injected per-call at the code layer:
+```python
+state = random.choice(POOB_STATES)
+prompt += f"\n\n[YOUR CURRENT VIBE (embody this in your tone, do NOT mention or describe it): {state}]"
+```
+
+Because the vibe changes every turn, even if chat history is full of paranoid responses, the new prompt might say he's mourning a dust mite — forcing a tone shift that feels organic.
+
+**Key rules in the system prompt:**
+- Answer what was asked FIRST, then let vibe color delivery
+- 1-2 sentences max
+- NEVER mention or describe the vibe — embody it in tone
+
+### Wake Word Detection Improvements
+
+1. **Threshold 0.5 → 0.7** — reduces false positives in multi-user calls
+2. **Pending wake timeout 3s → 1.5s** — stale detections don't carry forward
+3. **Dual confirmation: audio + text** — if audio model fires but transcript doesn't contain "Hey Poob", detection is overridden. Text regex is authoritative for positive matches; audio model is authoritative for rejection only.
+4. **15s max utterance duration** — prevents 47-second accumulated transcripts from being treated as single commands
+5. **Deepgram keyterms** — `play`, `skip`, `stop`, `pause`, `volume`, `shuffle` boosted for STT accuracy
+
+### Common Pitfalls — Voice/Music
+
+1. **`is_playing` is a property, not a method** — `player.is_playing()` crashes with `'bool' object is not callable`. Use `player.is_playing`.
+2. **`yield from` in async generators** — syntax error. Use `for item in ...: yield item` instead.
+3. **asetrate math is inverted from intuition** — `asetrate` BELOW native rate = pitch DOWN (not up). The filter reinterprets the source rate.
+4. **Groq 70B rate limits constantly** in multi-user sessions — always have non-Groq fallback (Cerebras, NVIDIA).
+5. **Scout 17B over-routes to music** — "Did you get offended?" → plays "Big Ole Freak". Keep it last in cascade.
+6. **`<function=...>` in LLM output** — some models output tool calls as raw text instead of structured `tool_calls`. Regex cleanup in both `respond()` and `respond_streaming()` prevents markup from reaching Discord.
+7. **Deepgram transcript replay** — `reset_transcript(user_id)` must be called after utterance emission, not just at utterance start.
 
 ---
 
