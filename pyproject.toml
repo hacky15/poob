@@ -24,7 +24,8 @@ dependencies = [
     "edge-tts>=6.1.0",              # Free cloud TTS (Microsoft Edge Read Aloud)
     "numpy>=1.26.0",                # Audio processing
     "silero-vad>=6.0.0",            # Neural VAD for speech detection (replaces energy-based)
-    "onnxruntime>=1.18.0",          # ONNX inference for Silero VAD
+    "onnxruntime>=1.18.0",          # ONNX inference for Silero VAD + wake-word model
+    "openwakeword>=0.6.0",          # Wake-word inference — loads data/hey_poob.onnx (trained model)
 
     # Configuration
     "pydantic>=2.5.0",

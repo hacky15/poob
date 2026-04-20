@@ -11,7 +11,8 @@ __pycache__
 .env
 .env.*
 browser_profiles/
-data/
+data/*
+!data/hey_poob.onnx
 docs/
 tests/
 logs.md

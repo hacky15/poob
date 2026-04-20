@@ -30,6 +30,7 @@ RUN pip install --no-cache-dir -e . && \
 COPY scripts ./scripts
 
 RUN mkdir -p /app/data /app/browser_profiles
+COPY data/hey_poob.onnx /app/data/hey_poob.onnx
 
 ENV PYTHONUNBUFFERED=1
 

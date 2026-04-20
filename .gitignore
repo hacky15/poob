@@ -6,7 +6,8 @@ venv/
 .env
 
 # Runtime data
-data/
+data/*
+!data/hey_poob.onnx
 browser_profiles/
 
 # Python
