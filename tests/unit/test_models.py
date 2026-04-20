@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from agentic_scraper.storage.models import Deal, DealScore, Listing, ScanLog, WatchItem
+from poob.storage.models import Deal, DealScore, Listing, ScanLog, WatchItem
 
 
 class TestDealScore:

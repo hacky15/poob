@@ -8,10 +8,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from agentic_scraper.agent.runner import AgentRunner
-from agentic_scraper.storage.repositories.conversation_repo import ConversationRepository
-from agentic_scraper.storage.repositories.preferences_repo import UserPreferencesRepository
-from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
+from poob.agent.runner import AgentRunner
+from poob.storage.repositories.conversation_repo import ConversationRepository
+from poob.storage.repositories.preferences_repo import UserPreferencesRepository
+from poob.storage.repositories.watchlist_repo import WatchlistRepository
 
 
 @pytest.fixture

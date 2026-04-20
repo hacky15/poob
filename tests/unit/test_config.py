@@ -50,7 +50,7 @@ class TestAppConfigDefaults:
 
     def test_storage_defaults(self):
         """Default storage paths are relative to project root."""
-        from agentic_scraper.config import AppConfig
+        from poob.config import AppConfig
 
         config = AppConfig(
             discord_bot_token="test",
@@ -117,7 +117,7 @@ class TestAppConfigFromEnv:
 
     def test_loads_from_env_vars(self, monkeypatch):
         """Config reads from environment variables."""
-        from agentic_scraper.config import AppConfig
+        from poob.config import AppConfig
 
         monkeypatch.setenv("DISCORD_BOT_TOKEN", "env-token")
         monkeypatch.setenv("DISCORD_DEALS_CHANNEL_ID", "999")
@@ -134,7 +134,7 @@ class TestAppConfigFromEnv:
 
     def test_env_file_loading(self, tmp_path):
         """Config loads from a .env file."""
-        from agentic_scraper.config import AppConfig
+        from poob.config import AppConfig
 
         env_file = tmp_path / ".env"
         env_file.write_text(
@@ -153,7 +153,7 @@ class TestAppConfigValidation:
 
     def test_invalid_channel_id_type(self):
         """Non-numeric channel ID should fail validation."""
-        from agentic_scraper.config import AppConfig
+        from poob.config import AppConfig
 
         with pytest.raises(Exception):
             AppConfig(
@@ -163,7 +163,7 @@ class TestAppConfigValidation:
 
     def test_missing_required_token(self, monkeypatch):
         """Missing bot token should fail."""
-        from agentic_scraper.config import AppConfig
+        from poob.config import AppConfig
 
         monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
         monkeypatch.delenv("DISCORD_DEALS_CHANNEL_ID", raising=False)

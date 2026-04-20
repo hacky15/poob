@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agentic_scraper.storage.models import WatchItem
+from poob.storage.models import WatchItem
 
 
 class TestWatchlistCog:
@@ -14,8 +14,8 @@ class TestWatchlistCog:
 
     async def test_watch_command_creates_item(self, db_connection):
         """!watch should save a WatchItem to the database."""
-        from agentic_scraper.discord_bot.cogs.watchlist_cog import WatchlistCog
-        from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
+        from poob.discord_bot.cogs.watchlist_cog import WatchlistCog
+        from poob.storage.repositories.watchlist_repo import WatchlistRepository
 
         repo = WatchlistRepository(db_connection)
         cog = WatchlistCog(bot=MagicMock(), watchlist_repo=repo)
@@ -38,8 +38,8 @@ class TestWatchlistCog:
 
     async def test_unwatch_command_removes_item(self, db_connection):
         """!unwatch should delete the specified watch item."""
-        from agentic_scraper.discord_bot.cogs.watchlist_cog import WatchlistCog
-        from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
+        from poob.discord_bot.cogs.watchlist_cog import WatchlistCog
+        from poob.storage.repositories.watchlist_repo import WatchlistRepository
 
         repo = WatchlistRepository(db_connection)
         watch = await repo.save(WatchItem(
@@ -61,8 +61,8 @@ class TestWatchlistCog:
 
     async def test_watchlist_command_returns_items(self, db_connection):
         """!watchlist should send an embed with user's watches."""
-        from agentic_scraper.discord_bot.cogs.watchlist_cog import WatchlistCog
-        from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
+        from poob.discord_bot.cogs.watchlist_cog import WatchlistCog
+        from poob.storage.repositories.watchlist_repo import WatchlistRepository
 
         repo = WatchlistRepository(db_connection)
         await repo.save(WatchItem(
@@ -93,7 +93,7 @@ class TestScanningCog:
 
     async def test_status_command_returns_embed(self):
         """!status should return a status embed."""
-        from agentic_scraper.discord_bot.cogs.scanning_cog import ScanningCog
+        from poob.discord_bot.cogs.scanning_cog import ScanningCog
 
         mock_scheduler = MagicMock()
         mock_scheduler.is_running = True
@@ -118,7 +118,7 @@ class TestScanningCog:
 
     async def test_scan_triggers_immediate_cycle(self):
         """!scan should trigger an immediate scan."""
-        from agentic_scraper.discord_bot.cogs.scanning_cog import ScanningCog
+        from poob.discord_bot.cogs.scanning_cog import ScanningCog
 
         mock_scheduler = MagicMock()
         mock_scheduler.trigger_now = AsyncMock()
@@ -145,7 +145,7 @@ class TestAdminCog:
 
     async def test_sites_lists_registered_adapters(self):
         """!sites should list all registered site adapters."""
-        from agentic_scraper.discord_bot.cogs.admin_cog import AdminCog
+        from poob.discord_bot.cogs.admin_cog import AdminCog
 
         mock_registry = MagicMock()
         mock_registry.list_sites.return_value = ["facebook_marketplace"]

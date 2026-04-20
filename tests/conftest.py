@@ -9,13 +9,13 @@ from unittest.mock import AsyncMock, MagicMock
 import aiosqlite
 import pytest
 
-from agentic_scraper.storage.models import Deal, DealScore, Listing, ScanLog, WatchItem
+from poob.storage.models import Deal, DealScore, Listing, ScanLog, WatchItem
 
 
 @pytest.fixture
 def app_config(tmp_path: Path):
     """Config with test defaults, database in tmp_path."""
-    from agentic_scraper.config import AppConfig
+    from poob.config import AppConfig
 
     return AppConfig(
         _env_file=None,
@@ -31,7 +31,7 @@ def app_config(tmp_path: Path):
 @pytest.fixture
 async def db_connection(tmp_path: Path):
     """In-memory SQLite with schema initialized."""
-    from agentic_scraper.storage.database import init_schema
+    from poob.storage.database import init_schema
 
     conn = await aiosqlite.connect(":memory:")
     conn.row_factory = aiosqlite.Row

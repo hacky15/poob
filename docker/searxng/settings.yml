@@ -6,5 +6,5 @@ search:
     - json
 
 server:
-  secret_key: "agentic-scraper-searxng-local"
+  secret_key: "poob-searxng-local"
   limiter: false

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from agentic_scraper.sites.facebook.categories import (
+from poob.sites.facebook.categories import (
     get_category_slug,
     infer_category,
     is_relevant_to_category,

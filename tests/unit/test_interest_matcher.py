@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from agentic_scraper.scanner.interest_matcher import InterestMatcher, _score_from_discount
-from agentic_scraper.storage.models import Deal, DealScore, Listing, WatchItem
+from poob.scanner.interest_matcher import InterestMatcher, _score_from_discount
+from poob.storage.models import Deal, DealScore, Listing, WatchItem
 
 
 @pytest.fixture

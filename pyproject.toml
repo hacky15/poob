@@ -1,7 +1,7 @@
 [project]
-name = "agentic-scraper"
+name = "poob"
 version = "0.1.0"
-description = "Autonomous deal-hunting bot using browser-use and LLM agents"
+description = "Poob — autonomous Discord companion with deal-hunting, voice, and music agents"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 
@@ -114,4 +114,4 @@ warn_return_any = true
 warn_unused_configs = true
 
 [project.scripts]
-scraper = "agentic_scraper.main:main"
+poob = "poob.main:main"

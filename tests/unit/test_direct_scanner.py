@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agentic_scraper.sites.base import ScanQuery, ScanResult
-from agentic_scraper.sites.facebook.direct_scanner import DirectScanner
+from poob.sites.base import ScanQuery, ScanResult
+from poob.sites.facebook.direct_scanner import DirectScanner
 
 
 @pytest.fixture
@@ -137,7 +137,7 @@ class TestDirectScan:
     async def test_scan_calls_navigate(self, scanner, mock_browser, mock_page, sample_query):
         """Should navigate to the search URL."""
         with patch(
-            "agentic_scraper.sites.facebook.direct_scanner.navigate_and_wait",
+            "poob.sites.facebook.direct_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ):
             await scanner.scan(sample_query, mock_browser)
@@ -151,10 +151,10 @@ class TestDirectScan:
         mock_page.evaluate = AsyncMock(return_value=sample_js_result)
 
         with patch(
-            "agentic_scraper.sites.facebook.direct_scanner.navigate_and_wait",
+            "poob.sites.facebook.direct_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ), patch(
-            "agentic_scraper.sites.facebook.direct_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.direct_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ):
             result = await scanner.scan(sample_query, mock_browser)
@@ -172,10 +172,10 @@ class TestDirectScan:
         mock_page.evaluate = AsyncMock(return_value=sample_js_result)
 
         with patch(
-            "agentic_scraper.sites.facebook.direct_scanner.navigate_and_wait",
+            "poob.sites.facebook.direct_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ), patch(
-            "agentic_scraper.sites.facebook.direct_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.direct_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ):
             result = await scanner.scan(sample_query, mock_browser)
@@ -204,10 +204,10 @@ class TestDirectScan:
         )
 
         with patch(
-            "agentic_scraper.sites.facebook.direct_scanner.navigate_and_wait",
+            "poob.sites.facebook.direct_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ), patch(
-            "agentic_scraper.sites.facebook.direct_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.direct_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ):
             result = await scanner.scan(sample_query, mock_browser, llm=mock_llm)
@@ -224,10 +224,10 @@ class TestDirectScan:
         mock_page._extract_clean_markdown = AsyncMock(return_value=("", {}))
 
         with patch(
-            "agentic_scraper.sites.facebook.direct_scanner.navigate_and_wait",
+            "poob.sites.facebook.direct_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ), patch(
-            "agentic_scraper.sites.facebook.direct_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.direct_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ):
             result = await scanner.scan(sample_query, mock_browser)
@@ -260,10 +260,10 @@ class TestDirectScan:
         mock_page._extract_clean_markdown = AsyncMock(return_value=("", {}))
 
         with patch(
-            "agentic_scraper.sites.facebook.direct_scanner.navigate_and_wait",
+            "poob.sites.facebook.direct_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ), patch(
-            "agentic_scraper.sites.facebook.direct_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.direct_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ):
             result = await scanner.scan(sample_query, mock_browser)
@@ -278,10 +278,10 @@ class TestDirectScan:
         mock_page.evaluate = AsyncMock(return_value=sample_js_result)
 
         with patch(
-            "agentic_scraper.sites.facebook.direct_scanner.navigate_and_wait",
+            "poob.sites.facebook.direct_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ), patch(
-            "agentic_scraper.sites.facebook.direct_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.direct_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ) as mock_scroll:
             await scanner.scan(sample_query, mock_browser)
@@ -295,15 +295,15 @@ class TestDirectScan:
         mock_page.evaluate = AsyncMock(return_value=sample_js_result)
 
         with patch(
-            "agentic_scraper.sites.facebook.direct_scanner.navigate_and_wait",
+            "poob.sites.facebook.direct_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ), patch(
-            "agentic_scraper.sites.facebook.direct_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.direct_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ), patch(
-            "agentic_scraper.sites.facebook.direct_scanner.parse_listings",
+            "poob.sites.facebook.direct_scanner.parse_listings",
             wraps=__import__(
-                "agentic_scraper.sites.facebook.parser", fromlist=["parse_listings"]
+                "poob.sites.facebook.parser", fromlist=["parse_listings"]
             ).parse_listings,
         ) as mock_parse:
             await scanner.scan(sample_query, mock_browser)
@@ -317,10 +317,10 @@ class TestDirectScan:
         mock_page.evaluate = AsyncMock(return_value=sample_js_result)
 
         with patch(
-            "agentic_scraper.sites.facebook.direct_scanner.navigate_and_wait",
+            "poob.sites.facebook.direct_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ), patch(
-            "agentic_scraper.sites.facebook.direct_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.direct_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ):
             result = await scanner.scan(sample_query, mock_browser)
@@ -358,10 +358,10 @@ class TestDirectScan:
         query = ScanQuery(keywords="coffee table", max_price=100.0, category="furniture")
 
         with patch(
-            "agentic_scraper.sites.facebook.direct_scanner.navigate_and_wait",
+            "poob.sites.facebook.direct_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ), patch(
-            "agentic_scraper.sites.facebook.direct_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.direct_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ):
             result = await scanner.scan(query, mock_browser)
@@ -396,10 +396,10 @@ class TestDirectScan:
         query = ScanQuery(keywords="coffee table", max_price=100.0)  # No explicit category
 
         with patch(
-            "agentic_scraper.sites.facebook.direct_scanner.navigate_and_wait",
+            "poob.sites.facebook.direct_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ), patch(
-            "agentic_scraper.sites.facebook.direct_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.direct_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ):
             result = await scanner.scan(query, mock_browser)
@@ -431,10 +431,10 @@ class TestDirectScan:
         query = ScanQuery(keywords="random stuff", max_price=100.0)  # No category match
 
         with patch(
-            "agentic_scraper.sites.facebook.direct_scanner.navigate_and_wait",
+            "poob.sites.facebook.direct_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ), patch(
-            "agentic_scraper.sites.facebook.direct_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.direct_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ):
             result = await scanner.scan(query, mock_browser)
@@ -471,10 +471,10 @@ class TestDirectScan:
         query = ScanQuery(keywords="")  # Browse mode
 
         with patch(
-            "agentic_scraper.sites.facebook.direct_scanner.navigate_and_wait",
+            "poob.sites.facebook.direct_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ), patch(
-            "agentic_scraper.sites.facebook.direct_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.direct_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ):
             result = await scanner.scan(query, mock_browser)

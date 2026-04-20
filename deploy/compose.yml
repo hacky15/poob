@@ -1,15 +1,15 @@
 services:
-  scraper:
-    image: ghcr.io/hacky15/agenticwebscraper:latest
-    container_name: agentic-scraper
+  poob:
+    image: ghcr.io/hacky15/poob:latest
+    container_name: poob
     restart: unless-stopped
     env_file: .env
     depends_on:
       - ollama
       - searxng
     volumes:
-      - scraper-data:/app/data
-      - scraper-browser:/app/browser_profiles
+      - poob-data:/app/data
+      - poob-browser:/app/browser_profiles
     deploy:
       resources:
         limits:
@@ -28,7 +28,7 @@ services:
 
   searxng:
     image: searxng/searxng:latest
-    container_name: agentic-searxng
+    container_name: poob-searxng
     restart: unless-stopped
     volumes:
       - ../docker/searxng:/etc/searxng
@@ -40,6 +40,6 @@ services:
           memory: 512M
 
 volumes:
-  scraper-data:
-  scraper-browser:
+  poob-data:
+  poob-browser:
   ollama-data:

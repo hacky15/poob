@@ -33,4 +33,4 @@ RUN mkdir -p /app/data /app/browser_profiles
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "-m", "agentic_scraper.main"]
+CMD ["python", "-m", "poob.main"]

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agentic_scraper.browser.graphql_interceptor import (
+from poob.browser.graphql_interceptor import (
     GraphQLInterceptor,
     GraphQLListingData,
     parse_graphql_listings,

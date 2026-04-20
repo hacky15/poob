@@ -13,8 +13,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agentic_scraper.sites.facebook.detail_extractor import extract_listing_details
-from agentic_scraper.storage.models import Listing
+from poob.sites.facebook.detail_extractor import extract_listing_details
+from poob.storage.models import Listing
 
 
 @pytest.fixture
@@ -196,7 +196,7 @@ class TestDetailExtractionFallbacks:
     @pytest.mark.asyncio
     async def test_returns_original_on_navigation_error(self, mock_page, base_listing):
         with patch(
-            "agentic_scraper.sites.facebook.detail_extractor.navigate_and_wait",
+            "poob.sites.facebook.detail_extractor.navigate_and_wait",
             new_callable=AsyncMock,
             side_effect=Exception("Timeout"),
         ):

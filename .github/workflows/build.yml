@@ -27,7 +27,7 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/agenticwebscraper:latest
-            ghcr.io/${{ github.repository_owner }}/agenticwebscraper:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/poob:latest
+            ghcr.io/${{ github.repository_owner }}/poob:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agentic_scraper.llm.vlm_cascade import VLMCascade
+from poob.llm.vlm_cascade import VLMCascade
 
 
 @dataclass

@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
-from agentic_scraper.scanner.interest_matcher import InterestMatcher
-from agentic_scraper.scanner.patrol_engine import PatrolEngine, PatrolCycleResult
-from agentic_scraper.storage.models import Deal, DealScore, Listing, WatchItem
+from poob.scanner.interest_matcher import InterestMatcher
+from poob.scanner.patrol_engine import PatrolEngine, PatrolCycleResult
+from poob.storage.models import Deal, DealScore, Listing, WatchItem
 
 
 def _make_listing(
@@ -70,11 +70,11 @@ def _build_patrol_engine(
     smart_deal_radar=None,
 ):
     """Build a PatrolEngine with real repos and in-memory DB."""
-    from agentic_scraper.discord_bot.notifier import DealNotifier
-    from agentic_scraper.storage.repositories.deal_repo import DealRepository
-    from agentic_scraper.storage.repositories.listing_repo import ListingRepository
-    from agentic_scraper.storage.repositories.scan_log_repo import ScanLogRepository
-    from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
+    from poob.discord_bot.notifier import DealNotifier
+    from poob.storage.repositories.deal_repo import DealRepository
+    from poob.storage.repositories.listing_repo import ListingRepository
+    from poob.storage.repositories.scan_log_repo import ScanLogRepository
+    from poob.storage.repositories.watchlist_repo import WatchlistRepository
 
     return PatrolEngine(
         browser_manager=mock_browser_manager,
@@ -96,10 +96,10 @@ class TestPatrolPipeline:
         self, db_connection, mock_browser_manager, mock_config
     ):
         """Full patrol cycle with SmartDealRadar finds deals and notifies."""
-        from agentic_scraper.skills.models import VLMEvaluation
-        from agentic_scraper.storage.repositories.deal_repo import DealRepository
-        from agentic_scraper.storage.repositories.listing_repo import ListingRepository
-        from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
+        from poob.skills.models import VLMEvaluation
+        from poob.storage.repositories.deal_repo import DealRepository
+        from poob.storage.repositories.listing_repo import ListingRepository
+        from poob.storage.repositories.watchlist_repo import WatchlistRepository
 
         watchlist_repo = WatchlistRepository(db_connection)
         listing_repo = ListingRepository(db_connection)
@@ -174,7 +174,7 @@ class TestPatrolPipeline:
         self, db_connection, mock_browser_manager, mock_config
     ):
         """Second patrol cycle should not re-process already-seen listings."""
-        from agentic_scraper.storage.repositories.listing_repo import ListingRepository
+        from poob.storage.repositories.listing_repo import ListingRepository
 
         listing_repo = ListingRepository(db_connection)
 
@@ -199,9 +199,9 @@ class TestPatrolPipeline:
         self, db_connection, mock_browser_manager, mock_config
     ):
         """SmartDealRadar batch pipeline finds and saves deals."""
-        from agentic_scraper.skills.models import VLMEvaluation
-        from agentic_scraper.storage.repositories.deal_repo import DealRepository
-        from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
+        from poob.skills.models import VLMEvaluation
+        from poob.storage.repositories.deal_repo import DealRepository
+        from poob.storage.repositories.watchlist_repo import WatchlistRepository
 
         watchlist_repo = WatchlistRepository(db_connection)
         deal_repo = DealRepository(db_connection)
@@ -256,7 +256,7 @@ class TestPatrolPipeline:
         self, db_connection, mock_browser_manager, mock_config
     ):
         """Each patrol cycle should write a ScanLog entry."""
-        from agentic_scraper.storage.repositories.scan_log_repo import ScanLogRepository
+        from poob.storage.repositories.scan_log_repo import ScanLogRepository
 
         scan_log_repo = ScanLogRepository(db_connection)
 

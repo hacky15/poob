@@ -6,13 +6,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agentic_scraper.skills.models import (
+from poob.skills.models import (
     PriceLookupResult,
     TriageResult,
     VisualEnrichment,
     VLMEvaluation,
 )
-from agentic_scraper.storage.models import Deal, DealScore, Listing
+from poob.storage.models import Deal, DealScore, Listing
 
 
 def _make_listing(
@@ -104,7 +104,7 @@ def mock_ebay_lookup():
 
 @pytest.fixture
 def radar(mock_text_triage, mock_visual_enrichment, mock_vlm_evaluator, mock_ebay_lookup):
-    from agentic_scraper.skills.orchestrator import SmartDealRadar
+    from poob.skills.orchestrator import SmartDealRadar
 
     return SmartDealRadar(
         text_triage=mock_text_triage,
@@ -127,8 +127,10 @@ class TestSmartDealRadarV3:
         assert len(results) == 1
         deal, vlm_eval = results[0]
         assert deal is not None
-        assert deal.score == DealScore.GOOD
-        assert vlm_eval.deal_quality == "good"
+        # VLM scored "good" but $300 savings (60% off) meets incredible
+        # thresholds — upward promotion kicks in.
+        assert deal.score == DealScore.INCREDIBLE
+        assert vlm_eval.deal_quality == "good"  # VLM's original assessment unchanged
 
         mock_text_triage.triage_batch.assert_called_once()
         mock_visual_enrichment.enrich.assert_called_once()
@@ -371,7 +373,7 @@ class TestSmartDealRadarV3:
         self, radar, mock_vlm_evaluator,
     ):
         """Watchlist context should be passed to VLM evaluator for matching listings."""
-        from agentic_scraper.storage.models import WatchItem
+        from poob.storage.models import WatchItem
 
         listing = _make_listing(title="PS5 Console Bundle", price=300.0)
         interest = WatchItem(
@@ -394,7 +396,7 @@ class TestSmartDealRadarV3:
         self, radar, mock_vlm_evaluator,
     ):
         """Deals matching watchlist items should have watch_item_id set."""
-        from agentic_scraper.storage.models import WatchItem
+        from poob.storage.models import WatchItem
 
         mock_vlm_evaluator.evaluate = AsyncMock(
             return_value=_make_vlm_eval(deal_quality="good", estimated_value_mid=500.0)
@@ -429,7 +431,7 @@ class TestQualityToScoreMapping:
     """Test the deal_quality → DealScore mapping."""
 
     def test_mappings(self):
-        from agentic_scraper.skills.orchestrator import _QUALITY_TO_SCORE
+        from poob.skills.orchestrator import _QUALITY_TO_SCORE
 
         assert _QUALITY_TO_SCORE["pass"] == DealScore.FAIR
         assert _QUALITY_TO_SCORE["fair"] == DealScore.FAIR
@@ -442,21 +444,21 @@ class TestDollarSavingsEnforcement:
     """Test programmatic dollar savings enforcement."""
 
     def test_incredible_downgraded_when_savings_too_low(self):
-        from agentic_scraper.skills.orchestrator import _enforce_dollar_savings
+        from poob.skills.orchestrator import _enforce_dollar_savings
 
         # $9 savings at 90% off on a $100 item — NOT incredible (needs $75+)
         result = _enforce_dollar_savings(DealScore.INCREDIBLE, 90.0, 9.0, listing_price=100.0)
         assert result == DealScore.FAIR  # Savings too low for any tier
 
     def test_incredible_stays_when_savings_high(self):
-        from agentic_scraper.skills.orchestrator import _enforce_dollar_savings
+        from poob.skills.orchestrator import _enforce_dollar_savings
 
         # $200 savings at 60% off on a $150 item — IS incredible
         result = _enforce_dollar_savings(DealScore.INCREDIBLE, 60.0, 200.0, listing_price=150.0)
         assert result == DealScore.INCREDIBLE
 
     def test_great_downgraded_to_good_expensive(self):
-        from agentic_scraper.skills.orchestrator import _enforce_dollar_savings
+        from poob.skills.orchestrator import _enforce_dollar_savings
 
         # $20 savings at 35% off on a $60 item — flat GREAT needs $30, fail.
         # $60 >= $50 so flat thresholds apply. Qualifies for GOOD only.
@@ -464,7 +466,7 @@ class TestDollarSavingsEnforcement:
         assert result == DealScore.GOOD
 
     def test_great_stays_for_cheap_item(self):
-        from agentic_scraper.skills.orchestrator import _enforce_dollar_savings
+        from poob.skills.orchestrator import _enforce_dollar_savings
 
         # $20 savings at 35% off on a $40 item — proportional GREAT = $10.
         # $20 > $10 and 35% > 30% → stays GREAT.
@@ -472,14 +474,14 @@ class TestDollarSavingsEnforcement:
         assert result == DealScore.GREAT
 
     def test_good_stays_with_modest_savings(self):
-        from agentic_scraper.skills.orchestrator import _enforce_dollar_savings
+        from poob.skills.orchestrator import _enforce_dollar_savings
 
         # $15 savings at 20% off on a $60 item — meets GOOD thresholds
         result = _enforce_dollar_savings(DealScore.GOOD, 20.0, 15.0, listing_price=60.0)
         assert result == DealScore.GOOD
 
     def test_fair_unchanged(self):
-        from agentic_scraper.skills.orchestrator import _enforce_dollar_savings
+        from poob.skills.orchestrator import _enforce_dollar_savings
 
         result = _enforce_dollar_savings(DealScore.FAIR, 5.0, 2.0, listing_price=10.0)
         assert result == DealScore.FAIR
@@ -489,7 +491,7 @@ class TestDollarSavingsEnforcement:
         VLM rated INCREDIBLE but it's only $20 saved. At $10 listing price,
         proportional thresholds: GOOD=$1.50, GREAT=$2.50, INCREDIBLE=$4.
         With 67% discount and $20 savings, easily passes INCREDIBLE proportional."""
-        from agentic_scraper.skills.orchestrator import _enforce_dollar_savings
+        from poob.skills.orchestrator import _enforce_dollar_savings
 
         # Cheap item: proportional thresholds kick in. $20 savings at 67%
         # exceeds all proportional thresholds for a $10 item.
@@ -501,7 +503,7 @@ class TestDollarSavingsEnforcement:
         VLM rated INCREDIBLE. At $1 listing price, proportional thresholds
         are tiny: INCREDIBLE=$0.40. Passes easily. But we accept this —
         the proportional system is intentionally generous to cheap items."""
-        from agentic_scraper.skills.orchestrator import _enforce_dollar_savings
+        from poob.skills.orchestrator import _enforce_dollar_savings
 
         # $1 item with $8 savings = 89% off. Proportional INCREDIBLE = $0.40
         result = _enforce_dollar_savings(DealScore.INCREDIBLE, 89.0, 8.0, listing_price=1.0)
@@ -511,7 +513,7 @@ class TestDollarSavingsEnforcement:
         """A $20 item at 50% off ($10 saved) should qualify as GOOD.
         With flat thresholds ($10 min), this barely passes. But for a $15 item
         at 40% off ($6 saved), flat thresholds kill it. Proportional: $2.25."""
-        from agentic_scraper.skills.orchestrator import _enforce_dollar_savings
+        from poob.skills.orchestrator import _enforce_dollar_savings
 
         # $15 item, $6 savings, 40% discount
         result = _enforce_dollar_savings(DealScore.GOOD, 40.0, 6.0, listing_price=15.0)
@@ -520,14 +522,14 @@ class TestDollarSavingsEnforcement:
     def test_cheap_item_great_deal(self):
         """A $25 item at 60% off ($15 saved) should qualify as GREAT.
         Flat threshold needs $30. Proportional: $25 * 0.25 = $6.25."""
-        from agentic_scraper.skills.orchestrator import _enforce_dollar_savings
+        from poob.skills.orchestrator import _enforce_dollar_savings
 
         result = _enforce_dollar_savings(DealScore.GREAT, 60.0, 15.0, listing_price=25.0)
         assert result == DealScore.GREAT
 
     def test_expensive_item_uses_flat_thresholds(self):
         """Items $50+ use flat dollar thresholds as before."""
-        from agentic_scraper.skills.orchestrator import _enforce_dollar_savings
+        from poob.skills.orchestrator import _enforce_dollar_savings
 
         # $80 item, $20 savings, 25% off — doesn't meet GREAT ($30) or GOOD (15%+$10)
         # 25% > 15% and $20 > $10 → GOOD
@@ -536,14 +538,14 @@ class TestDollarSavingsEnforcement:
 
     def test_expensive_item_incredible_needs_75(self):
         """$100 item with $60 savings = 60% off. INCREDIBLE needs $75 flat."""
-        from agentic_scraper.skills.orchestrator import _enforce_dollar_savings
+        from poob.skills.orchestrator import _enforce_dollar_savings
 
         result = _enforce_dollar_savings(DealScore.INCREDIBLE, 60.0, 60.0, listing_price=100.0)
         assert result == DealScore.GREAT  # $60 < $75 for INCREDIBLE, but > $30 for GREAT
 
     def test_zero_price_uses_flat_thresholds(self):
         """When listing_price is 0 (unknown), use flat thresholds."""
-        from agentic_scraper.skills.orchestrator import _enforce_dollar_savings
+        from poob.skills.orchestrator import _enforce_dollar_savings
 
         result = _enforce_dollar_savings(DealScore.INCREDIBLE, 90.0, 9.0, listing_price=0.0)
         assert result == DealScore.FAIR
@@ -553,7 +555,7 @@ class TestMisleadingListingDetection:
     """Test the misleading listing filter."""
 
     def test_trades_only_detected(self):
-        from agentic_scraper.skills.orchestrator import _detect_misleading_listing
+        from poob.skills.orchestrator import _detect_misleading_listing
 
         listing = Listing(
             title="Pokemon Cards",
@@ -564,7 +566,7 @@ class TestMisleadingListingDetection:
         assert result is not None  # Detected as misleading (trades_only or looking_to_trade)
 
     def test_popup_event_detected(self):
-        from agentic_scraper.skills.orchestrator import _detect_misleading_listing
+        from poob.skills.orchestrator import _detect_misleading_listing
 
         listing = Listing(
             title="Vintage Clothing Sale",
@@ -575,7 +577,7 @@ class TestMisleadingListingDetection:
         assert result == "popup_event"
 
     def test_legitimate_listing_passes(self):
-        from agentic_scraper.skills.orchestrator import _detect_misleading_listing
+        from poob.skills.orchestrator import _detect_misleading_listing
 
         listing = Listing(
             title="PS5 Digital Edition",
@@ -586,7 +588,7 @@ class TestMisleadingListingDetection:
         assert result is None
 
     def test_bait_pricing_detected(self):
-        from agentic_scraper.skills.orchestrator import _detect_misleading_listing
+        from poob.skills.orchestrator import _detect_misleading_listing
 
         listing = Listing(
             title="Furniture",
@@ -601,28 +603,28 @@ class TestPreferenceConstraints:
     """Test positive and negative preference constraints."""
 
     def test_negation_catches_excluded_term(self):
-        from agentic_scraper.skills.orchestrator import _listing_contradicts_notes
+        from poob.skills.orchestrator import _listing_contradicts_notes
 
         listing = Listing(title="Metal Filing Cabinet", description="Heavy duty steel")
         result = _listing_contradicts_notes(listing, "not metal, prefer wood")
         assert result == "metal"
 
     def test_positive_constraint_rejects_non_match(self):
-        from agentic_scraper.skills.orchestrator import _listing_contradicts_notes
+        from poob.skills.orchestrator import _listing_contradicts_notes
 
         listing = Listing(title="Beautiful Ceramic Vase Set", description="Set of 3 vases")
         result = _listing_contradicts_notes(listing, "only cups and mugs, no plates, no bowls, no vases")
         assert result is not None  # Should be rejected (either "vases" exclusion or missing "cups")
 
     def test_positive_constraint_accepts_match(self):
-        from agentic_scraper.skills.orchestrator import _listing_contradicts_notes
+        from poob.skills.orchestrator import _listing_contradicts_notes
 
         listing = Listing(title="Set of 4 ceramic cups", description="Hand-thrown mugs")
         result = _listing_contradicts_notes(listing, "only cups and mugs")
         assert result is None  # Should pass — "cups" is in the title
 
     def test_no_notes_always_passes(self):
-        from agentic_scraper.skills.orchestrator import _listing_contradicts_notes
+        from poob.skills.orchestrator import _listing_contradicts_notes
 
         listing = Listing(title="Random Item", description="Whatever")
         result = _listing_contradicts_notes(listing, "")
@@ -633,7 +635,7 @@ class TestBulkConstraint:
     """Test bulk/lot preference enforcement."""
 
     def test_single_card_rejected_when_bulk_required(self):
-        from agentic_scraper.skills.orchestrator import _listing_contradicts_notes
+        from poob.skills.orchestrator import _listing_contradicts_notes
 
         listing = Listing(
             title="Mew [Holo] #4 Pokemon POP Series 4 - MP",
@@ -645,7 +647,7 @@ class TestBulkConstraint:
         assert result == "not_bulk"
 
     def test_bulk_lot_passes_when_bulk_required(self):
-        from agentic_scraper.skills.orchestrator import _listing_contradicts_notes
+        from poob.skills.orchestrator import _listing_contradicts_notes
 
         listing = Listing(
             title="Pokemon Cards Huge Lot",
@@ -657,7 +659,7 @@ class TestBulkConstraint:
         assert result is None
 
     def test_collection_passes_when_bulk_required(self):
-        from agentic_scraper.skills.orchestrator import _listing_contradicts_notes
+        from poob.skills.orchestrator import _listing_contradicts_notes
 
         listing = Listing(
             title="Pokemon card collection",
@@ -669,7 +671,7 @@ class TestBulkConstraint:
         assert result is None
 
     def test_no_bulk_in_notes_allows_single_items(self):
-        from agentic_scraper.skills.orchestrator import _listing_contradicts_notes
+        from poob.skills.orchestrator import _listing_contradicts_notes
 
         listing = Listing(
             title="Mew [Holo] #4 Pokemon POP Series 4",
@@ -683,7 +685,7 @@ class TestReplacementPartsFilter:
     """Test that replacement parts are filtered when user wants the actual product."""
 
     def test_gasket_with_part_number_filtered(self):
-        from agentic_scraper.skills.orchestrator import _is_replacement_part
+        from poob.skills.orchestrator import _is_replacement_part
 
         listing = Listing(
             title="New Refrigerator Door Gasket W10830274 for Whirlpool KitchenAid Maytag",
@@ -692,7 +694,7 @@ class TestReplacementPartsFilter:
         assert _is_replacement_part(listing, "kitchen aid") is True
 
     def test_water_valve_filtered(self):
-        from agentic_scraper.skills.orchestrator import _is_replacement_part
+        from poob.skills.orchestrator import _is_replacement_part
 
         listing = Listing(
             title="KitchenAid refrigerator water inlet valve",
@@ -702,7 +704,7 @@ class TestReplacementPartsFilter:
         assert _is_replacement_part(listing, "kitchen aid") is True
 
     def test_actual_kitchenaid_mixer_passes(self):
-        from agentic_scraper.skills.orchestrator import _is_replacement_part
+        from poob.skills.orchestrator import _is_replacement_part
 
         listing = Listing(
             title="KitchenAid Artisan 5-Quart Stand Mixer",
@@ -712,7 +714,7 @@ class TestReplacementPartsFilter:
         assert _is_replacement_part(listing, "kitchen aid") is False
 
     def test_actual_kitchenaid_toaster_passes(self):
-        from agentic_scraper.skills.orchestrator import _is_replacement_part
+        from poob.skills.orchestrator import _is_replacement_part
 
         listing = Listing(
             title="KitchenAid Toaster with multiple settings",
@@ -722,7 +724,7 @@ class TestReplacementPartsFilter:
         assert _is_replacement_part(listing, "kitchen aid") is False
 
     def test_part_number_in_title_filtered(self):
-        from agentic_scraper.skills.orchestrator import _is_replacement_part
+        from poob.skills.orchestrator import _is_replacement_part
 
         listing = Listing(
             title="AP6872729 Dryer Heating Element for Samsung",
@@ -732,7 +734,7 @@ class TestReplacementPartsFilter:
 
     def test_user_explicitly_wants_parts(self):
         """If user's interest includes 'part', don't filter."""
-        from agentic_scraper.skills.orchestrator import _is_replacement_part
+        from poob.skills.orchestrator import _is_replacement_part
 
         listing = Listing(
             title="KitchenAid Mixer Replacement Paddle",
@@ -743,7 +745,7 @@ class TestReplacementPartsFilter:
         assert _is_replacement_part(listing, "kitchenaid replacement part") is False
 
     def test_compatible_with_pattern_filtered(self):
-        from agentic_scraper.skills.orchestrator import _is_replacement_part
+        from poob.skills.orchestrator import _is_replacement_part
 
         listing = Listing(
             title="Refrigerator Water Filter",
@@ -754,7 +756,7 @@ class TestReplacementPartsFilter:
 
     def test_non_watchlist_listing_not_filtered(self):
         """No interest = no filtering (base browse listings)."""
-        from agentic_scraper.skills.orchestrator import _is_replacement_part
+        from poob.skills.orchestrator import _is_replacement_part
 
         listing = Listing(
             title="Door Gasket W10830274",

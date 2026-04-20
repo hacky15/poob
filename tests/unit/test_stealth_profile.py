@@ -6,12 +6,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from agentic_scraper.browser.stealth_profile import (
+from poob.browser.stealth_profile import (
     STEALTH_SCRIPTS,
     apply_stealth_scripts,
     random_viewport,
 )
-from agentic_scraper.browser.stealth import simulate_mouse_movement
+from poob.browser.stealth import simulate_mouse_movement
 
 
 class TestRandomViewport:

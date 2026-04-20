@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agentic_scraper.storage.models import Listing
+from poob.storage.models import Listing
 
 
 # --- Parser tests ---
@@ -19,7 +19,7 @@ class TestParseListings:
 
     def test_parse_valid_json_array(self):
         """Should extract Listing objects from a valid JSON array."""
-        from agentic_scraper.sites.facebook.parser import parse_listings
+        from poob.sites.facebook.parser import parse_listings
 
         raw = json.dumps([
             {
@@ -50,21 +50,21 @@ class TestParseListings:
 
     def test_parse_empty_array(self):
         """Should return empty list for empty JSON array."""
-        from agentic_scraper.sites.facebook.parser import parse_listings
+        from poob.sites.facebook.parser import parse_listings
 
         listings = parse_listings("[]", site="facebook_marketplace")
         assert listings == []
 
     def test_parse_malformed_json(self):
         """Should return empty list for invalid JSON."""
-        from agentic_scraper.sites.facebook.parser import parse_listings
+        from poob.sites.facebook.parser import parse_listings
 
         listings = parse_listings("not valid json at all", site="facebook_marketplace")
         assert listings == []
 
     def test_parse_markdown_fenced_json(self):
         """Should extract JSON from markdown code fences."""
-        from agentic_scraper.sites.facebook.parser import parse_listings
+        from poob.sites.facebook.parser import parse_listings
 
         raw = """Here are the listings I found:
 
@@ -87,7 +87,7 @@ That's all I found."""
 
     def test_parse_partial_listing_data(self):
         """Should handle listings with missing optional fields."""
-        from agentic_scraper.sites.facebook.parser import parse_listings
+        from poob.sites.facebook.parser import parse_listings
 
         raw = json.dumps([
             {"title": "Some Item", "price": 50.0},
@@ -101,7 +101,7 @@ That's all I found."""
 
     def test_parse_sets_site_name(self):
         """Each parsed listing should have the correct site set."""
-        from agentic_scraper.sites.facebook.parser import parse_listings
+        from poob.sites.facebook.parser import parse_listings
 
         raw = json.dumps([{"title": "Item", "price": 10.0, "external_id": "x1"}])
         listings = parse_listings(raw, site="facebook_marketplace")
@@ -109,7 +109,7 @@ That's all I found."""
 
     def test_parse_handles_image_url_to_image_urls(self):
         """Parser should convert singular image_url to image_urls list."""
-        from agentic_scraper.sites.facebook.parser import parse_listings
+        from poob.sites.facebook.parser import parse_listings
 
         raw = json.dumps([{
             "title": "Item",
@@ -129,21 +129,21 @@ class TestPromptBuilding:
 
     def test_search_prompt_includes_keywords(self):
         """Search prompt should include the query keywords."""
-        from agentic_scraper.sites.facebook.prompts import build_search_prompt
+        from poob.sites.facebook.prompts import build_search_prompt
 
         prompt = build_search_prompt(keywords="PS5", max_price=None, location=None)
         assert "PS5" in prompt
 
     def test_search_prompt_includes_max_price(self):
         """Search prompt should include price filter when provided."""
-        from agentic_scraper.sites.facebook.prompts import build_search_prompt
+        from poob.sites.facebook.prompts import build_search_prompt
 
         prompt = build_search_prompt(keywords="PS5", max_price=300.0, location=None)
         assert "300" in prompt
 
     def test_search_prompt_includes_location(self):
         """Search prompt should include location when provided."""
-        from agentic_scraper.sites.facebook.prompts import build_search_prompt
+        from poob.sites.facebook.prompts import build_search_prompt
 
         prompt = build_search_prompt(
             keywords="PS5", max_price=None, location="Portland, OR"
@@ -152,7 +152,7 @@ class TestPromptBuilding:
 
     def test_search_prompt_without_optional_filters(self):
         """Search prompt should still work without price/location filters."""
-        from agentic_scraper.sites.facebook.prompts import build_search_prompt
+        from poob.sites.facebook.prompts import build_search_prompt
 
         prompt = build_search_prompt(keywords="laptop", max_price=None, location=None)
         assert "laptop" in prompt
@@ -167,7 +167,7 @@ class TestFacebookAdapter:
 
     def test_adapter_properties(self):
         """Adapter should have correct site_name, base_url, requires_login."""
-        from agentic_scraper.sites.facebook.adapter import FacebookMarketplaceAdapter
+        from poob.sites.facebook.adapter import FacebookMarketplaceAdapter
 
         adapter = FacebookMarketplaceAdapter()
         assert adapter.site_name == "facebook_marketplace"
@@ -176,8 +176,8 @@ class TestFacebookAdapter:
 
     async def test_scan_returns_scan_result(self):
         """scan() should return a ScanResult with parsed listings (agent mode)."""
-        from agentic_scraper.sites.base import ScanQuery, ScanResult
-        from agentic_scraper.sites.facebook.adapter import FacebookMarketplaceAdapter
+        from poob.sites.base import ScanQuery, ScanResult
+        from poob.sites.facebook.adapter import FacebookMarketplaceAdapter
 
         adapter = FacebookMarketplaceAdapter()
         adapter.set_scan_mode("agent")
@@ -217,8 +217,8 @@ class TestFacebookAdapter:
 
     async def test_scan_handles_agent_failure(self):
         """scan() should return empty result with errors when agent fails."""
-        from agentic_scraper.sites.base import ScanQuery, ScanResult
-        from agentic_scraper.sites.facebook.adapter import FacebookMarketplaceAdapter
+        from poob.sites.base import ScanQuery, ScanResult
+        from poob.sites.facebook.adapter import FacebookMarketplaceAdapter
 
         adapter = FacebookMarketplaceAdapter()
         adapter.set_scan_mode("agent")

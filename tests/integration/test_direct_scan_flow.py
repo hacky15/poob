@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agentic_scraper.sites.base import ScanQuery, ScanResult
+from poob.sites.base import ScanQuery, ScanResult
 
 
 @pytest.fixture
@@ -48,7 +48,7 @@ class TestAdapterDirectMode:
         self, mock_page, mock_browser_manager, sample_js_listings
     ):
         """With scan_mode='direct', adapter should use DirectScanner."""
-        from agentic_scraper.sites.facebook.adapter import FacebookMarketplaceAdapter
+        from poob.sites.facebook.adapter import FacebookMarketplaceAdapter
 
         mock_page.evaluate = AsyncMock(return_value=sample_js_listings)
 
@@ -66,7 +66,7 @@ class TestAdapterDirectMode:
 
     async def test_agent_mode_uses_agent(self, mock_browser_manager):
         """With scan_mode='agent', adapter should use browser-use Agent."""
-        from agentic_scraper.sites.facebook.adapter import FacebookMarketplaceAdapter
+        from poob.sites.facebook.adapter import FacebookMarketplaceAdapter
 
         # Set up agent mock to return valid data
         listing_json = json.dumps([{"title": "Test", "price": 50.0, "external_id": "1"}])
@@ -91,7 +91,7 @@ class TestAdapterDirectMode:
         self, mock_browser_manager
     ):
         """If direct scan fails, adapter should fall back to agent."""
-        from agentic_scraper.sites.facebook.adapter import FacebookMarketplaceAdapter
+        from poob.sites.facebook.adapter import FacebookMarketplaceAdapter
 
         # Make get_page fail (simulates browser issue)
         mock_browser_manager.get_page = AsyncMock(
@@ -126,7 +126,7 @@ class TestAdapterDirectMode:
         self, mock_page, mock_browser_manager
     ):
         """When JS returns empty, LLM fallback should be used."""
-        from agentic_scraper.sites.facebook.adapter import FacebookMarketplaceAdapter
+        from poob.sites.facebook.adapter import FacebookMarketplaceAdapter
 
         mock_page.evaluate = AsyncMock(return_value=[])
         mock_page._extract_clean_markdown = AsyncMock(
@@ -153,14 +153,14 @@ class TestAdapterDirectMode:
 
     async def test_adapter_default_scan_mode_is_direct(self):
         """Adapter should default to direct scan mode."""
-        from agentic_scraper.sites.facebook.adapter import FacebookMarketplaceAdapter
+        from poob.sites.facebook.adapter import FacebookMarketplaceAdapter
 
         adapter = FacebookMarketplaceAdapter()
         assert adapter._scan_mode == "direct"
 
     async def test_set_json_llm(self):
         """set_json_llm should store the LLM for extraction fallback."""
-        from agentic_scraper.sites.facebook.adapter import FacebookMarketplaceAdapter
+        from poob.sites.facebook.adapter import FacebookMarketplaceAdapter
 
         adapter = FacebookMarketplaceAdapter()
         mock_llm = MagicMock()

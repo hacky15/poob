@@ -5,7 +5,7 @@ from __future__ import annotations
 import discord
 import pytest
 
-from agentic_scraper.storage.models import Deal, DealScore, Listing, WatchItem
+from poob.storage.models import Deal, DealScore, Listing, WatchItem
 
 
 class TestFormatDealEmbed:
@@ -13,7 +13,7 @@ class TestFormatDealEmbed:
 
     def test_deal_embed_has_title_and_fields(self):
         """Deal embed should contain the listing title and key fields."""
-        from agentic_scraper.discord_bot.formatter import format_deal_embed
+        from poob.discord_bot.formatter import format_deal_embed
 
         listing = Listing(
             title="PS5 Disc Edition",
@@ -39,7 +39,7 @@ class TestFormatDealEmbed:
 
     def test_deal_embed_color_by_score(self):
         """Embed color should change based on DealScore."""
-        from agentic_scraper.discord_bot.formatter import format_deal_embed, SCORE_COLORS
+        from poob.discord_bot.formatter import format_deal_embed, SCORE_COLORS
 
         listing = Listing(title="Item", price=10.0)
         for score, expected_color in SCORE_COLORS.items():
@@ -49,7 +49,7 @@ class TestFormatDealEmbed:
 
     def test_deal_embed_includes_link(self):
         """Deal embed should link to the listing."""
-        from agentic_scraper.discord_bot.formatter import format_deal_embed
+        from poob.discord_bot.formatter import format_deal_embed
 
         listing = Listing(
             title="Item",
@@ -62,7 +62,7 @@ class TestFormatDealEmbed:
 
     def test_deal_embed_handles_missing_image(self):
         """Embed should not crash when listing has no images."""
-        from agentic_scraper.discord_bot.formatter import format_deal_embed
+        from poob.discord_bot.formatter import format_deal_embed
 
         listing = Listing(title="Item", price=10.0, image_urls=[])
         deal = Deal(listing_id="l1", score=DealScore.FAIR)
@@ -75,8 +75,8 @@ class TestProvenanceField:
     """Tests for the provenance 'Evaluation Details' in deal embeds."""
 
     def test_provenance_shown_when_available(self):
-        from agentic_scraper.discord_bot.formatter import format_deal_embed
-        from agentic_scraper.skills.models import DealProvenance
+        from poob.discord_bot.formatter import format_deal_embed
+        from poob.skills.models import DealProvenance
 
         prov = DealProvenance(
             vlm_providers=["gemini_flash_lite", "groq_vision"],
@@ -106,7 +106,7 @@ class TestProvenanceField:
         assert "KitchenAid Artisan Mixer" in details_field.value
 
     def test_provenance_omitted_when_empty(self):
-        from agentic_scraper.discord_bot.formatter import format_deal_embed
+        from poob.discord_bot.formatter import format_deal_embed
 
         listing = Listing(title="Item", price=10.0)
         deal = Deal(listing_id="l1", score=DealScore.FAIR, provenance_json="")
@@ -115,8 +115,8 @@ class TestProvenanceField:
         assert "Evaluation Details" not in field_names
 
     def test_provenance_shows_score_adjustments(self):
-        from agentic_scraper.discord_bot.formatter import _format_provenance_field
-        from agentic_scraper.skills.models import DealProvenance
+        from poob.discord_bot.formatter import _format_provenance_field
+        from poob.skills.models import DealProvenance
 
         prov = DealProvenance(
             score_adjustments=["incredible->great: $28 saved, 55%"],
@@ -129,7 +129,7 @@ class TestProvenanceField:
 
     def test_provenance_roundtrip(self):
         """DealProvenance should survive JSON round-trip."""
-        from agentic_scraper.skills.models import DealProvenance
+        from poob.skills.models import DealProvenance
 
         prov = DealProvenance(
             vlm_providers=["gemini_flash"],
@@ -145,14 +145,14 @@ class TestProvenanceField:
         assert restored.web_search_used is True
 
     def test_provenance_from_empty_json(self):
-        from agentic_scraper.skills.models import DealProvenance
+        from poob.skills.models import DealProvenance
 
         p = DealProvenance.from_json("")
         assert p.vlm_providers == []
         assert p.final_score == ""
 
     def test_provenance_ignores_unknown_keys(self):
-        from agentic_scraper.skills.models import DealProvenance
+        from poob.skills.models import DealProvenance
 
         p = DealProvenance.from_json('{"unknown_field": 123, "final_score": "great"}')
         assert p.final_score == "great"
@@ -164,7 +164,7 @@ class TestFormatListingEmbed:
 
     def test_listing_embed_has_title_and_price(self):
         """Listing embed should show title and price."""
-        from agentic_scraper.discord_bot.formatter import format_listing_embed
+        from poob.discord_bot.formatter import format_listing_embed
 
         listing = Listing(
             title="Mountain Bike",
@@ -183,7 +183,7 @@ class TestFormatWatchlistEmbed:
 
     def test_watchlist_embed_lists_items(self):
         """Watchlist embed should list all watch items."""
-        from agentic_scraper.discord_bot.formatter import format_watchlist_embed
+        from poob.discord_bot.formatter import format_watchlist_embed
 
         watches = [
             WatchItem(id="w1", interest="PS5", max_price=300.0),
@@ -195,7 +195,7 @@ class TestFormatWatchlistEmbed:
 
     def test_watchlist_embed_empty(self):
         """Empty watchlist should produce an embed with no fields."""
-        from agentic_scraper.discord_bot.formatter import format_watchlist_embed
+        from poob.discord_bot.formatter import format_watchlist_embed
 
         embed = format_watchlist_embed([])
         assert isinstance(embed, discord.Embed)
@@ -207,7 +207,7 @@ class TestFormatStatusEmbed:
 
     def test_status_embed_shows_state(self):
         """Status embed should show running/paused state."""
-        from agentic_scraper.discord_bot.formatter import format_status_embed
+        from poob.discord_bot.formatter import format_status_embed
 
         embed = format_status_embed(
             is_running=True,

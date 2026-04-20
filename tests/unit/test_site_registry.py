@@ -12,7 +12,7 @@ class TestSiteRegistry:
 
     def test_discover_finds_facebook_adapter(self):
         """Registry should discover the Facebook Marketplace adapter."""
-        from agentic_scraper.sites.registry import SiteRegistry
+        from poob.sites.registry import SiteRegistry
 
         registry = SiteRegistry()
         registry.discover()
@@ -20,7 +20,7 @@ class TestSiteRegistry:
 
     def test_get_returns_adapter_by_name(self):
         """get() should return the correct adapter instance."""
-        from agentic_scraper.sites.registry import SiteRegistry
+        from poob.sites.registry import SiteRegistry
 
         registry = SiteRegistry()
         registry.discover()
@@ -30,7 +30,7 @@ class TestSiteRegistry:
 
     def test_get_returns_none_for_unknown(self):
         """get() should return None for an unregistered site."""
-        from agentic_scraper.sites.registry import SiteRegistry
+        from poob.sites.registry import SiteRegistry
 
         registry = SiteRegistry()
         registry.discover()
@@ -38,7 +38,7 @@ class TestSiteRegistry:
 
     def test_list_sites_returns_all_names(self):
         """list_sites() should return names of all discovered adapters."""
-        from agentic_scraper.sites.registry import SiteRegistry
+        from poob.sites.registry import SiteRegistry
 
         registry = SiteRegistry()
         registry.discover()
@@ -48,7 +48,7 @@ class TestSiteRegistry:
 
     def test_registry_skips_non_adapter_directories(self):
         """Directories without an Adapter export should be skipped."""
-        from agentic_scraper.sites.registry import SiteRegistry
+        from poob.sites.registry import SiteRegistry
 
         registry = SiteRegistry()
         registry.discover()
@@ -58,7 +58,7 @@ class TestSiteRegistry:
 
     def test_adapter_has_required_properties(self):
         """Discovered adapters should have the SiteAdapter protocol properties."""
-        from agentic_scraper.sites.registry import SiteRegistry
+        from poob.sites.registry import SiteRegistry
 
         registry = SiteRegistry()
         registry.discover()

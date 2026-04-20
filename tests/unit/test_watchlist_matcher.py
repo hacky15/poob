@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from agentic_scraper.skills.models import ItemIdentification
-from agentic_scraper.storage.models import DealScore, Listing, WatchItem
+from poob.skills.models import ItemIdentification
+from poob.storage.models import DealScore, Listing, WatchItem
 
 
 class TestKeywordMatch:
     """Tests for keyword-based matching (fast pre-filter path)."""
 
     def test_interest_matches_title(self):
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(title="PlayStation 5 Disc Edition", price=250.0, external_id="1")
@@ -23,7 +23,7 @@ class TestKeywordMatch:
         assert deals[0].listing_id == listing.id or deals[0].watch_item_id == "w1"
 
     def test_interest_case_insensitive(self):
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(title="PLAYSTATION 5", price=250.0, external_id="1")
@@ -33,7 +33,7 @@ class TestKeywordMatch:
         assert len(deals) == 1
 
     def test_no_match_when_interest_differs(self):
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(title="Xbox Series X", price=300.0, external_id="1")
@@ -43,7 +43,7 @@ class TestKeywordMatch:
         assert len(deals) == 0
 
     def test_price_within_budget(self):
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(title="PS5", price=250.0, external_id="1")
@@ -53,7 +53,7 @@ class TestKeywordMatch:
         assert len(deals) == 1
 
     def test_price_over_budget_excluded(self):
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(title="PS5", price=500.0, external_id="1")
@@ -63,7 +63,7 @@ class TestKeywordMatch:
         assert len(deals) == 0
 
     def test_no_max_price_always_matches(self):
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(title="PS5", price=999.0, external_id="1")
@@ -73,7 +73,7 @@ class TestKeywordMatch:
         assert len(deals) == 1
 
     def test_calculates_discount_percentage(self):
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(title="PS5", price=200.0, external_id="1")
@@ -85,7 +85,7 @@ class TestKeywordMatch:
         assert deals[0].discount_pct == pytest.approx(50.0)
 
     def test_assigns_deal_score_great(self):
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(title="PS5", price=200.0, external_id="1")
@@ -95,7 +95,7 @@ class TestKeywordMatch:
         assert deals[0].score == DealScore.GREAT
 
     def test_assigns_deal_score_good(self):
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(title="PS5", price=280.0, external_id="1")
@@ -111,7 +111,7 @@ class TestKeywordMatch:
         This is fine because keyword matching is only used for pre-filtering.
         The real matching decision happens in match_with_identification using the LLM.
         """
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(title="Coffee Table Book", price=8.0, external_id="1")
@@ -127,7 +127,7 @@ class TestLLMInformedMatch:
 
     def test_coffee_table_book_rejected(self):
         """LLM identified 'coffee table book' — should NOT match 'coffee table'."""
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(title="Coffee Table Book", price=8.0, external_id="1")
@@ -144,7 +144,7 @@ class TestLLMInformedMatch:
 
     def test_real_coffee_table_matches(self):
         """LLM identified actual coffee table — should match."""
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(
@@ -163,7 +163,7 @@ class TestLLMInformedMatch:
 
     def test_espresso_machine_guide_rejected(self):
         """LLM identified a book about espresso machines — should NOT match."""
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(
@@ -182,7 +182,7 @@ class TestLLMInformedMatch:
 
     def test_real_espresso_machine_matches(self):
         """LLM identified real espresso machine — should match."""
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(
@@ -201,7 +201,7 @@ class TestLLMInformedMatch:
 
     def test_ps5_poster_rejected(self):
         """LLM identified PS5 poster, not a console."""
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(title="PS5 Poster - Wall Art", price=15.0, external_id="1")
@@ -220,7 +220,7 @@ class TestLLMInformedMatch:
 
     def test_ps5_console_matches(self):
         """LLM identified PS5 console — should match."""
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(title="PS5 Console Bundle", price=300.0, external_id="1")
@@ -237,7 +237,7 @@ class TestLLMInformedMatch:
 
     def test_synonym_matching_on_identification(self):
         """Synonyms should work against the identified item name."""
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(title="PS5 Disc Edition", price=250.0, external_id="1")
@@ -256,7 +256,7 @@ class TestLLMInformedMatch:
 
     def test_category_fallback_match(self):
         """If item_name doesn't match, category path should be checked."""
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(title="Breville Barista Express", price=100.0, external_id="1")
@@ -274,7 +274,7 @@ class TestLLMInformedMatch:
 
     def test_price_still_checked(self):
         """Even with LLM matching, price budget should be respected."""
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(title="PS5 Pro", price=600.0, external_id="1")
@@ -291,7 +291,7 @@ class TestLLMInformedMatch:
 
     def test_vanity_stool_not_coffee_table(self):
         """Vanity stool identified by LLM should NOT match 'coffee table'."""
-        from agentic_scraper.scanner.interest_matcher import InterestMatcher
+        from poob.scanner.interest_matcher import InterestMatcher
 
         matcher = InterestMatcher()
         listing = Listing(

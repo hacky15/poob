@@ -12,9 +12,9 @@ class TestRandomDelay:
 
     async def test_delay_within_bounds(self):
         """Delay value should be between min_ms and max_ms."""
-        from agentic_scraper.browser.stealth import random_delay
+        from poob.browser.stealth import random_delay
 
-        with patch("agentic_scraper.browser.stealth.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        with patch("poob.browser.stealth.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             await random_delay(100, 200)
             mock_sleep.assert_called_once()
             actual_seconds = mock_sleep.call_args[0][0]
@@ -22,26 +22,26 @@ class TestRandomDelay:
 
     async def test_delay_calls_asyncio_sleep(self):
         """Should actually call asyncio.sleep."""
-        from agentic_scraper.browser.stealth import random_delay
+        from poob.browser.stealth import random_delay
 
-        with patch("agentic_scraper.browser.stealth.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        with patch("poob.browser.stealth.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             await random_delay(50, 100)
             mock_sleep.assert_awaited_once()
 
     async def test_delay_with_equal_bounds(self):
         """When min == max, should sleep for exactly that duration."""
-        from agentic_scraper.browser.stealth import random_delay
+        from poob.browser.stealth import random_delay
 
-        with patch("agentic_scraper.browser.stealth.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        with patch("poob.browser.stealth.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             await random_delay(500, 500)
             actual_seconds = mock_sleep.call_args[0][0]
             assert actual_seconds == pytest.approx(0.5, abs=0.001)
 
     async def test_delay_converts_ms_to_seconds(self):
         """ms arguments should be converted to seconds for asyncio.sleep."""
-        from agentic_scraper.browser.stealth import random_delay
+        from poob.browser.stealth import random_delay
 
-        with patch("agentic_scraper.browser.stealth.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        with patch("poob.browser.stealth.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             await random_delay(1000, 1000)
             actual_seconds = mock_sleep.call_args[0][0]
             assert actual_seconds == pytest.approx(1.0, abs=0.001)
@@ -52,7 +52,7 @@ class TestRandomScrollPattern:
 
     def test_returns_list_of_tuples(self):
         """Should return a list of (direction, pixels, pause_ms) tuples."""
-        from agentic_scraper.browser.stealth import random_scroll_pattern
+        from poob.browser.stealth import random_scroll_pattern
 
         pattern = random_scroll_pattern()
         assert isinstance(pattern, list)
@@ -68,7 +68,7 @@ class TestRandomScrollPattern:
 
     def test_pattern_has_varied_values(self):
         """Scroll amounts should not all be identical (randomized)."""
-        from agentic_scraper.browser.stealth import random_scroll_pattern
+        from poob.browser.stealth import random_scroll_pattern
 
         pattern = random_scroll_pattern(steps=5)
         pixels_list = [p[1] for p in pattern]
@@ -77,7 +77,7 @@ class TestRandomScrollPattern:
 
     def test_pattern_mostly_scrolls_down(self):
         """Most scrolls should be downward for browsing behavior."""
-        from agentic_scraper.browser.stealth import random_scroll_pattern
+        from poob.browser.stealth import random_scroll_pattern
 
         pattern = random_scroll_pattern(steps=10)
         down_count = sum(1 for d, _, _ in pattern if d == "down")
@@ -89,7 +89,7 @@ class TestAddJitter:
 
     def test_jitter_within_default_bounds(self):
         """Result should be within +/- 15% of target by default."""
-        from agentic_scraper.browser.stealth import add_jitter
+        from poob.browser.stealth import add_jitter
 
         target = 10.0
         for _ in range(100):
@@ -98,13 +98,13 @@ class TestAddJitter:
 
     def test_jitter_with_zero_pct(self):
         """With 0% jitter, should return exact value."""
-        from agentic_scraper.browser.stealth import add_jitter
+        from poob.browser.stealth import add_jitter
 
         assert add_jitter(10.0, pct=0.0) == 10.0
 
     def test_jitter_with_custom_pct(self):
         """Custom percentage should change the bounds."""
-        from agentic_scraper.browser.stealth import add_jitter
+        from poob.browser.stealth import add_jitter
 
         target = 100.0
         for _ in range(100):

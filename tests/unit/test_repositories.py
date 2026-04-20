@@ -4,11 +4,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from agentic_scraper.storage.models import Deal, DealScore, Listing, ScanLog, WatchItem
-from agentic_scraper.storage.repositories.listing_repo import ListingRepository
-from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
-from agentic_scraper.storage.repositories.deal_repo import DealRepository
-from agentic_scraper.storage.repositories.scan_log_repo import ScanLogRepository
+from poob.storage.models import Deal, DealScore, Listing, ScanLog, WatchItem
+from poob.storage.repositories.listing_repo import ListingRepository
+from poob.storage.repositories.watchlist_repo import WatchlistRepository
+from poob.storage.repositories.deal_repo import DealRepository
+from poob.storage.repositories.scan_log_repo import ScanLogRepository
 
 
 class TestListingRepository:

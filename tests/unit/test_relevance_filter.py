@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import pytest
 
-from agentic_scraper.sites.facebook.patrol_scanner import (
+from poob.sites.facebook.patrol_scanner import (
     _expand_keywords,
     _tokenize_query,
     filter_by_relevance,
 )
-from agentic_scraper.storage.models import Listing
+from poob.storage.models import Listing
 
 
 def _listing(title: str, price: float = 10.0) -> Listing:

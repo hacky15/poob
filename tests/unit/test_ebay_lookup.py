@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agentic_scraper.skills.models import PriceLookupResult
+from poob.skills.models import PriceLookupResult
 
 
 class TestExtractPricesFromText:
@@ -14,7 +14,7 @@ class TestExtractPricesFromText:
 
     def test_extract_prices_from_text(self):
         """Should extract dollar prices from plain text."""
-        from agentic_scraper.skills.ebay_lookup import extract_prices_from_text
+        from poob.skills.ebay_lookup import extract_prices_from_text
 
         text = (
             "Sony PS5 Disc Edition Console sold for $350.00\n"
@@ -30,7 +30,7 @@ class TestExtractPricesFromText:
 
     def test_extract_prices_filters_outliers(self):
         """Should filter prices below $1 and above $50,000."""
-        from agentic_scraper.skills.ebay_lookup import extract_prices_from_text
+        from poob.skills.ebay_lookup import extract_prices_from_text
 
         text = "Item sold for $0.50 another at $100.00 and $99,999.99"
         prices = extract_prices_from_text(text)
@@ -39,7 +39,7 @@ class TestExtractPricesFromText:
 
     def test_extract_prices_handles_commas(self):
         """Should parse comma-separated prices like $1,500.00."""
-        from agentic_scraper.skills.ebay_lookup import extract_prices_from_text
+        from poob.skills.ebay_lookup import extract_prices_from_text
 
         text = "Sold for $1,500.00 and $2,300.50"
         prices = extract_prices_from_text(text)
@@ -49,7 +49,7 @@ class TestExtractPricesFromText:
 
     def test_extract_prices_empty_text(self):
         """Should return empty list for text with no prices."""
-        from agentic_scraper.skills.ebay_lookup import extract_prices_from_text
+        from poob.skills.ebay_lookup import extract_prices_from_text
 
         assert extract_prices_from_text("No prices here") == []
         assert extract_prices_from_text("") == []
@@ -59,23 +59,23 @@ class TestSanitizeSearchQuery:
     """Tests for _sanitize_search_query — defense against Tavily 432 errors."""
 
     def test_strips_amazon_prefix(self):
-        from agentic_scraper.skills.ebay_lookup import _sanitize_search_query
+        from poob.skills.ebay_lookup import _sanitize_search_query
 
         assert _sanitize_search_query("Amazon.com: TCL 85 Class TV") == "TCL 85 Class TV"
 
     def test_strips_walmart_prefix(self):
-        from agentic_scraper.skills.ebay_lookup import _sanitize_search_query
+        from poob.skills.ebay_lookup import _sanitize_search_query
 
         assert _sanitize_search_query("Walmart.com: Crockpot 6qt") == "Crockpot 6qt"
 
     def test_strips_trailing_ellipsis(self):
-        from agentic_scraper.skills.ebay_lookup import _sanitize_search_query
+        from poob.skills.ebay_lookup import _sanitize_search_query
 
         result = _sanitize_search_query("Some Product Name...")
         assert not result.endswith(".")
 
     def test_strips_quotes_and_ampersands(self):
-        from agentic_scraper.skills.ebay_lookup import _sanitize_search_query
+        from poob.skills.ebay_lookup import _sanitize_search_query
 
         result = _sanitize_search_query('80\'s & 90\'s VTG Lot of 30 Pillsbury')
         assert '"' not in result
@@ -84,19 +84,19 @@ class TestSanitizeSearchQuery:
         assert "and" in result
 
     def test_truncates_long_names(self):
-        from agentic_scraper.skills.ebay_lookup import _sanitize_search_query
+        from poob.skills.ebay_lookup import _sanitize_search_query
 
         long_name = "A " * 60  # 120 chars
         result = _sanitize_search_query(long_name)
         assert len(result) <= 80
 
     def test_returns_empty_for_only_special_chars(self):
-        from agentic_scraper.skills.ebay_lookup import _sanitize_search_query
+        from poob.skills.ebay_lookup import _sanitize_search_query
 
         assert _sanitize_search_query("...") == ""
 
     def test_passthrough_clean_name(self):
-        from agentic_scraper.skills.ebay_lookup import _sanitize_search_query
+        from poob.skills.ebay_lookup import _sanitize_search_query
 
         assert _sanitize_search_query("IKEA MALM desk") == "IKEA MALM desk"
 
@@ -106,7 +106,7 @@ class TestEbayPriceStats:
 
     def test_compute_stats_normal(self):
         """Should compute correct median, average, min, max."""
-        from agentic_scraper.skills.ebay_lookup import compute_price_stats
+        from poob.skills.ebay_lookup import compute_price_stats
 
         prices = [300.0, 350.0, 380.0, 400.0, 320.0]
         stats = compute_price_stats(prices, query="PS5", source="ebay_sold")
@@ -121,7 +121,7 @@ class TestEbayPriceStats:
 
     def test_compute_stats_single_price(self):
         """Should handle a single price point."""
-        from agentic_scraper.skills.ebay_lookup import compute_price_stats
+        from poob.skills.ebay_lookup import compute_price_stats
 
         stats = compute_price_stats([250.0], query="test", source="ebay_sold")
 
@@ -131,7 +131,7 @@ class TestEbayPriceStats:
 
     def test_compute_stats_empty(self):
         """Should return zero result for empty prices."""
-        from agentic_scraper.skills.ebay_lookup import compute_price_stats
+        from poob.skills.ebay_lookup import compute_price_stats
 
         stats = compute_price_stats([], query="test", source="ebay_sold")
 
@@ -141,7 +141,7 @@ class TestEbayPriceStats:
 
     def test_confidence_increases_with_samples(self):
         """More samples should yield higher confidence."""
-        from agentic_scraper.skills.ebay_lookup import compute_price_stats
+        from poob.skills.ebay_lookup import compute_price_stats
 
         few = compute_price_stats([100.0, 200.0], query="q", source="s")
         many = compute_price_stats(
@@ -157,7 +157,7 @@ class TestEbayLookupTool:
 
     async def test_tavily_lookup_success(self):
         """Should return price data when Tavily search succeeds."""
-        from agentic_scraper.skills.ebay_lookup import EbayLookupTool
+        from poob.skills.ebay_lookup import EbayLookupTool
 
         mock_search = AsyncMock()
         mock_search.search = AsyncMock(return_value=(
@@ -176,7 +176,7 @@ class TestEbayLookupTool:
 
     async def test_tavily_empty_results(self):
         """Should return empty result when search returns nothing."""
-        from agentic_scraper.skills.ebay_lookup import EbayLookupTool
+        from poob.skills.ebay_lookup import EbayLookupTool
 
         mock_search = AsyncMock()
         mock_search.search = AsyncMock(return_value="")
@@ -189,7 +189,7 @@ class TestEbayLookupTool:
 
     async def test_tavily_error_returns_empty(self):
         """Should return empty result when search raises."""
-        from agentic_scraper.skills.ebay_lookup import EbayLookupTool
+        from poob.skills.ebay_lookup import EbayLookupTool
 
         mock_search = AsyncMock()
         mock_search.search = AsyncMock(side_effect=Exception("API error"))
@@ -202,7 +202,7 @@ class TestEbayLookupTool:
 
     async def test_includes_ebay_site_filter_in_query(self):
         """Should include site:ebay.com in the search query string."""
-        from agentic_scraper.skills.ebay_lookup import EbayLookupTool
+        from poob.skills.ebay_lookup import EbayLookupTool
 
         mock_search = AsyncMock()
         mock_search.search = AsyncMock(return_value="$100.00")
@@ -217,7 +217,7 @@ class TestEbayLookupTool:
 
     async def test_includes_condition_in_query(self):
         """Should include condition in search query when provided."""
-        from agentic_scraper.skills.ebay_lookup import EbayLookupTool
+        from poob.skills.ebay_lookup import EbayLookupTool
 
         mock_search = AsyncMock()
         mock_search.search = AsyncMock(return_value="$200.00")

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agentic_scraper.scanner.patrol_scheduler import PatrolScheduler
+from poob.scanner.patrol_scheduler import PatrolScheduler
 
 
 @pytest.fixture

@@ -10,10 +10,10 @@ import pytest
 class TestOllamaProvider:
     """Tests for OllamaProvider initialization and format/num_ctx support."""
 
-    @patch("agentic_scraper.llm.ollama_provider.ChatOllama")
+    @patch("poob.llm.ollama_provider.ChatOllama")
     def test_basic_init(self, mock_chat_cls):
         """OllamaProvider creates ChatOllama with basic args."""
-        from agentic_scraper.llm.ollama_provider import OllamaProvider
+        from poob.llm.ollama_provider import OllamaProvider
 
         provider = OllamaProvider(
             model="qwen3:8b",
@@ -26,10 +26,10 @@ class TestOllamaProvider:
             temperature=0.3,
         )
 
-    @patch("agentic_scraper.llm.ollama_provider.ChatOllama")
+    @patch("poob.llm.ollama_provider.ChatOllama")
     def test_format_json_passthrough(self, mock_chat_cls):
         """format='json' is passed through to ChatOllama."""
-        from agentic_scraper.llm.ollama_provider import OllamaProvider
+        from poob.llm.ollama_provider import OllamaProvider
 
         OllamaProvider(
             model="qwen3:8b",
@@ -44,10 +44,10 @@ class TestOllamaProvider:
             format="json",
         )
 
-    @patch("agentic_scraper.llm.ollama_provider.ChatOllama")
+    @patch("poob.llm.ollama_provider.ChatOllama")
     def test_num_ctx_passthrough(self, mock_chat_cls):
         """num_ctx is passed through to ChatOllama."""
-        from agentic_scraper.llm.ollama_provider import OllamaProvider
+        from poob.llm.ollama_provider import OllamaProvider
 
         OllamaProvider(
             model="qwen3:8b",
@@ -62,10 +62,10 @@ class TestOllamaProvider:
             num_ctx=12000,
         )
 
-    @patch("agentic_scraper.llm.ollama_provider.ChatOllama")
+    @patch("poob.llm.ollama_provider.ChatOllama")
     def test_format_and_num_ctx_combined(self, mock_chat_cls):
         """Both format and num_ctx can be set together."""
-        from agentic_scraper.llm.ollama_provider import OllamaProvider
+        from poob.llm.ollama_provider import OllamaProvider
 
         OllamaProvider(
             model="qwen3:8b",
@@ -82,10 +82,10 @@ class TestOllamaProvider:
             num_ctx=12000,
         )
 
-    @patch("agentic_scraper.llm.ollama_provider.ChatOllama")
+    @patch("poob.llm.ollama_provider.ChatOllama")
     def test_none_format_omitted(self, mock_chat_cls):
         """format=None should not pass 'format' key to ChatOllama."""
-        from agentic_scraper.llm.ollama_provider import OllamaProvider
+        from poob.llm.ollama_provider import OllamaProvider
 
         OllamaProvider(
             model="qwen3:8b",
@@ -98,10 +98,10 @@ class TestOllamaProvider:
         assert "format" not in call_kwargs
         assert "num_ctx" not in call_kwargs
 
-    @patch("agentic_scraper.llm.ollama_provider.ChatOllama")
+    @patch("poob.llm.ollama_provider.ChatOllama")
     def test_model_name_property(self, mock_chat_cls):
         """model_name returns the configured model string."""
-        from agentic_scraper.llm.ollama_provider import OllamaProvider
+        from poob.llm.ollama_provider import OllamaProvider
 
         provider = OllamaProvider(
             model="qwen3:8b",
@@ -114,12 +114,12 @@ class TestOllamaProvider:
 class TestProviderFactory:
     """Tests for the provider factory functions."""
 
-    @patch("agentic_scraper.llm.ollama_provider.ChatOllama")
+    @patch("poob.llm.ollama_provider.ChatOllama")
     def test_create_llm_provider_ollama(self, mock_chat_cls):
         """create_llm_provider returns OllamaProvider for 'ollama'."""
-        from agentic_scraper.config import AppConfig
-        from agentic_scraper.llm.ollama_provider import OllamaProvider
-        from agentic_scraper.llm.provider import create_llm_provider
+        from poob.config import AppConfig
+        from poob.llm.ollama_provider import OllamaProvider
+        from poob.llm.provider import create_llm_provider
 
         config = AppConfig(
             discord_bot_token="test",
@@ -131,8 +131,8 @@ class TestProviderFactory:
 
     def test_create_llm_provider_unknown(self):
         """create_llm_provider raises ValueError for unknown provider."""
-        from agentic_scraper.config import AppConfig
-        from agentic_scraper.llm.provider import create_llm_provider
+        from poob.config import AppConfig
+        from poob.llm.provider import create_llm_provider
 
         config = AppConfig(
             discord_bot_token="test",
@@ -144,8 +144,8 @@ class TestProviderFactory:
 
     def test_create_cloud_provider_no_key(self):
         """create_cloud_provider returns None when no API key is set."""
-        from agentic_scraper.config import AppConfig
-        from agentic_scraper.llm.provider import create_cloud_provider
+        from poob.config import AppConfig
+        from poob.llm.provider import create_cloud_provider
 
         config = AppConfig(
             discord_bot_token="test",
@@ -154,12 +154,12 @@ class TestProviderFactory:
         )
         assert create_cloud_provider(config) is None
 
-    @patch("agentic_scraper.llm.gemini_provider.ChatGoogleGenerativeAI")
+    @patch("poob.llm.gemini_provider.ChatGoogleGenerativeAI")
     def test_create_cloud_provider_with_key(self, mock_chat_cls):
         """create_cloud_provider returns GeminiProvider when key is set."""
-        from agentic_scraper.config import AppConfig
-        from agentic_scraper.llm.gemini_provider import GeminiProvider
-        from agentic_scraper.llm.provider import create_cloud_provider
+        from poob.config import AppConfig
+        from poob.llm.gemini_provider import GeminiProvider
+        from poob.llm.provider import create_cloud_provider
 
         config = AppConfig(
             discord_bot_token="test",

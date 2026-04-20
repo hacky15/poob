@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agentic_scraper.skills.models import PriceLookupResult
+from poob.skills.models import PriceLookupResult
 
 
 class TestRetailLookupTool:
@@ -15,7 +15,7 @@ class TestRetailLookupTool:
 
     async def test_extracts_price_from_search_results(self):
         """Should find retail price from web search results."""
-        from agentic_scraper.skills.retail_lookup import RetailLookupTool
+        from poob.skills.retail_lookup import RetailLookupTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=MagicMock(content=json.dumps({
@@ -38,7 +38,7 @@ class TestRetailLookupTool:
 
     async def test_handles_no_price_found(self):
         """Should return zero-confidence result when no price is found."""
-        from agentic_scraper.skills.retail_lookup import RetailLookupTool
+        from poob.skills.retail_lookup import RetailLookupTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=MagicMock(content=json.dumps({
@@ -57,7 +57,7 @@ class TestRetailLookupTool:
 
     async def test_handles_search_failure(self):
         """Should return empty result when search fails."""
-        from agentic_scraper.skills.retail_lookup import RetailLookupTool
+        from poob.skills.retail_lookup import RetailLookupTool
 
         llm = MagicMock()
 
@@ -72,7 +72,7 @@ class TestRetailLookupTool:
 
     async def test_handles_empty_search_results(self):
         """Should return empty result when search returns no text."""
-        from agentic_scraper.skills.retail_lookup import RetailLookupTool
+        from poob.skills.retail_lookup import RetailLookupTool
 
         llm = MagicMock()
 
@@ -87,7 +87,7 @@ class TestRetailLookupTool:
 
     async def test_builds_search_query_with_brand(self):
         """Should include brand in search query when provided."""
-        from agentic_scraper.skills.retail_lookup import RetailLookupTool
+        from poob.skills.retail_lookup import RetailLookupTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=MagicMock(content=json.dumps({
@@ -107,7 +107,7 @@ class TestRetailLookupTool:
 
     async def test_handles_llm_error(self):
         """Should return zero-confidence when LLM extraction fails."""
-        from agentic_scraper.skills.retail_lookup import RetailLookupTool
+        from poob.skills.retail_lookup import RetailLookupTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(side_effect=RuntimeError("LLM error"))
@@ -122,7 +122,7 @@ class TestRetailLookupTool:
 
     async def test_parse_llm_json_with_code_fence(self):
         """Should handle LLM responses wrapped in markdown code fences."""
-        from agentic_scraper.skills.retail_lookup import RetailLookupTool
+        from poob.skills.retail_lookup import RetailLookupTool
 
         fenced = '```json\n{"retail_price": 299.99, "confidence": 0.8}\n```'
         result = RetailLookupTool._parse_llm_response(fenced, "test query")

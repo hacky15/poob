@@ -63,8 +63,8 @@ pip install silero-vad onnxruntime numpy
 | min_interruption_ms | 500 | Prevents stopping on brief noises |
 
 ### Files to Change
-- `src/agentic_scraper/voice/audio_buffer.py` — Replace `rms_energy()` VAD with `SileroVADProcessor`
-- `src/agentic_scraper/voice/session.py` — Update echo suppression to use speech probability
+- `src/poob/voice/audio_buffer.py` — Replace `rms_energy()` VAD with `SileroVADProcessor`
+- `src/poob/voice/session.py` — Update echo suppression to use speech probability
 - `pyproject.toml` — Add silero-vad, onnxruntime deps
 
 ## Phase 2: Filler Audio (Cheapest UX Win)
@@ -79,8 +79,8 @@ Play pre-generated "thinking" sounds immediately when end-of-speech fires, maski
 4. When actual response audio is ready, crossfade 50-100ms from filler to response
 
 ### Files to Change
-- `src/agentic_scraper/voice/session.py` — Add filler playback in `_on_utterance_detected`
-- `src/agentic_scraper/voice/fillers.py` — New module for filler generation and management
+- `src/poob/voice/session.py` — Add filler playback in `_on_utterance_detected`
+- `src/poob/voice/fillers.py` — New module for filler generation and management
 
 ## Phase 3: Local TTS with Kokoro-82M (Eliminate 0.8-1.2s Network Latency)
 
@@ -110,8 +110,8 @@ Keep Edge TTS as fallback when Kokoro unavailable (GPU busy, model not loaded).
 | OS + Discord + misc | ~3.9 GB |
 
 ### Files to Change
-- `src/agentic_scraper/voice/tts.py` — Add KokoroTTSProvider
-- `src/agentic_scraper/main.py` — Wire Kokoro as primary TTS
+- `src/poob/voice/tts.py` — Add KokoroTTSProvider
+- `src/poob/main.py` — Wire Kokoro as primary TTS
 - `pyproject.toml` — Add kokoro dep
 
 ## Phase 4: LLM→TTS Sentence Streaming Overlap

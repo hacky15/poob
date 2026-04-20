@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from agentic_scraper.sites.facebook.parser import (
+from poob.sites.facebook.parser import (
     _merge_marketplace_urls,
     _parse_csv_listings,
     _parse_json_robust,
@@ -236,7 +236,7 @@ class TestEmbeddedPriceRescue:
 
     def test_just_listed_with_embedded_price(self):
         """FB concatenates 'Just listed$200Title' — should rescue price."""
-        from agentic_scraper.sites.facebook.parser import _dict_to_listing
+        from poob.sites.facebook.parser import _dict_to_listing
 
         listing = _dict_to_listing(
             {"title": "Just listed$200Haaka 30 pound sausage stuffer", "price": None},
@@ -249,7 +249,7 @@ class TestEmbeddedPriceRescue:
 
     def test_embedded_price_with_comma(self):
         """Should handle $1,500 embedded in title."""
-        from agentic_scraper.sites.facebook.parser import _dict_to_listing
+        from poob.sites.facebook.parser import _dict_to_listing
 
         listing = _dict_to_listing(
             {"title": "$1,500Samsung 65 inch TV", "price": None},
@@ -260,7 +260,7 @@ class TestEmbeddedPriceRescue:
 
     def test_no_embedded_price_leaves_title_alone(self):
         """Title without $ should not be modified."""
-        from agentic_scraper.sites.facebook.parser import _dict_to_listing
+        from poob.sites.facebook.parser import _dict_to_listing
 
         listing = _dict_to_listing(
             {"title": "Free couch good condition", "price": None},
@@ -271,7 +271,7 @@ class TestEmbeddedPriceRescue:
 
     def test_normal_price_not_modified(self):
         """When price is already set, title should not be touched."""
-        from agentic_scraper.sites.facebook.parser import _dict_to_listing
+        from poob.sites.facebook.parser import _dict_to_listing
 
         listing = _dict_to_listing(
             {"title": "PS5 Console", "price": 350.0},
@@ -282,7 +282,7 @@ class TestEmbeddedPriceRescue:
 
     def test_listed_ago_prefix_stripped(self):
         """Should strip 'Listed 2h ago' prefix along with price."""
-        from agentic_scraper.sites.facebook.parser import _dict_to_listing
+        from poob.sites.facebook.parser import _dict_to_listing
 
         listing = _dict_to_listing(
             {"title": "Listed 2h ago$50Nice lamp", "price": None},

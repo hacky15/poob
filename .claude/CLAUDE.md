@@ -31,11 +31,11 @@ Autonomous deal-hunting bot that monitors Facebook Marketplace, evaluates listin
 
 **Before changing any architectural component, read `docs/technical_notes.md` for the rationale behind the current design. Before finishing, update it if the architecture changed.**
 
-- **src layout:** All source code under `src/agentic_scraper/`
+- **src layout:** All source code under `src/poob/`
 - **Protocol-based interfaces** (not ABC) for all extension points (SiteAdapter, LLMProvider)
 - **Async-first:** Every I/O operation is async
 - **Dependency injection:** Components receive dependencies via constructor
-- **Plugin system:** Site adapters auto-discovered from `src/agentic_scraper/sites/` subdirectories
+- **Plugin system:** Site adapters auto-discovered from `src/poob/sites/` subdirectories
 - **LLM provider cascade:** Agent brain uses Groq → NVIDIA NIM → Gemini → Ollama (fastest-first)
 - **VLM evaluation pipeline:** Text triage → visual enrichment → VLM deep evaluation (Gemini Flash → Groq Vision → Gemini Pro → OpenRouter → Ollama)
 - **Dual interaction model:** Patrol engine runs autonomously; Discord bot provides conversational agent with tool-calling
@@ -75,7 +75,7 @@ Autonomous deal-hunting bot that monitors Facebook Marketplace, evaluates listin
 4. **Debugging**: Check `docs/technical_notes.md` "Common Pitfalls" section FIRST — the bug you're looking at may already be documented with a fix
 
 ## Adding a New Site Adapter
-1. Create `src/agentic_scraper/sites/<site_name>/` directory
+1. Create `src/poob/sites/<site_name>/` directory
 2. Implement `adapter.py` with a class satisfying `SiteAdapter` protocol
 3. Implement `prompts.py` with LLM task prompts for navigation
 4. Implement `parser.py` for listing extraction from agent output
@@ -106,7 +106,7 @@ Autonomous deal-hunting bot that monitors Facebook Marketplace, evaluates listin
 - `pip install -e ".[dev]"` to install in dev mode
 - `playwright install` to install browser binaries
 - Copy `.env.example` to `.env` and fill in values
-- `python -m agentic_scraper.main` to start
+- `python -m poob.main` to start
 - `pytest` to run tests
 
 ## Reminder: Read and Update the Docs

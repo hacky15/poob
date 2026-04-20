@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agentic_scraper.browser.page_actions import (
+from poob.browser.page_actions import (
     evaluate_js,
     extract_page_text,
     navigate_and_wait,
@@ -37,7 +37,7 @@ class TestNavigateAndWait:
     async def test_applies_delay_after_navigation(self, mock_page):
         """Should pause after navigation to let content load."""
         with patch(
-            "agentic_scraper.browser.page_actions.random_delay", new_callable=AsyncMock
+            "poob.browser.page_actions.random_delay", new_callable=AsyncMock
         ) as mock_delay:
             await navigate_and_wait(mock_page, "https://example.com", wait_ms=2000)
             mock_delay.assert_called_once()
@@ -48,7 +48,7 @@ class TestNavigateAndWait:
     async def test_default_wait_ms(self, mock_page):
         """Should use 3000ms as default wait time."""
         with patch(
-            "agentic_scraper.browser.page_actions.random_delay", new_callable=AsyncMock
+            "poob.browser.page_actions.random_delay", new_callable=AsyncMock
         ) as mock_delay:
             await navigate_and_wait(mock_page, "https://example.com")
             args = mock_delay.call_args[0]
@@ -62,7 +62,7 @@ class TestScrollPage:
         """Should call page.evaluate() for each scroll step."""
         pattern = [("down", 300, 500), ("up", 100, 300)]
         with patch(
-            "agentic_scraper.browser.page_actions.random_delay", new_callable=AsyncMock
+            "poob.browser.page_actions.random_delay", new_callable=AsyncMock
         ):
             await scroll_page(mock_page, pattern)
         assert mock_page.evaluate.call_count == 2
@@ -71,7 +71,7 @@ class TestScrollPage:
         """Scrolling down should use positive pixel value."""
         pattern = [("down", 400, 500)]
         with patch(
-            "agentic_scraper.browser.page_actions.random_delay", new_callable=AsyncMock
+            "poob.browser.page_actions.random_delay", new_callable=AsyncMock
         ):
             await scroll_page(mock_page, pattern)
         js_call = mock_page.evaluate.call_args[0][0]
@@ -81,7 +81,7 @@ class TestScrollPage:
         """Scrolling up should use negative pixel value."""
         pattern = [("up", 200, 500)]
         with patch(
-            "agentic_scraper.browser.page_actions.random_delay", new_callable=AsyncMock
+            "poob.browser.page_actions.random_delay", new_callable=AsyncMock
         ):
             await scroll_page(mock_page, pattern)
         js_call = mock_page.evaluate.call_args[0][0]
@@ -91,7 +91,7 @@ class TestScrollPage:
         """Should delay between each scroll step."""
         pattern = [("down", 300, 500), ("down", 200, 400)]
         with patch(
-            "agentic_scraper.browser.page_actions.random_delay", new_callable=AsyncMock
+            "poob.browser.page_actions.random_delay", new_callable=AsyncMock
         ) as mock_delay:
             await scroll_page(mock_page, pattern)
         assert mock_delay.call_count == 2

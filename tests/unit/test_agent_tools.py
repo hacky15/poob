@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agentic_scraper.storage.models import Deal, DealScore, Listing, WatchItem
-from agentic_scraper.storage.repositories.preferences_repo import UserPreferencesRepository
-from agentic_scraper.storage.repositories.watchlist_repo import WatchlistRepository
+from poob.storage.models import Deal, DealScore, Listing, WatchItem
+from poob.storage.repositories.preferences_repo import UserPreferencesRepository
+from poob.storage.repositories.watchlist_repo import WatchlistRepository
 
 
 @pytest.fixture
@@ -62,7 +62,7 @@ def _build_tools(
     user_id, channel_id, prefs_repo, watchlist_repo, deal_repo, listing_repo,
     scheduler, scan_log_repo=None,
 ):
-    from agentic_scraper.agent.tools import build_tools
+    from poob.agent.tools import build_tools
 
     return build_tools(
         discord_user_id=user_id,

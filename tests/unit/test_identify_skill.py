@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agentic_scraper.skills.models import ItemIdentification, clean_optional
+from poob.skills.models import ItemIdentification, clean_optional
 
 
 def _make_llm_response(data: dict) -> MagicMock:
@@ -22,7 +22,7 @@ class TestIdentifyItemTool:
 
     async def test_identifies_specific_product(self):
         """Should extract brand, model, and category from clear title."""
-        from agentic_scraper.skills.identify import IdentifyItemTool
+        from poob.skills.identify import IdentifyItemTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=_make_llm_response({
@@ -47,7 +47,7 @@ class TestIdentifyItemTool:
 
     async def test_vague_title_flags_needs_visual(self):
         """Vague titles should have low confidence and needs_visual=True."""
-        from agentic_scraper.skills.identify import IdentifyItemTool
+        from poob.skills.identify import IdentifyItemTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=_make_llm_response({
@@ -69,7 +69,7 @@ class TestIdentifyItemTool:
 
     async def test_detects_condition_from_text(self):
         """Should extract condition keywords like 'broken', 'for parts'."""
-        from agentic_scraper.skills.identify import IdentifyItemTool
+        from poob.skills.identify import IdentifyItemTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=_make_llm_response({
@@ -91,7 +91,7 @@ class TestIdentifyItemTool:
 
     async def test_handles_llm_error_gracefully(self):
         """Should return low-confidence result when LLM fails."""
-        from agentic_scraper.skills.identify import IdentifyItemTool
+        from poob.skills.identify import IdentifyItemTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(side_effect=RuntimeError("LLM timeout"))
@@ -105,7 +105,7 @@ class TestIdentifyItemTool:
 
     async def test_handles_malformed_json(self):
         """Should return low-confidence result when LLM returns bad JSON."""
-        from agentic_scraper.skills.identify import IdentifyItemTool
+        from poob.skills.identify import IdentifyItemTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=_make_llm_response({}))
@@ -120,7 +120,7 @@ class TestIdentifyItemTool:
 
     async def test_passes_title_and_description_to_llm(self):
         """The LLM prompt should contain both title and description."""
-        from agentic_scraper.skills.identify import IdentifyItemTool
+        from poob.skills.identify import IdentifyItemTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=_make_llm_response({
@@ -143,7 +143,7 @@ class TestIdentifyItemTool:
 
     async def test_distinguishes_accessory_from_main_item(self):
         """Should correctly identify 'PS5 controller' as controller, not console."""
-        from agentic_scraper.skills.identify import IdentifyItemTool
+        from poob.skills.identify import IdentifyItemTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=_make_llm_response({
@@ -164,7 +164,7 @@ class TestIdentifyItemTool:
 
     async def test_detects_urgency_signals(self):
         """Should extract urgency signals from listing text."""
-        from agentic_scraper.skills.identify import IdentifyItemTool
+        from poob.skills.identify import IdentifyItemTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=_make_llm_response({
@@ -192,7 +192,7 @@ class TestIdentifyItemTool:
 
     async def test_empty_urgency_signals(self):
         """Should return empty tuple when no urgency signals found."""
-        from agentic_scraper.skills.identify import IdentifyItemTool
+        from poob.skills.identify import IdentifyItemTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=_make_llm_response({
@@ -211,7 +211,7 @@ class TestIdentifyItemTool:
 
     async def test_missing_urgency_signals_field(self):
         """Should default to empty tuple when LLM omits urgency_signals."""
-        from agentic_scraper.skills.identify import IdentifyItemTool
+        from poob.skills.identify import IdentifyItemTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=_make_llm_response({
@@ -228,7 +228,7 @@ class TestIdentifyItemTool:
 
     async def test_null_string_brand_sanitized(self):
         """LLM returning the string 'null' for brand should become None."""
-        from agentic_scraper.skills.identify import IdentifyItemTool
+        from poob.skills.identify import IdentifyItemTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=_make_llm_response({
@@ -249,7 +249,7 @@ class TestIdentifyItemTool:
 
     async def test_none_string_brand_sanitized(self):
         """LLM returning the string 'None' for brand should become None."""
-        from agentic_scraper.skills.identify import IdentifyItemTool
+        from poob.skills.identify import IdentifyItemTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=_make_llm_response({

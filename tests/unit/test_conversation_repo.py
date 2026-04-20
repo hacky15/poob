@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from agentic_scraper.storage.repositories.conversation_repo import ConversationRepository
+from poob.storage.repositories.conversation_repo import ConversationRepository
 
 
 class TestConversationRepository:

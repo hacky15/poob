@@ -10,9 +10,9 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
-from agentic_scraper.config import AppConfig
-from agentic_scraper.scanner.interest_matcher import InterestMatcher
-from agentic_scraper.storage.models import Deal, DealScore, Listing, ScanLog, WatchItem
+from poob.config import AppConfig
+from poob.scanner.interest_matcher import InterestMatcher
+from poob.storage.models import Deal, DealScore, Listing, ScanLog, WatchItem
 
 
 # --- Fixtures ---
@@ -128,7 +128,7 @@ def mock_notifier():
 
 def _default_vlm_eval():
     """Default VLMEvaluation for mocks."""
-    from agentic_scraper.skills.models import VLMEvaluation
+    from poob.skills.models import VLMEvaluation
     return VLMEvaluation(
         item_identified="Generic Item",
         condition="good",
@@ -163,7 +163,7 @@ def patrol_engine(
     mock_smart_deal_radar,
     interest_matcher,
 ):
-    from agentic_scraper.scanner.patrol_engine import PatrolEngine
+    from poob.scanner.patrol_engine import PatrolEngine
 
     return PatrolEngine(
         browser_manager=mock_browser_manager,
@@ -223,7 +223,7 @@ class TestSweepAndIntercept:
     @pytest.mark.asyncio
     async def test_graphql_data_preferred_over_dom(self, patrol_engine, mock_listing_repo):
         """When JS interceptor captures GraphQL responses, that data should be primary."""
-        from agentic_scraper.scanner.patrol_engine import PatrolCycleResult
+        from poob.scanner.patrol_engine import PatrolCycleResult
 
         page = await patrol_engine._browser.get_page()
 
@@ -706,7 +706,7 @@ class TestScanLogging:
 class TestPatrolCycleResult:
     @pytest.mark.asyncio
     async def test_returns_result_dataclass(self, patrol_engine, mock_listing_repo):
-        from agentic_scraper.scanner.patrol_engine import PatrolCycleResult
+        from poob.scanner.patrol_engine import PatrolCycleResult
 
         mock_listing_repo.filter_new_ids = AsyncMock(return_value=set())
 
@@ -851,8 +851,8 @@ class TestSortVerification:
 class TestGraphQLTimestampParsing:
     def test_creation_time_parsed_to_posted_at(self):
         """GraphQL creation_time should be parsed into Listing.posted_at."""
-        from agentic_scraper.browser.graphql_interceptor import GraphQLListingData
-        from agentic_scraper.scanner.patrol_engine import _graphql_to_listing
+        from poob.browser.graphql_interceptor import GraphQLListingData
+        from poob.scanner.patrol_engine import _graphql_to_listing
 
         gql = GraphQLListingData(
             external_id="123",
@@ -866,8 +866,8 @@ class TestGraphQLTimestampParsing:
 
     def test_invalid_creation_time_sets_none(self):
         """Invalid creation_time should result in posted_at=None."""
-        from agentic_scraper.browser.graphql_interceptor import GraphQLListingData
-        from agentic_scraper.scanner.patrol_engine import _graphql_to_listing
+        from poob.browser.graphql_interceptor import GraphQLListingData
+        from poob.scanner.patrol_engine import _graphql_to_listing
 
         gql = GraphQLListingData(
             external_id="123",
@@ -879,8 +879,8 @@ class TestGraphQLTimestampParsing:
 
     def test_no_creation_time_sets_none(self):
         """Missing creation_time should result in posted_at=None."""
-        from agentic_scraper.browser.graphql_interceptor import GraphQLListingData
-        from agentic_scraper.scanner.patrol_engine import _graphql_to_listing
+        from poob.browser.graphql_interceptor import GraphQLListingData
+        from poob.scanner.patrol_engine import _graphql_to_listing
 
         gql = GraphQLListingData(external_id="123", title="Test Item")
         listing = _graphql_to_listing(gql)
@@ -892,14 +892,14 @@ class TestGraphQLTimestampParsing:
 
 class TestFreshnessParsing:
     def test_just_listed(self):
-        from agentic_scraper.sites.facebook.parser import _parse_freshness
+        from poob.sites.facebook.parser import _parse_freshness
 
         result = _parse_freshness("Just listed")
         assert result is not None
         assert (datetime.now(timezone.utc) - result).total_seconds() < 5
 
     def test_minutes_ago(self):
-        from agentic_scraper.sites.facebook.parser import _parse_freshness
+        from poob.sites.facebook.parser import _parse_freshness
 
         result = _parse_freshness("Listed 30 minutes ago")
         assert result is not None
@@ -907,7 +907,7 @@ class TestFreshnessParsing:
         assert 1700 < diff < 1900  # ~30 minutes
 
     def test_hours_ago(self):
-        from agentic_scraper.sites.facebook.parser import _parse_freshness
+        from poob.sites.facebook.parser import _parse_freshness
 
         result = _parse_freshness("Listed 2 hours ago")
         assert result is not None
@@ -915,7 +915,7 @@ class TestFreshnessParsing:
         assert 7000 < diff < 7400  # ~2 hours
 
     def test_yesterday(self):
-        from agentic_scraper.sites.facebook.parser import _parse_freshness
+        from poob.sites.facebook.parser import _parse_freshness
 
         result = _parse_freshness("Listed yesterday")
         assert result is not None
@@ -923,7 +923,7 @@ class TestFreshnessParsing:
         assert 85000 < diff < 87000  # ~24 hours
 
     def test_days_ago(self):
-        from agentic_scraper.sites.facebook.parser import _parse_freshness
+        from poob.sites.facebook.parser import _parse_freshness
 
         result = _parse_freshness("Listed 3 days ago")
         assert result is not None
@@ -931,12 +931,12 @@ class TestFreshnessParsing:
         assert 258000 < diff < 260000  # ~3 days
 
     def test_empty_string(self):
-        from agentic_scraper.sites.facebook.parser import _parse_freshness
+        from poob.sites.facebook.parser import _parse_freshness
 
         assert _parse_freshness("") is None
 
     def test_unknown_format(self):
-        from agentic_scraper.sites.facebook.parser import _parse_freshness
+        from poob.sites.facebook.parser import _parse_freshness
 
         assert _parse_freshness("Some random text") is None
 
@@ -955,9 +955,10 @@ class TestWatchlistExemption:
         mock_deal_repo,
         mock_notifier,
     ):
-        """Watchlist-matched listings without timestamps should survive stale filter."""
-        # Listing from DOM keyword search — no freshness tag → posted_at=None
-        listing = _make_listing("111", title="PS5 Console Bundle", price=300.0, posted_at=None)
+        """Watchlist-matched listings need timestamps to be notified (freshness gate)."""
+        # Listing needs a timestamp — freshness gate blocks NO_TS listings
+        listing = _make_listing("111", title="PS5 Console Bundle", price=300.0,
+                                posted_at=datetime.now(timezone.utc) - timedelta(hours=1))
         interest = _make_interest("watch-1", "PS5", 500.0, discord_user_id="987654321")
 
         watchlist_deal = Deal(
@@ -1030,12 +1031,13 @@ class TestWatchlistExemption:
         mock_deal_repo,
         mock_notifier,
     ):
-        """Mix of timestamped, no-timestamp matching, and no-timestamp non-matching."""
+        """Mix of timestamped and no-timestamp listings. Freshness gate blocks NO_TS from notification."""
         now = datetime.now(timezone.utc)
         # Fresh listing with timestamp (passes filter normally)
         fresh = _make_listing("111", title="Table", price=50.0, posted_at=now)
-        # No timestamp but matches watchlist (should be exempted)
-        exempt = _make_listing("222", title="PS5 Disc Edition", price=250.0, posted_at=None)
+        # Watchlist match with timestamp (should be notified)
+        exempt = _make_listing("222", title="PS5 Disc Edition", price=250.0,
+                                posted_at=now - timedelta(hours=1))
         # No timestamp, doesn't match watchlist (should be discarded)
         discard = _make_listing("333", title="Random Junk", price=10.0, posted_at=None)
 
@@ -1083,7 +1085,7 @@ class TestWatchlistSweepMultiConfig:
         item.search_configs = []
         mock_watchlist_repo.list_active = AsyncMock(return_value=[item])
 
-        from agentic_scraper.scanner.patrol_engine import PatrolCycleResult
+        from poob.scanner.patrol_engine import PatrolCycleResult
 
         with patch.object(
             patrol_engine._scanner, "sweep_search", new_callable=AsyncMock
@@ -1115,7 +1117,7 @@ class TestWatchlistSweepMultiConfig:
         ]
         mock_watchlist_repo.list_active = AsyncMock(return_value=[item])
 
-        from agentic_scraper.scanner.patrol_engine import PatrolCycleResult
+        from poob.scanner.patrol_engine import PatrolCycleResult
 
         with patch.object(
             patrol_engine._scanner, "sweep_search", new_callable=AsyncMock
@@ -1159,7 +1161,7 @@ class TestWatchlistSweepMultiConfig:
         mock_watchlist_repo.list_active = AsyncMock(return_value=[item])
         same_listing = _make_listing("111", title="Desk")
 
-        from agentic_scraper.scanner.patrol_engine import PatrolCycleResult
+        from poob.scanner.patrol_engine import PatrolCycleResult
 
         with patch.object(
             patrol_engine._scanner, "sweep_search", new_callable=AsyncMock

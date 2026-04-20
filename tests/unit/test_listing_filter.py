@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from agentic_scraper.scanner.listing_filter import (
+from poob.scanner.listing_filter import (
     CategoryFilter,
     FilterChain,
     FilterResult,
@@ -21,7 +21,7 @@ from agentic_scraper.scanner.listing_filter import (
     GeoDistanceFilter,
     SponsoredFilter,
 )
-from agentic_scraper.storage.models import Listing
+from poob.storage.models import Listing
 
 
 # ---------------------------------------------------------------------------

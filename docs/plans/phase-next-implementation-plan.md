@@ -17,7 +17,7 @@ These bugs mean listings are evaluated with missing/wrong data. Everything downs
 ### 1A. Fix `listing_repo.py` ON CONFLICT Clause (5 min, zero risk)
 
 **Problem:** Enriched `description` and `posted_at` are silently dropped on upsert.
-**File:** `src/agentic_scraper/storage/repositories/listing_repo.py` lines 36-45
+**File:** `src/poob/storage/repositories/listing_repo.py` lines 36-45
 **Fix:** Add missing fields to UPDATE SET:
 ```sql
 ON CONFLICT(site, external_id) DO UPDATE SET
@@ -39,7 +39,7 @@ Use COALESCE so enrichment fills gaps but never overwrites existing good data.
 ### 1B. Fix GraphQL Price Cents Conversion (10 min, zero risk)
 
 **Problem:** `amount_with_offset_amount` is in CENTS but parsed as dollars (100x inflation).
-**File:** `src/agentic_scraper/browser/graphql_interceptor.py` lines ~207-216
+**File:** `src/poob/browser/graphql_interceptor.py` lines ~207-216
 **Fix:**
 ```python
 # Try dollar amount first (most common)
@@ -66,7 +66,7 @@ if not amount_str:
 ### 1C. Fix VLM Voting Early-Exit False Demotions (10 min, zero risk)
 
 **Problem:** When 2/3 voters agree and the 3rd task is cancelled, the cancellation increments consecutive failure counter → healthy providers get demoted for 10 minutes.
-**File:** `src/agentic_scraper/llm/vlm_cascade.py` — voting phase, task cancellation handler
+**File:** `src/poob/llm/vlm_cascade.py` — voting phase, task cancellation handler
 **Fix:** When cancelling tasks due to early exit, do NOT increment failure counter. Add a flag or check the cancellation reason.
 **Verify:** Check logs for `vlm.voting_partial_failures` — cancelled providers should not appear in `_demoted_until` shortly after.
 
@@ -110,7 +110,7 @@ if not amount_str:
 ### 2B. Add `posted_at` to Triage Context (5 min)
 
 **Problem:** Triage LLM doesn't know how fresh a listing is — can't weight urgency by recency.
-**File:** `src/agentic_scraper/skills/text_triage.py` — `_build_listings_block()`
+**File:** `src/poob/skills/text_triage.py` — `_build_listings_block()`
 **Fix:** Add `Posted: {posted_at or "Unknown"}` to the listing block between Condition and Location.
 **Impact:** Triage can now prefer "Listed 1 hour ago" over "Listed yesterday". Low risk — additive context only.
 
@@ -121,7 +121,7 @@ if not amount_str:
 ### 3A. Add Images-Per-Minute (IPM) Tracking
 
 **Problem:** Google AI Studio has undocumented IPM limit (~2-10/min free tier). Bursting evaluations exhausts it before daily RPD.
-**File:** `src/agentic_scraper/llm/vlm_cascade.py`
+**File:** `src/poob/llm/vlm_cascade.py`
 **Implementation:**
 - Add `_ipm_window: deque[float]` (timestamps of recent image submissions) per provider
 - Before each VLM call, check if images sent in last 60s exceeds provider's IPM limit
@@ -282,16 +282,16 @@ Run a full patrol cycle and verify:
 ## Files to Create/Modify
 
 ### New Files:
-- `src/agentic_scraper/browser/detail_interceptor.py` — GraphQL intercept for detail pages
+- `src/poob/browser/detail_interceptor.py` — GraphQL intercept for detail pages
 - Provider adapters for Together.ai, Mistral, Cloudflare (in `llm/vlm_cascade.py` or separate files)
-- `src/agentic_scraper/search/google_cse.py` — Google Custom Search
-- `src/agentic_scraper/search/mojeek.py` — Mojeek search
+- `src/poob/search/google_cse.py` — Google Custom Search
+- `src/poob/search/mojeek.py` — Mojeek search
 
 ### Modified Files:
-- `src/agentic_scraper/storage/repositories/listing_repo.py` — Fix ON CONFLICT (1A)
-- `src/agentic_scraper/browser/graphql_interceptor.py` — Fix cents conversion (1B)
-- `src/agentic_scraper/llm/vlm_cascade.py` — Fix demotions (1C), add IPM (3A), add providers (3B), budget (3C)
-- `src/agentic_scraper/sites/facebook/detail_extractor.py` — Replace OG/JSON-LD with interceptor (2A)
-- `src/agentic_scraper/skills/text_triage.py` — Add posted_at to context (2B)
-- `src/agentic_scraper/skills/web_search.py` — Add new search providers (4A/4B)
-- `src/agentic_scraper/config.py` — New API keys and provider configs
+- `src/poob/storage/repositories/listing_repo.py` — Fix ON CONFLICT (1A)
+- `src/poob/browser/graphql_interceptor.py` — Fix cents conversion (1B)
+- `src/poob/llm/vlm_cascade.py` — Fix demotions (1C), add IPM (3A), add providers (3B), budget (3C)
+- `src/poob/sites/facebook/detail_extractor.py` — Replace OG/JSON-LD with interceptor (2A)
+- `src/poob/skills/text_triage.py` — Add posted_at to context (2B)
+- `src/poob/skills/web_search.py` — Add new search providers (4A/4B)
+- `src/poob/config.py` — New API keys and provider configs

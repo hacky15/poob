@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from agentic_scraper.skills.ebay_lookup import compute_price_stats
-from agentic_scraper.skills.orchestrator import (
+from poob.skills.ebay_lookup import compute_price_stats
+from poob.skills.orchestrator import (
     _build_validated_ebay_query,
     _extract_seller_stated_price,
     _get_unbranded_value_cap,
@@ -18,8 +18,8 @@ from agentic_scraper.skills.orchestrator import (
     _word_overlap_ratio,
     extract_condition_signals,
 )
-from agentic_scraper.skills.models import PriceLookupResult, VisualEnrichment
-from agentic_scraper.storage.models import Listing
+from poob.skills.models import PriceLookupResult, VisualEnrichment
+from poob.storage.models import Listing
 
 
 # --- _build_validated_ebay_query ---
@@ -621,49 +621,49 @@ class TestExtractModelNumber:
 
     def test_sony_headphones(self):
         """Standard alphanumeric model: WH-1000XM4."""
-        from agentic_scraper.skills.orchestrator import extract_model_numbers
+        from poob.skills.orchestrator import extract_model_numbers
         results = extract_model_numbers("Sony WH-1000XM4 Wireless Headphones")
         assert "WH-1000XM4" in results
 
     def test_kitchenaid_mixer(self):
         """KitchenAid model number with letters and digits."""
-        from agentic_scraper.skills.orchestrator import extract_model_numbers
+        from poob.skills.orchestrator import extract_model_numbers
         results = extract_model_numbers("KitchenAid KSM150PSER Artisan Stand Mixer")
         assert "KSM150PSER" in results
 
     def test_dewalt_saw(self):
         """DeWalt model with prefix letters + digits."""
-        from agentic_scraper.skills.orchestrator import extract_model_numbers
+        from poob.skills.orchestrator import extract_model_numbers
         results = extract_model_numbers("DEWALT DWE7491RS 10-Inch Table Saw")
         assert "DWE7491RS" in results
 
     def test_samsung_tv(self):
         """Samsung TV model number pattern."""
-        from agentic_scraper.skills.orchestrator import extract_model_numbers
+        from poob.skills.orchestrator import extract_model_numbers
         results = extract_model_numbers("Samsung QN65Q80AAFXZA 65\" QLED TV")
         assert "QN65Q80AAFXZA" in results
 
     def test_no_model_number(self):
         """Plain text with no model numbers returns empty."""
-        from agentic_scraper.skills.orchestrator import extract_model_numbers
+        from poob.skills.orchestrator import extract_model_numbers
         results = extract_model_numbers("Nice wooden table for sale")
         assert results == []
 
     def test_multiple_models(self):
         """Multiple model numbers in one text."""
-        from agentic_scraper.skills.orchestrator import extract_model_numbers
+        from poob.skills.orchestrator import extract_model_numbers
         results = extract_model_numbers("Bose QC35II with Sony WH-1000XM5 case")
         assert len(results) >= 2
 
     def test_ignores_short_codes(self):
         """Short generic codes like 'TV' or '4K' should not be model numbers."""
-        from agentic_scraper.skills.orchestrator import extract_model_numbers
+        from poob.skills.orchestrator import extract_model_numbers
         results = extract_model_numbers("4K TV great condition")
         assert results == []
 
     def test_model_from_ocr_text(self):
         """Model number embedded in OCR text (typical Vision API output)."""
-        from agentic_scraper.skills.orchestrator import extract_model_numbers
+        from poob.skills.orchestrator import extract_model_numbers
         ocr = "MODEL: DWE7491RS SERIAL: 20230415 MADE IN MEXICO"
         results = extract_model_numbers(ocr)
         assert "DWE7491RS" in results
@@ -677,37 +677,37 @@ class TestTitleQualityScore:
 
     def test_normal_title(self):
         """Well-formed title gets high score."""
-        from agentic_scraper.skills.orchestrator import compute_title_quality_score
+        from poob.skills.orchestrator import compute_title_quality_score
         score = compute_title_quality_score("Sony WH-1000XM4 Wireless Headphones")
         assert score >= 0.8
 
     def test_all_caps(self):
         """ALL CAPS title gets penalized."""
-        from agentic_scraper.skills.orchestrator import compute_title_quality_score
+        from poob.skills.orchestrator import compute_title_quality_score
         score = compute_title_quality_score("AMAZING DEAL MUST SEE BEST PRICE EVER")
         assert score < 0.6
 
     def test_emoji_spam(self):
         """Emoji-heavy title gets penalized."""
-        from agentic_scraper.skills.orchestrator import compute_title_quality_score
+        from poob.skills.orchestrator import compute_title_quality_score
         score = compute_title_quality_score("🔥🔥🔥 INCREDIBLE DEAL 💰💰💰 WOW 🎉🎉")
         assert score < 0.5
 
     def test_excessive_punctuation(self):
         """Excessive punctuation (!!! ???) gets penalized."""
-        from agentic_scraper.skills.orchestrator import compute_title_quality_score
+        from poob.skills.orchestrator import compute_title_quality_score
         score = compute_title_quality_score("Great deal!!! Must see!!! Won't last!!!")
         assert score < 0.7
 
     def test_short_title(self):
         """Very short title (low info) gets penalized."""
-        from agentic_scraper.skills.orchestrator import compute_title_quality_score
+        from poob.skills.orchestrator import compute_title_quality_score
         score = compute_title_quality_score("Chair")
         assert score <= 0.7
 
     def test_price_in_title(self):
         """Price mentioned in title is a mild positive signal (transparency)."""
-        from agentic_scraper.skills.orchestrator import compute_title_quality_score
+        from poob.skills.orchestrator import compute_title_quality_score
         score_with = compute_title_quality_score("KitchenAid Mixer $150 OBO")
         score_without = compute_title_quality_score("KitchenAid Mixer")
         # Price in title shouldn't hurt
@@ -715,7 +715,7 @@ class TestTitleQualityScore:
 
     def test_spam_words(self):
         """Spam keywords (LOOK, WOW, HURRY) penalize score."""
-        from agentic_scraper.skills.orchestrator import compute_title_quality_score
+        from poob.skills.orchestrator import compute_title_quality_score
         score = compute_title_quality_score("LOOK WOW HURRY best deal you'll ever find")
         assert score < 0.6
 
@@ -729,7 +729,7 @@ class TestListingFreshnessBonus:
     def test_just_posted(self):
         """Listing from minutes ago gets highest bonus."""
         from datetime import datetime, timezone
-        from agentic_scraper.skills.orchestrator import compute_freshness_bonus
+        from poob.skills.orchestrator import compute_freshness_bonus
         listing = Listing(
             title="Test", posted_at=datetime.now(timezone.utc),
         )
@@ -739,7 +739,7 @@ class TestListingFreshnessBonus:
     def test_one_hour_old(self):
         """1-hour-old listing still gets good bonus."""
         from datetime import datetime, timedelta, timezone
-        from agentic_scraper.skills.orchestrator import compute_freshness_bonus
+        from poob.skills.orchestrator import compute_freshness_bonus
         listing = Listing(
             title="Test",
             posted_at=datetime.now(timezone.utc) - timedelta(hours=1),
@@ -750,7 +750,7 @@ class TestListingFreshnessBonus:
     def test_twelve_hours_old(self):
         """12-hour-old listing gets reduced bonus."""
         from datetime import datetime, timedelta, timezone
-        from agentic_scraper.skills.orchestrator import compute_freshness_bonus
+        from poob.skills.orchestrator import compute_freshness_bonus
         listing = Listing(
             title="Test",
             posted_at=datetime.now(timezone.utc) - timedelta(hours=12),
@@ -760,7 +760,7 @@ class TestListingFreshnessBonus:
 
     def test_no_posted_at(self):
         """Missing posted_at returns neutral (0.5)."""
-        from agentic_scraper.skills.orchestrator import compute_freshness_bonus
+        from poob.skills.orchestrator import compute_freshness_bonus
         listing = Listing(title="Test", posted_at=None)
         bonus = compute_freshness_bonus(listing)
         assert bonus == 0.5
@@ -768,7 +768,7 @@ class TestListingFreshnessBonus:
     def test_three_days_old(self):
         """3-day-old listing gets minimal bonus."""
         from datetime import datetime, timedelta, timezone
-        from agentic_scraper.skills.orchestrator import compute_freshness_bonus
+        from poob.skills.orchestrator import compute_freshness_bonus
         listing = Listing(
             title="Test",
             posted_at=datetime.now(timezone.utc) - timedelta(days=3),
@@ -785,7 +785,7 @@ class TestDetectMultiItem:
 
     def test_explicit_quantity(self):
         """'3 Lego sets for $45' → detected as multi-item."""
-        from agentic_scraper.skills.orchestrator import detect_multi_item
+        from poob.skills.orchestrator import detect_multi_item
         result = detect_multi_item("3 Lego sets", "$45", 45.0)
         assert result is not None
         assert result["quantity"] == 3
@@ -793,7 +793,7 @@ class TestDetectMultiItem:
 
     def test_set_of_quantity(self):
         """'Set of 6 glasses' detected."""
-        from agentic_scraper.skills.orchestrator import detect_multi_item
+        from poob.skills.orchestrator import detect_multi_item
         result = detect_multi_item("Set of 6 wine glasses", "", 30.0)
         assert result is not None
         assert result["quantity"] == 6
@@ -801,7 +801,7 @@ class TestDetectMultiItem:
 
     def test_lot_of_items(self):
         """'Lot of 20 Hot Wheels' detected."""
-        from agentic_scraper.skills.orchestrator import detect_multi_item
+        from poob.skills.orchestrator import detect_multi_item
         result = detect_multi_item("Lot of 20 Hot Wheels cars", "", 40.0)
         assert result is not None
         assert result["quantity"] == 20
@@ -809,13 +809,13 @@ class TestDetectMultiItem:
 
     def test_single_item(self):
         """Single item listing returns None."""
-        from agentic_scraper.skills.orchestrator import detect_multi_item
+        from poob.skills.orchestrator import detect_multi_item
         result = detect_multi_item("KitchenAid Stand Mixer", "", 150.0)
         assert result is None
 
     def test_pair(self):
         """'Pair of speakers' → quantity 2."""
-        from agentic_scraper.skills.orchestrator import detect_multi_item
+        from poob.skills.orchestrator import detect_multi_item
         result = detect_multi_item("Pair of Bose speakers", "", 100.0)
         assert result is not None
         assert result["quantity"] == 2
@@ -823,14 +823,14 @@ class TestDetectMultiItem:
 
     def test_bundle_keyword(self):
         """'Bundle' keyword triggers detection even without explicit count."""
-        from agentic_scraper.skills.orchestrator import detect_multi_item
+        from poob.skills.orchestrator import detect_multi_item
         result = detect_multi_item("PS5 game bundle - 5 games", "", 100.0)
         assert result is not None
         assert result["quantity"] == 5
 
     def test_zero_price(self):
         """Free listing with multi-item: per_unit_price = 0."""
-        from agentic_scraper.skills.orchestrator import detect_multi_item
+        from poob.skills.orchestrator import detect_multi_item
         result = detect_multi_item("Box of 10 books", "", 0.0)
         assert result is not None
         assert result["quantity"] == 10

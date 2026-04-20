@@ -8,15 +8,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agentic_scraper.voice.audio_buffer import (
+from poob.voice.audio_buffer import (
     FRAME_DURATION_MS,
     UserAudioBuffer,
     VADConfig,
     VADState,
     rms_energy,
 )
-from agentic_scraper.voice.conversation import VoiceConversationManager
-from agentic_scraper.voice.stt import GroqWhisperSTT, _pcm_to_wav, _stereo_to_mono
+from poob.voice.conversation import VoiceConversationManager
+from poob.voice.stt import GroqWhisperSTT, _pcm_to_wav, _stereo_to_mono
 
 
 # ---------------------------------------------------------------------------

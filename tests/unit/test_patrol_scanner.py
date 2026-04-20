@@ -7,12 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agentic_scraper.sites.facebook.patrol_scanner import (
+from poob.sites.facebook.patrol_scanner import (
     PatrolScanner,
     RadiusOscillator,
     build_patrol_url,
 )
-from agentic_scraper.storage.models import Listing
+from poob.storage.models import Listing
 
 
 # --- build_patrol_url ---
@@ -123,10 +123,10 @@ class TestPatrolScanner:
         mock_page.evaluate = AsyncMock(return_value=raw_data)
 
         with patch(
-            "agentic_scraper.sites.facebook.patrol_scanner.navigate_and_wait",
+            "poob.sites.facebook.patrol_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ), patch(
-            "agentic_scraper.sites.facebook.patrol_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.patrol_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ):
             listings = await scanner.sweep_category(mock_page, "electronics")
@@ -140,10 +140,10 @@ class TestPatrolScanner:
         mock_page.evaluate = AsyncMock(return_value=[])
 
         with patch(
-            "agentic_scraper.sites.facebook.patrol_scanner.navigate_and_wait",
+            "poob.sites.facebook.patrol_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ), patch(
-            "agentic_scraper.sites.facebook.patrol_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.patrol_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ):
             listings = await scanner.sweep_category(mock_page, "electronics")
@@ -166,10 +166,10 @@ class TestPatrolScanner:
         mock_page.evaluate = AsyncMock(return_value=raw_data)
 
         with patch(
-            "agentic_scraper.sites.facebook.patrol_scanner.navigate_and_wait",
+            "poob.sites.facebook.patrol_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ), patch(
-            "agentic_scraper.sites.facebook.patrol_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.patrol_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ):
             listings = await scanner.sweep_category(mock_page, "furniture")
@@ -181,7 +181,7 @@ class TestPatrolScanner:
     async def test_sweep_handles_exception(self, scanner, mock_page):
         """Navigation failure should return empty list, not raise."""
         with patch(
-            "agentic_scraper.sites.facebook.patrol_scanner.navigate_and_wait",
+            "poob.sites.facebook.patrol_scanner.navigate_and_wait",
             new_callable=AsyncMock,
             side_effect=Exception("Navigation failed"),
         ):
@@ -195,10 +195,10 @@ class TestPatrolScanner:
         mock_page.evaluate = AsyncMock(return_value=[])
 
         with patch(
-            "agentic_scraper.sites.facebook.patrol_scanner.navigate_and_wait",
+            "poob.sites.facebook.patrol_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ) as nav_mock, patch(
-            "agentic_scraper.sites.facebook.patrol_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.patrol_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ):
             await scanner.sweep_category(mock_page, None)
@@ -216,10 +216,10 @@ class TestPatrolScanner:
 
         urls = []
         with patch(
-            "agentic_scraper.sites.facebook.patrol_scanner.navigate_and_wait",
+            "poob.sites.facebook.patrol_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ) as nav_mock, patch(
-            "agentic_scraper.sites.facebook.patrol_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.patrol_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ):
             await scanner.sweep_category(mock_page, "electronics")
@@ -237,10 +237,10 @@ class TestPatrolScanner:
         mock_page.evaluate = AsyncMock(return_value=[])
 
         with patch(
-            "agentic_scraper.sites.facebook.patrol_scanner.navigate_and_wait",
+            "poob.sites.facebook.patrol_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ) as nav_mock, patch(
-            "agentic_scraper.sites.facebook.patrol_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.patrol_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ):
             await scanner.sweep_category(mock_page, "electronics", days_since_listed=3)
@@ -255,10 +255,10 @@ class TestPatrolScanner:
         mock_page.evaluate = AsyncMock(return_value=[])
 
         with patch(
-            "agentic_scraper.sites.facebook.patrol_scanner.navigate_and_wait",
+            "poob.sites.facebook.patrol_scanner.navigate_and_wait",
             new_callable=AsyncMock,
         ) as nav_mock, patch(
-            "agentic_scraper.sites.facebook.patrol_scanner.apply_scroll_pattern",
+            "poob.sites.facebook.patrol_scanner.apply_scroll_pattern",
             new_callable=AsyncMock,
         ):
             await scanner.sweep_category(mock_page, "electronics")

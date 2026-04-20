@@ -21,7 +21,7 @@
 - The anonymous GraphQL `_build_variables()` already sends lat/lng/radius — investigate why Facebook ignores it for category searches specifically
 - Check if `deliveryMethod=local_pick_up` parameter helps constrain results geographically
 
-**Files affected:** `src/agentic_scraper/scanner/patrol_engine.py` (lines ~97-103 for the hardcoded states, lines ~400-430 for the post-enrichment filter, lines ~1700-1715 for the notification safety net)
+**Files affected:** `src/poob/scanner/patrol_engine.py` (lines ~97-103 for the hardcoded states, lines ~400-430 for the post-enrichment filter, lines ~1700-1715 for the notification safety net)
 
 ---
 
@@ -45,7 +45,7 @@
 - The VLM already sees the listing images. It could be asked to classify the item category as part of its evaluation, and vehicle categories could be rejected post-VLM
 - The watchlist exemption from category exclusion needs rethinking: why should a listing tagged `_watch_item_id=espresso` bypass the vehicle filter? The exemption was meant for users who explicitly watch excluded categories (e.g., someone who wants couch deals via DM), but it's too broad
 
-**Files affected:** `src/agentic_scraper/scanner/patrol_engine.py` (lines ~55-97 for patterns, ~302-304 for exemption, ~1567-1615 for the filter function, ~1689-1699 for the notification safety net)
+**Files affected:** `src/poob/scanner/patrol_engine.py` (lines ~55-97 for patterns, ~302-304 for exemption, ~1567-1615 for the filter function, ~1689-1699 for the notification safety net)
 
 ---
 
@@ -59,7 +59,7 @@
 - This same bug may exist in OTHER files that call `page.evaluate()` — the patrol scanner, direct scanner, and JS extractor all use `page.evaluate()` and may be silently getting string results
 - `_parse_evaluate_result()` is defined locally in `detail_extractor.py` — it should be a shared utility if other files need it
 
-**Files affected:** `src/agentic_scraper/sites/facebook/detail_extractor.py`, potentially `src/agentic_scraper/sites/facebook/js_extractor.py`, `src/agentic_scraper/sites/facebook/patrol_scanner.py`
+**Files affected:** `src/poob/sites/facebook/detail_extractor.py`, potentially `src/poob/sites/facebook/js_extractor.py`, `src/poob/sites/facebook/patrol_scanner.py`
 
 ---
 
@@ -71,7 +71,7 @@
 
 **What needs cleanup:** The `detail_interceptor.py` file should either be removed or clearly marked as unused. Its CDP event handlers may still be registered and firing (generating debug-level log noise). The detail_extractor.py docstring was updated but there may be stale references elsewhere.
 
-**Files affected:** `src/agentic_scraper/browser/detail_interceptor.py` (potentially unused), `src/agentic_scraper/sites/facebook/detail_extractor.py`
+**Files affected:** `src/poob/browser/detail_interceptor.py` (potentially unused), `src/poob/sites/facebook/detail_extractor.py`
 
 ---
 
@@ -86,7 +86,7 @@
 - The anonymous browser's DOM sweep navigates with the authenticated browser's search patterns (scroll_until_stable) — it should use its own simpler pattern since it has no login
 - Rate limiting: 8 categories * 2 pages * 6s delay = ~96s. Combined with watchlist searches, total collection phase is ~3-5 minutes. Acceptable but worth monitoring.
 
-**Files affected:** `src/agentic_scraper/scanner/patrol_engine.py` (`_fetch_anonymous_graphql`), `src/agentic_scraper/main.py` (anonymous browser creation), `src/agentic_scraper/config.py`
+**Files affected:** `src/poob/scanner/patrol_engine.py` (`_fetch_anonymous_graphql`), `src/poob/main.py` (anonymous browser creation), `src/poob/config.py`
 
 ---
 
@@ -101,7 +101,7 @@
 
 **What needs attention:** The fundamental gap is that descriptions only come from detail page visits. If enrichment is skipped or fails, the VLM evaluates blind. This is an architectural reality of Facebook's API, not a bug.
 
-**Files affected:** `src/agentic_scraper/sites/facebook/detail_extractor.py`, `src/agentic_scraper/skills/vlm_evaluator.py`
+**Files affected:** `src/poob/sites/facebook/detail_extractor.py`, `src/poob/skills/vlm_evaluator.py`
 
 ---
 
@@ -116,7 +116,7 @@
 - A smarter approach: if GQL returns `creation_time` (it sometimes does), filter BEFORE enrichment
 - The enrichment cap (50) should ideally apply AFTER freshness filtering, not before
 
-**Files affected:** `src/agentic_scraper/scanner/patrol_engine.py` (post-enrichment freshness filter, ~lines 360-390)
+**Files affected:** `src/poob/scanner/patrol_engine.py` (post-enrichment freshness filter, ~lines 360-390)
 
 ---
 
@@ -155,7 +155,7 @@
 - The 30% threshold and 3-word minimum are arbitrary — may need tuning
 - The data-sjs regex grabs ALL `"uri": "https://...scontent..."` URLs from the payload, including images from the search feed behind the detail overlay. A more targeted extraction (only within `listing_photos` context) would be more reliable
 
-**Files affected:** `src/agentic_scraper/sites/facebook/detail_extractor.py`, `src/agentic_scraper/sites/facebook/detail_graphql_extractor.py`
+**Files affected:** `src/poob/sites/facebook/detail_extractor.py`, `src/poob/sites/facebook/detail_graphql_extractor.py`
 
 ---
 
@@ -177,7 +177,7 @@
 
 **What needs attention:** The keyword list is hardcoded and fragile. A more robust approach would be to have the deal agent handle ALL messages when Groq is down, since it has its own tool-calling LLM cascade.
 
-**Files affected:** `src/agentic_scraper/brain/poob.py` (~lines 195-215)
+**Files affected:** `src/poob/brain/poob.py` (~lines 195-215)
 
 ---
 

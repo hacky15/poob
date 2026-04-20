@@ -2,11 +2,11 @@
 
 import pytest
 
-from agentic_scraper.skills.orchestrator import (
+from poob.skills.orchestrator import (
     _extract_excluded_terms,
     _listing_contradicts_notes,
 )
-from agentic_scraper.storage.models import Listing
+from poob.storage.models import Listing
 
 
 class TestExtractExcludedTerms:

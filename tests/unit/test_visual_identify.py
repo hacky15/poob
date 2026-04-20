@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agentic_scraper.skills.models import ItemIdentification
+from poob.skills.models import ItemIdentification
 
 
 def _make_llm_response(data: dict) -> MagicMock:
@@ -21,7 +21,7 @@ class TestVisualIdentifyTool:
 
     async def test_identifies_item_from_image_url(self):
         """Should identify an item when given image URLs."""
-        from agentic_scraper.skills.visual import VisualIdentifyTool
+        from poob.skills.visual import VisualIdentifyTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=_make_llm_response({
@@ -39,7 +39,7 @@ class TestVisualIdentifyTool:
         mock_response.status_code = 200
         mock_response.content = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100  # Fake PNG
 
-        with patch("agentic_scraper.skills.visual.httpx.AsyncClient") as mock_client_cls:
+        with patch("poob.skills.visual.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(return_value=mock_response)
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -55,11 +55,11 @@ class TestVisualIdentifyTool:
 
     async def test_handles_image_download_failure(self):
         """Should return low-confidence result when image can't be fetched."""
-        from agentic_scraper.skills.visual import VisualIdentifyTool
+        from poob.skills.visual import VisualIdentifyTool
 
         llm = MagicMock()
 
-        with patch("agentic_scraper.skills.visual.httpx.AsyncClient") as mock_client_cls:
+        with patch("poob.skills.visual.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(side_effect=Exception("Connection failed"))
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -74,7 +74,7 @@ class TestVisualIdentifyTool:
 
     async def test_handles_empty_image_list(self):
         """Should return empty result when no images provided."""
-        from agentic_scraper.skills.visual import VisualIdentifyTool
+        from poob.skills.visual import VisualIdentifyTool
 
         llm = MagicMock()
         tool = VisualIdentifyTool(llm)
@@ -85,7 +85,7 @@ class TestVisualIdentifyTool:
 
     async def test_handles_llm_error(self):
         """Should return low-confidence result when vision LLM fails."""
-        from agentic_scraper.skills.visual import VisualIdentifyTool
+        from poob.skills.visual import VisualIdentifyTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(side_effect=RuntimeError("Vision model not available"))
@@ -94,7 +94,7 @@ class TestVisualIdentifyTool:
         mock_response.status_code = 200
         mock_response.content = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
 
-        with patch("agentic_scraper.skills.visual.httpx.AsyncClient") as mock_client_cls:
+        with patch("poob.skills.visual.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(return_value=mock_response)
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -108,7 +108,7 @@ class TestVisualIdentifyTool:
 
     async def test_uses_first_successful_image(self):
         """Should try multiple images and use the first successful one."""
-        from agentic_scraper.skills.visual import VisualIdentifyTool
+        from poob.skills.visual import VisualIdentifyTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=_make_llm_response({
@@ -129,7 +129,7 @@ class TestVisualIdentifyTool:
         mock_success.status_code = 200
         mock_success.content = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
 
-        with patch("agentic_scraper.skills.visual.httpx.AsyncClient") as mock_client_cls:
+        with patch("poob.skills.visual.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(side_effect=[
                 Exception("404"),
@@ -150,7 +150,7 @@ class TestVisualIdentifyTool:
 
     async def test_multi_image_sends_multiple_to_llm(self):
         """Should send multiple images in a single LLM call."""
-        from agentic_scraper.skills.visual import VisualIdentifyTool
+        from poob.skills.visual import VisualIdentifyTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=_make_llm_response({
@@ -165,7 +165,7 @@ class TestVisualIdentifyTool:
         mock_response.status_code = 200
         mock_response.content = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
 
-        with patch("agentic_scraper.skills.visual.httpx.AsyncClient") as mock_client_cls:
+        with patch("poob.skills.visual.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(return_value=mock_response)
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -188,7 +188,7 @@ class TestVisualIdentifyTool:
 
     async def test_multi_image_respects_max_images(self):
         """Should limit images sent to LLM based on max_images config."""
-        from agentic_scraper.skills.visual import VisualIdentifyTool
+        from poob.skills.visual import VisualIdentifyTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=_make_llm_response({
@@ -201,7 +201,7 @@ class TestVisualIdentifyTool:
         mock_response.status_code = 200
         mock_response.content = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
 
-        with patch("agentic_scraper.skills.visual.httpx.AsyncClient") as mock_client_cls:
+        with patch("poob.skills.visual.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(return_value=mock_response)
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -223,7 +223,7 @@ class TestVisualIdentifyTool:
 
     async def test_multi_image_partial_fetch_failure(self):
         """Should send only successfully fetched images to LLM."""
-        from agentic_scraper.skills.visual import VisualIdentifyTool
+        from poob.skills.visual import VisualIdentifyTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=_make_llm_response({
@@ -236,7 +236,7 @@ class TestVisualIdentifyTool:
         mock_success.status_code = 200
         mock_success.content = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
 
-        with patch("agentic_scraper.skills.visual.httpx.AsyncClient") as mock_client_cls:
+        with patch("poob.skills.visual.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(side_effect=[
                 mock_success,
@@ -262,7 +262,7 @@ class TestVisualIdentifyTool:
 
     async def test_parses_urgency_signals(self):
         """Should extract urgency signals from visual LLM response."""
-        from agentic_scraper.skills.visual import VisualIdentifyTool
+        from poob.skills.visual import VisualIdentifyTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=_make_llm_response({
@@ -279,7 +279,7 @@ class TestVisualIdentifyTool:
         mock_response.status_code = 200
         mock_response.content = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
 
-        with patch("agentic_scraper.skills.visual.httpx.AsyncClient") as mock_client_cls:
+        with patch("poob.skills.visual.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(return_value=mock_response)
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -299,7 +299,7 @@ class TestVisualIdentifyTool:
 
     async def test_passes_title_and_description_to_prompt(self):
         """Should include title and description in the visual LLM prompt."""
-        from agentic_scraper.skills.visual import VisualIdentifyTool
+        from poob.skills.visual import VisualIdentifyTool
 
         llm = MagicMock()
         llm.ainvoke = AsyncMock(return_value=_make_llm_response({
@@ -313,7 +313,7 @@ class TestVisualIdentifyTool:
         mock_response.status_code = 200
         mock_response.content = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
 
-        with patch("agentic_scraper.skills.visual.httpx.AsyncClient") as mock_client_cls:
+        with patch("poob.skills.visual.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(return_value=mock_response)
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)

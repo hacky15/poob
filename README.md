@@ -43,7 +43,7 @@ LLM Providers (cascading fallback chains)
 
 ```bash
 # Clone and install
-git clone <repo-url> && cd AgenticWebScraper
+git clone <repo-url> && cd poob
 pip install -e ".[dev]"
 playwright install chromium
 
@@ -57,7 +57,7 @@ cp .env.example .env
 # Edit .env with your API keys (see Provider Setup below)
 
 # Run
-python -m agentic_scraper.main
+python -m poob.main
 ```
 
 ## Provider Setup
@@ -163,7 +163,7 @@ mypy src/
 ## Project Structure
 
 ```
-src/agentic_scraper/
+src/poob/
     agent/          # Conversational Discord agent (tool-calling LLM)
     browser/        # Playwright browser management, stealth, GraphQL intercept
     discord_bot/    # Discord bot, cogs, notifier, message formatter

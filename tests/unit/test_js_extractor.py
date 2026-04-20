@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agentic_scraper.sites.facebook.js_extractor import (
+from poob.sites.facebook.js_extractor import (
     EXTRACT_LISTINGS_JS,
     EXTRACT_LISTING_URLS_JS,
     SCROLL_DOWN_JS,

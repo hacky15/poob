@@ -662,10 +662,10 @@ These listings are NOT filtered pre-enrichment because detail enrichment is desi
 **Decision:** Direct yt-dlp + FFmpeg instead of Lavalink. Rationale: single-server bot, no JVM overhead (300-500MB RAM saved), FFmpeg already a dependency, and we need raw PCM access for the TTS mixing pipeline. Lavalink's seeking/filters advantages don't apply — we need mixing, which Lavalink doesn't support natively (only NodeLink does).
 
 **Key files:**
-- `src/agentic_scraper/music/queue.py` — Track dataclass, MusicQueue with loop/shuffle
-- `src/agentic_scraper/music/ytdl.py` — AsyncYTDL wrapper (all yt-dlp in ThreadPoolExecutor) + pre-download
-- `src/agentic_scraper/music/player.py` — MixingAudioSource + BufferedAudioSource + GuildMusicPlayer
-- `src/agentic_scraper/discord_bot/cogs/music_cog.py` — Commands + agentic handler
+- `src/poob/music/queue.py` — Track dataclass, MusicQueue with loop/shuffle
+- `src/poob/music/ytdl.py` — AsyncYTDL wrapper (all yt-dlp in ThreadPoolExecutor) + pre-download
+- `src/poob/music/player.py` — MixingAudioSource + BufferedAudioSource + GuildMusicPlayer
+- `src/poob/discord_bot/cogs/music_cog.py` — Commands + agentic handler
 
 ### Audio Pipeline — Four-Layer Anti-Stutter Architecture (April 2026)
 
@@ -904,7 +904,7 @@ The patrol pipeline had accumulated fragmented filtering logic:
 - Backlog bypass: DB-recovered listings entered at `_evaluate()`, skipping ALL filters — vehicles, stale listings, and out-of-region listings reached notifications
 
 ### Solution: `listing_filter.py` + `FilterChain`
-All filtering consolidated into `src/agentic_scraper/scanner/listing_filter.py`:
+All filtering consolidated into `src/poob/scanner/listing_filter.py`:
 
 **Architecture:** Predicate composition pattern. Each filter is a frozen dataclass with `__call__` → `FilterVerdict`. A `FilterChain` orchestrates execution, handles stage routing and tag-based exemptions.
 
@@ -922,7 +922,7 @@ All filtering consolidated into `src/agentic_scraper/scanner/listing_filter.py`:
 **Backlog fix:** Backlog listings now go through the FULL filter chain (both stages) before evaluation. Rejected backlog listings are marked `evaluated=True` so they don't reappear.
 
 ### Geo-Filtering: Haversine Distance
-`src/agentic_scraper/utils/geo.py` — pure `math` module implementation, no external dependencies.
+`src/poob/utils/geo.py` — pure `math` module implementation, no external dependencies.
 - Center point resolved from `patrol_center_lat`/`patrol_center_lon` config, auto-resolved from `marketplace_default_location` city slug if unset
 - Listings without coordinates pass through (benefit of the doubt — coordinates only available after detail enrichment)
 - Null island (0, 0) detected and treated as "no coordinates"
@@ -932,10 +932,10 @@ All filtering consolidated into `src/agentic_scraper/scanner/listing_filter.py`:
 `marketplace_listing_category_id` is now extracted from search responses (was always in the response but never parsed). Also extracts `delivery_types` and attempts to extract `location.latitude`/`location.longitude` from search results. A temporary debug log (`DEBUG_GQL_KEYS`) dumps all listing node keys for the first 3 listings per session — **remove after verifying field availability on next live run**.
 
 ### Brain Routing Fix
-`src/agentic_scraper/brain/poob.py` — when Groq (primary tool-calling LLM) is down, ALL messages route through the deal agent's own LLM cascade (Groq → NVIDIA → Gemini → Ollama) instead of fragile keyword matching. The deal agent handles tool-calling natively; casual messages pass through quickly.
+`src/poob/brain/poob.py` — when Groq (primary tool-calling LLM) is down, ALL messages route through the deal agent's own LLM cascade (Groq → NVIDIA → Gemini → Ollama) instead of fragile keyword matching. The deal agent handles tool-calling natively; casual messages pass through quickly.
 
 ### `_parse_evaluate_result` Shared Utility
-Moved from `detail_extractor.py` to `src/agentic_scraper/utils/content.py` as `parse_evaluate_result()`. Handles browser-use's `Page.evaluate()` returning JSON-stringified strings instead of Python objects. Used by `detail_extractor.py`, should be used by any file calling `page.evaluate()`.
+Moved from `detail_extractor.py` to `src/poob/utils/content.py` as `parse_evaluate_result()`. Handles browser-use's `Page.evaluate()` returning JSON-stringified strings instead of Python objects. Used by `detail_extractor.py`, should be used by any file calling `page.evaluate()`.
 
 ### Dead Code
-`src/agentic_scraper/browser/detail_interceptor.py` — marked DEPRECATED. Facebook embeds listing data in data-sjs HTML tags, not XHR GraphQL calls. The CDP interceptor was built on this incorrect assumption. The actual extraction path is `detail_extractor.py` → `parse_data_sjs_payloads()`.
+`src/poob/browser/detail_interceptor.py` — marked DEPRECATED. Facebook embeds listing data in data-sjs HTML tags, not XHR GraphQL calls. The CDP interceptor was built on this incorrect assumption. The actual extraction path is `detail_extractor.py` → `parse_data_sjs_payloads()`.
