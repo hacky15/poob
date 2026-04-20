@@ -20,6 +20,10 @@ class AppConfig(BaseSettings):
     discord_bot_token: str
     discord_deals_channel_id: int
     discord_command_prefix: str = "!"
+    # Bot DMs this user on startup with version + git SHA. Leave 0 to disable.
+    discord_owner_user_id: int = 0
+    # Injected at Docker build time via GIT_SHA build-arg; "dev" for local runs.
+    git_sha: str = "dev"
 
     # --- LLM ---
     llm_provider: str = "ollama"

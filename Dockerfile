@@ -34,4 +34,8 @@ COPY data/hey_poob.onnx /app/data/hey_poob.onnx
 
 ENV PYTHONUNBUFFERED=1
 
+# Injected by GitHub Actions at build time; visible to runtime via config.git_sha.
+ARG GIT_SHA=dev
+ENV GIT_SHA=$GIT_SHA
+
 CMD ["python", "-m", "poob.main"]

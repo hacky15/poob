@@ -58,6 +58,7 @@ class ScraperBot(commands.Bot):
         self.feedback_repo: FeedbackRepository | None = None
         self.voice_session_factory: object | None = None  # Callable[[VoiceClient], VoiceSession]
         self._cogs_loaded = False
+        self._owner_notified = False
 
     async def _load_cogs(self) -> None:
         """Load all cog extensions. Called from on_ready (Pycord compatibility)."""
@@ -157,3 +158,21 @@ class ScraperBot(commands.Bot):
                     )
 
         # Patrol no longer auto-starts — user must request it via !scan or "scan"
+
+        # DM the owner once per process that we're alive + which version is running.
+        if not self._owner_notified and self.config.discord_owner_user_id:
+            self._owner_notified = True
+            await self._notify_owner_alive()
+
+    async def _notify_owner_alive(self) -> None:
+        from poob import __version__
+
+        owner_id = self.config.discord_owner_user_id
+        sha = (self.config.git_sha or "dev")[:7]
+        try:
+            user = await self.fetch_user(owner_id)
+            await user.send(f"Poob is alive 🍑 — v{__version__} (`{sha}`)")
+            log.info("Startup DM sent to owner", owner=owner_id, sha=sha)
+        except Exception as exc:
+            # Owner DMs disabled, user not found, or Discord blocked the DM — non-fatal.
+            log.warning("Could not DM owner on startup", owner=owner_id, error=str(exc))
