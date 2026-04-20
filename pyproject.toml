@@ -15,6 +15,7 @@ dependencies = [
     "langchain-ollama>=0.3.0",
     "langchain-google-genai>=2.1.0",
     "langchain-groq>=0.3.0",
+    "langchain-openai>=0.3.0",      # OpenAI-compat adapter: Cerebras, NVIDIA NIM, OpenRouter, VLM cascade
 
     # Discord (Pycord — native voice receive + DAVE E2EE via voice_compat patch)
     "py-cord[voice]==2.7.0",
