@@ -1,6 +1,6 @@
-# Agentic Web Scraper
+# Poob
 
-Autonomous deal-hunting bot for Facebook Marketplace. Scans listings on a schedule, evaluates deals using a multi-stage LLM + VLM pipeline, and sends notifications via Discord.
+Autonomous Discord companion with a deal-hunting scanner, conversational agent, voice chat, and music playback. The scanner patrols Facebook Marketplace on a schedule, evaluates deals through a multi-stage LLM + VLM pipeline, and sends notifications via Discord.
 
 ## What It Does
 

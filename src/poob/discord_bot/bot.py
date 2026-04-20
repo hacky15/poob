@@ -25,7 +25,7 @@ log = get_logger("discord.bot")
 
 
 class ScraperBot(commands.Bot):
-    """Discord bot for the Agentic Web Scraper.
+    """Discord bot for Poob.
 
     Manages cog loading and holds references to core components
     so cogs can access them.

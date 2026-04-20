@@ -1,4 +1,4 @@
-"""Shared test fixtures for the agentic scraper test suite."""
+"""Shared test fixtures for the Poob test suite."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-# Agentic Web Scraper - Project Conventions
+# Poob - Project Conventions
 
 ## CRITICAL: Documentation-Driven Development
 

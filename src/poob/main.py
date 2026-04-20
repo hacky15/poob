@@ -103,7 +103,7 @@ async def startup() -> None:
 
     log = get_logger("main")
 
-    log.info("Starting Agentic Web Scraper", version="0.1.0")
+    log.info("Starting Poob", version="0.1.0")
 
     # Auto-start Docker services (SearXNG) if Docker is available
     _ensure_docker_services()
