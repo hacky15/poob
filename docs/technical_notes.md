@@ -227,6 +227,10 @@ Listing age distribution  timestamped=45  min_hours=0.2  max_hours=4.8  avg_hour
    - Local dev: `docker compose -f deploy/compose.yml up -d searxng` exposes `http://localhost:8080` for the natively-running scraper; default `searxng_base_url` in `config.py` already points there, no override needed
    - Gracefully skips if container not running (ConnectError → unavailable)
 
+## Wake-word model path on homelab
+
+`hey_poob.onnx` is baked into the Docker image at `/app/hey_poob.onnx` (NOT `/app/data/`). `/app/data` is a volume mount in `deploy/compose.yml` and anything baked into that path gets shadowed by the empty named volume at runtime. When deploying on homelab, the Komodo stack env must set `PORCUPINE_KEYWORD_PATH=/app/hey_poob.onnx` (absolute path). Local dev keeps `PORCUPINE_KEYWORD_PATH=data/hey_poob.onnx` since no volume mount is in play.
+
 ### SerpAPI
 - Free tier: 250 searches/month
 - Gets rate-limited quickly during patrol cycles with many listings

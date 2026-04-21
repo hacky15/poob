@@ -30,7 +30,9 @@ RUN pip install --no-cache-dir -e . && \
 COPY scripts ./scripts
 
 RUN mkdir -p /app/data /app/browser_profiles
-COPY data/hey_poob.onnx /app/data/hey_poob.onnx
+# Onnx lives OUTSIDE /app/data because /app/data is a volume mount at runtime —
+# any file baked into that path would be hidden by the empty volume on first start.
+COPY data/hey_poob.onnx /app/hey_poob.onnx
 
 ENV PYTHONUNBUFFERED=1
 
