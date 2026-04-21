@@ -701,18 +701,38 @@ class DualPipelineProcessor:
             pipeline.is_active = False
             return
 
-        # Layered wake word detection: audio model + text transcript.
+        # Dual-gate wake word detection: BOTH acoustic and semantic required.
         #
-        # Text regex is the authoritative source — if the transcript contains
-        # "Hey Poob" (or phonetic variants), it's addressed regardless of audio model.
+        # Previously text-match alone was sufficient. That path let Deepgram
+        # hallucinations trigger the bot — with keyterm=Poob/play/skip/...
+        # biasing the ASR, ambient audio from speakers (song lyrics, TV,
+        # crosstalk) could produce a transcript like "Hey Poob play X" that
+        # never actually came from a human mouth. Real-world example
+        # (April 21 2026 logs): Ben's mic picked up a song titled "Blah
+        # Blah Blah" 12 seconds after he legitimately asked Poob to play
+        # it, and Deepgram transcribed the loopback as another play request
+        # → duplicate Toob response + double queue.
         #
-        # Audio model ALONE is unreliable — it fires on "Hey" without "Poob",
-        # ambient noise, and other false positives. Audio-only detections are
-        # DISCARDED unless the text also confirms the wake word.
+        # Industry standard for voice assistants (Alexa, Google Assistant,
+        # Siri) is to require actual acoustic wake-word detection, not just
+        # transcript matching. We do the same: ``pipeline.is_active`` is
+        # True when openwakeword fires during the utterance or in the 1.5s
+        # pre-speech window; text match must also confirm to filter audio
+        # false positives ("hey" without "poob"). Both gates must pass.
         text_match = self._text_wake_word_match(transcript)
-        is_addressed = text_match  # Text match is sufficient and authoritative
-        if pipeline.is_active and not text_match:
-            # Audio model fired but text doesn't confirm — likely false positive
+        is_addressed = text_match and pipeline.is_active
+
+        if text_match and not pipeline.is_active:
+            # Text claims wake word but no acoustic confirmation — reject as
+            # probable Deepgram/mic-loopback hallucination.
+            log.info(
+                "Text wake word rejected (no acoustic confirmation)",
+                user=pipeline.user_name or user_id,
+                transcript=transcript[:80],
+            )
+        elif pipeline.is_active and not text_match:
+            # Audio fired but text didn't — fine to reject, openwakeword
+            # has false positives on "hey" / coughs / laughs.
             log.info(
                 "Audio wake word overridden by text (no match in transcript)",
                 user=pipeline.user_name or user_id,
