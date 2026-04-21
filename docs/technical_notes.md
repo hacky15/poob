@@ -233,7 +233,45 @@ Listing age distribution  timestamped=45  min_hours=0.2  max_hours=4.8  avg_hour
 
 openwakeword's preprocessor models (`melspectrogram.onnx`, `embedding_model.onnx`) don't ship with the pip package — they're downloaded on first use. The Dockerfile pre-fetches them at build time via `python -c "import openwakeword.utils; openwakeword.utils.download_models([])"` so the container has everything baked in and can start offline. Passing `[]` skips the pretrained hot-word models we don't use (alexa/hey_jarvis/etc.) — saves ~50 MB vs the default download.
 
-### SerpAPI
+---
+
+## Production Log Access (for Agents)
+
+Any agent working in this repo has read access to live container logs on homelab. The capability is wired through `scripts/logs.sh` — see CLAUDE.md for the quick reference. This section explains how it works so agents can debug the *log access path itself* if it breaks, and so future contributors understand what's underneath the wrapper.
+
+### How the path works end-to-end
+
+1. **Tailscale MagicDNS** resolves the hostname `homelab` to its tailnet IP (`100.125.74.35` in the `tail59ce07.ts.net` tailnet). Works from any device with Tailscale running and authed to the same tailnet (Ben's Google account).
+2. **SSH config** on the dev PC has a `Host homelab` entry pointing at user `ben` with key auth via `~/.ssh/id_ed25519` (set up Apr 19 2026). Password auth is disabled on the homelab side (`/etc/ssh/sshd_config.d/99-hardening.conf`), so the key is the only way in.
+3. **Docker socket on homelab** is owned by the `docker` group; user `ben` is in that group, so `docker logs` runs without sudo.
+4. **`scripts/logs.sh`** is a thin wrapper that just shells out: `ssh homelab "docker logs <args> <container>"`. It's intentionally not magic — any flag `docker logs` accepts is forwarded.
+
+If the wrapper fails, run the underlying command directly and bisect: `ssh homelab "docker ps"`, then `ssh homelab "docker logs --tail 50 poob"`. If `ssh homelab` itself fails, the issue is upstream (Tailscale not running, SSH key not loaded, key revoked).
+
+### Log retention limits
+
+Per-container Docker log rotation is configured globally in `/etc/docker/daemon.json` on homelab as `max-size: 50m`, `max-file: 5` — so each container keeps roughly 250 MB of rolling logs. Practical implications:
+
+- High-volume containers (poob during active patrol) may rotate within hours.
+- Quiet containers (poob-searxng, ollama between requests) keep weeks of logs.
+- `--since` queries beyond the rotation horizon return nothing without warning. If an agent gets an empty response, increasing the window won't help — that data is gone.
+
+For deploy-event history beyond log rotation (when an image landed, who triggered the deploy, env-var change history), use the **Komodo Updates panel** at `http://homelab:9120` → Stacks → poob → Updates. That metadata is stored in MongoDB and persists indefinitely.
+
+### When SSH alone is the right tool
+
+`scripts/logs.sh` is just for log queries. For other production operations, agents should use SSH directly:
+
+- `ssh homelab "docker ps"` — what's running
+- `ssh homelab "docker stats --no-stream"` — current resource usage
+- `ssh homelab "docker exec ollama ollama list"` — what models are loaded
+- `ssh homelab "docker compose -f ~/apps/komodo/docker-compose.yml ps"` — komodo health
+
+Anything that mutates state (restarts, redeploys, env-var changes) should go through the Komodo UI, not raw `docker` commands — Komodo tracks those as Update events for audit history.
+
+---
+
+## SerpAPI
 - Free tier: 250 searches/month
 - Gets rate-limited quickly during patrol cycles with many listings
 - Disabled for session when first 429 is received
@@ -945,3 +983,94 @@ Moved from `detail_extractor.py` to `src/poob/utils/content.py` as `parse_evalua
 
 ### Dead Code
 `src/poob/browser/detail_interceptor.py` — marked DEPRECATED. Facebook embeds listing data in data-sjs HTML tags, not XHR GraphQL calls. The CDP interceptor was built on this incorrect assumption. The actual extraction path is `detail_extractor.py` → `parse_data_sjs_payloads()`.
+
+---
+
+## One-Handler Discord Architecture (April 21 2026)
+
+### Problem: Double-replies, cross-channel voice bleed, sibling-addressed responses
+
+Logs showed every @mention producing TWO Poob messages in chat and a TTS playback even when the user wasn't in VC. Traced to **two `on_message` listeners** in parallel: `AgentMessageHandler.on_message` (always fires on @mention/DM) and the now-deleted `VoiceCog.on_message` (fired when guild had text-to-voice mode enabled). Secondary consequence: both listeners called `PoobBrain.respond(user_id=X)` concurrently, racing on the per-user history in `_histories`. VoiceCog passed the bare text without channel context; AgentHandler passed the full transcript. Both mutated history for the same user, and within a few turns the LLM was hallucinating names from polluted history (Noah's message → Poob addressing "Ben").
+
+### Fix — Single owner per input modality
+
+- **AgentMessageHandler owns text messages.** It's the only `on_message` listener for @mentions/DMs. Generates response via `PoobBrain.respond`, posts text, then asks siblings for side effects.
+- **VoiceCog owns voice output.** Exposes `async def speak_if_in_channel(message, text) -> bool`. AgentHandler calls it after posting text; VoiceCog speaks iff `message.author.voice.channel == session.voice_client.channel`. No opt-in toggle — the in-VC check is deterministic.
+- **MusicCog owns music state and the now-playing embed.** Exposes `build_now_playing_message(guild_id)`. AgentHandler calls it after a music-routing response to attach the embed + persistent View.
+
+Deleted: `VoiceCog.on_message` (duplicate listener), `VoiceCog._text_to_voice` set, `!voice` toggle, `!say` command.
+
+### Rule: text @mention → voice output is gated by VC co-membership
+
+- User @mentions Poob in #general while in VC "Hawk Tuah Department" (same as Poob) → text reply in #general + TTS in VC.
+- User @mentions Poob from DMs or from a channel while NOT in Poob's VC → text only, silent in voice.
+- Consequence: Ben typing in chat while outside the VC no longer gets his message auto-spoken; Noah typing from outside the VC no longer blasts Poob's reply into the call.
+
+### Rule: music request from text requires requester in Poob's VC
+
+Music playback creates audio in VC — it only makes sense if the requester can hear it. `MusicCog.handle_music_request` now short-circuits with a polite refusal if the caller isn't in the bot's current VC (`play` action only — skip/pause/volume from buttons bypass this check because the button can only be clicked by someone in the channel anyway). When Poob isn't in any VC yet, `_auto_join_requester_vc(guild, user_id)` joins the **requester's** channel, not "most populated" — preserves the invariant.
+
+---
+
+## One-Handler Music Contract (April 21 2026)
+
+**All music actions go through `MusicCog.handle_music_request(..., tool_args={...})`. There is no other entry point.**
+
+Three input modalities produce the same `tool_args`:
+
+| Source | How `tool_args` is built |
+|---|---|
+| Voice ("hey poob skip") | STT → `PoobBrain.respond_streaming` → LLM `music_assistant` tool call → handler |
+| Text @mention (`@Poob skip`) | `PoobBrain.respond` → same LLM path → handler |
+| Button click (`⏭` on now-playing embed) | `MusicControlsView` callback constructs `{"action": "skip"}` → handler |
+
+The LLM's sole job is **classifying unstructured speech/text into structured `tool_args`**. Buttons bypass the LLM because their intent is already classified — identical contract, no divergent code paths.
+
+**State sync:** `handle_music_request` refreshes `PoobBrain._music_playing_info` from live player state at the top of every invocation (`music_cog.py:180-188`). Button clicks therefore keep the brain's LLM-routing context accurate even though they skip the LLM itself. Player state is the single source of truth; brain reads, never caches.
+
+**Consequence — all `!play`/`!skip`/`!queue`/etc. prefix commands are deleted.** Slash commands `/join` and `/leave` remain as the only command surface: they're VC-entry infrastructure (you can't @mention the bot in VC if it's not connected yet). All other interactions flow through @mention → LLM → tool_args, or button → tool_args.
+
+### Now-playing UI
+
+`src/poob/discord_bot/music_ui.py` implements:
+
+- **`build_now_playing_embed(track, queue_size)`** — post-Rythm embed convention: hyperlinked title, top-right thumbnail from `info_dict['thumbnail']` (not hardcoded maxresdefault — 404s on ~15% of videos), duration, requester footer, single brand color (`#8B4FBE`).
+- **`MusicControlsView(timeout=None)`** — persistent ActionRow with stable `custom_id`s (`poob:music:skip`, `poob:music:pause`, etc.). Re-registered via `bot.add_view(...)` in `on_ready` so buttons survive restarts. Callbacks build `tool_args` and call the handler.
+
+Deliberate non-goals: **no live-updating progress bar** (Discord's 5-edit/5-second per-channel rate limit makes it counterproductive), **no Components V2 containers** (overkill for a single-song card).
+
+---
+
+## Wake-Word Dual-Gate (April 21 2026)
+
+### Problem: bot re-triggered by its own music via mic loopback
+
+Ben said "Hey Poob play jah jah jah blah blah blah" → music played (Armin van Buuren "BLAH BLAH BLAH"). 12 seconds later, while the song was playing, a second "Text wake word match" fired with near-identical transcript `'Hey, Poob. Play jah jah jah blah blah blah.'` attributed to Ben, producing a duplicate queue and a second Toob reaction. Ben hadn't said anything.
+
+Root cause: Ben's speakers played the song → his mic captured the loopback → Discord transmitted as his audio → Deepgram transcribed the lyrics + ambient noise + any murmurs. With keyterm bias (`keyterm=Poob&keyterm=play&keyterm=skip...`), Deepgram hallucinated a wake phrase from the song's "blah blah blah" lyrics. The old rule accepted **text match alone** as addressing → hallucination became a command.
+
+### Fix — require BOTH acoustic AND semantic confirmation
+
+`src/poob/voice/dual_pipeline.py:_emit_utterance`:
+
+```python
+is_addressed = text_match and pipeline.is_active
+```
+
+`pipeline.is_active` is True iff openwakeword fired during the utterance or the 1.5 s pre-speech window. Requires an actual wake-word acoustic signal, not a bias-primed transcript hallucination. Matches the industry standard (Alexa / Google Assistant / Siri all require acoustic wake-word detection as the primary gate).
+
+Cost: very rare real requests where openwakeword totally misses will now fall through to passive. Benefit: self-triggering and ambient-hallucination classes of bug are eliminated. Acceptable tradeoff.
+
+### Common pitfall (saved for future)
+
+Any signal loop where the bot produces audio that can be captured by a mic in the same call creates this class of bug. Keyterm biasing in the ASR amplifies it — primed words hallucinate from weak signals. If we ever expose other bias-prone keyterms (deal names, brands) the same symmetric dual-gate rule applies: the semantic layer is confirmation, not primary.
+
+---
+
+## Toob Voice Tuning (April 21 2026)
+
+`src/poob/voice/session.py:_synthesize_toob` — FFmpeg filter chain updated from `atempo=1.7` to `atempo=1.85` (faster delivery per user feedback) and a subtle `vibrato=f=5.5:d=0.15` added between the atempo and bass stages. 5.5 Hz is human-prosody territory (natural vibrato is 4-7 Hz); depth 0.15 is shallow enough to preserve the warlord menace without sounding drunk. Final `volume=1.35` (+2.6 dB) sits Toob prominent in the mix.
+
+`src/poob/brain/poob.py:_wrap_music_response` — system prompt tightened from "One sentence. Under 15 words" to "ONE short sentence. 8-12 words MAX" plus a hard `toob_max_tokens = min(max_tokens, 60)` cap. Prevents drift past the word limit at high temperature.
+
+TTS output volume (non-Toob and Toob alike) bumped from `PCMVolumeTransformer(volume=2.0)` to `2.5` in both the music-overlay and standalone playback paths — Poob was sitting quieter than the music bed after ducking.

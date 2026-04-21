@@ -24,6 +24,18 @@ Every fix must be **robust, modular, and integrated**. Never stuff edge-case pat
 
 Also read `docs/architecture.md` for the full pipeline documentation.
 
+## CRITICAL: Project Skills — Use Them Without Asking
+
+This repo ships three project-scoped Claude skills under `.claude/skills/`. Each is a single SKILL.md with full instructions; the descriptions below are pointers, not the spec.
+
+| Skill | Trigger | Where |
+|---|---|---|
+| **`poob-logs`** | Reading live container logs from homelab production. Investigating runtime behavior, verifying a deploy landed, debugging a shipped exception, auditing what poob did at a specific moment. **Read logs freely — don't ask permission.** | [.claude/skills/poob-logs/SKILL.md](skills/poob-logs/SKILL.md) |
+| **`update-docs`** | After EVERY meaningful change — code edits, dependency updates, deploy config tweaks, env var additions, bug fixes, architectural decisions, infra changes. **Documentation is part of the change, not cleanup.** Trigger before declaring any task complete. | [.claude/skills/update-docs/SKILL.md](skills/update-docs/SKILL.md) |
+| **`run-tests`** | Verifying a code change doesn't break the suite, reproducing a specific failing test, scoping to a single tier (unit/integration/e2e). Always run at minimum the unit suite before saying "done" on src/ edits. | [.claude/skills/run-tests/SKILL.md](skills/run-tests/SKILL.md) |
+
+These skills are auto-discovered by Claude Code from `.claude/skills/`. Their descriptions are loaded into every session's context — if your task matches one of them, invoke it. Don't reinvent log-querying, doc-updating, or test-running flows ad-hoc.
+
 ## Overview
 Autonomous deal-hunting bot that monitors Facebook Marketplace, evaluates listings through a multi-stage VLM pipeline, and delivers deal alerts via Discord. Uses Playwright for browser automation, a cascade of cloud and local LLMs for evaluation, and SQLite for storage.
 
@@ -41,7 +53,7 @@ Autonomous deal-hunting bot that monitors Facebook Marketplace, evaluates listin
 - **Dual interaction model:** Patrol engine runs autonomously; Discord bot provides conversational agent with tool-calling
 
 ## Code Style
-- Python 3.12+ features (type unions with `|`, match statements where appropriate)
+- Python 3.11+ features (type unions with `|`, match statements where appropriate). Container runs 3.11 because openwakeword pulls tflite-runtime which has no 3.12 wheels yet; local dev on 3.12 still works since 3.11 is a minimum.
 - `ruff` for linting and formatting (line-length 100)
 - `mypy` strict mode
 - Docstrings on all public classes and methods (Google style)
