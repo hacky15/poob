@@ -103,6 +103,11 @@ For mutations (restart, redeploy, env-var change), use the Komodo UI — it trac
 
 ## If the script fails
 
-- `Permission denied (publickey)` — your shell environment doesn't have the SSH key loaded. Verify with `ssh homelab "echo ok"`. The user has key auth set up at `C:\Users\19203\.ssh\id_ed25519` with a `Host homelab` SSH config entry. If your shell can't see those, the script can't either.
+- `Permission denied (publickey)` — your shell environment doesn't have the SSH key loaded. Verify with `ssh homelab "echo ok"`. The user has key auth set up at `C:\Users\19203\.ssh\id_ed25519` with a `Host homelab` SSH config entry. If your shell can't see those, the script can't either. **Known gotcha:** Claude Code's Bash-tool sandbox may not share the user's `~/.ssh/config` — from the Bash sandbox the hostname may resolve but the key won't authenticate. In that case, instruct the user to run `scripts/logs.sh` from their own PowerShell terminal and paste the output back. See [shell-ops](../shell-ops/SKILL.md) for the sandbox-vs-user-shell distinction.
 - `Could not resolve hostname homelab` — Tailscale isn't running locally. Check tray icon on Windows, `tailscale status` from CLI.
 - `No such container: poob` — the stack was renamed or torn down. Run `scripts/logs.sh --list` first.
+
+## Cross-references
+
+- [`shell-ops`](../shell-ops/SKILL.md) — if SSH fails from the Bash sandbox, or for safe invocation patterns when asking the user to run log queries
+- [`update-docs`](../update-docs/SKILL.md) — if you discover something non-obvious from logs (latency spikes, provider failure patterns), capture it

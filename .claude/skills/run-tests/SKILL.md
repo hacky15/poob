@@ -134,3 +134,15 @@ If ruff/mypy fail on code you didn't touch, note it but don't fix it as part of 
 - Don't commit with failing tests (other than ones you've explicitly noted as pre-existing)
 - Don't add `@pytest.mark.skip` to make a failure go away — fix it or document why it's skipped in the test docstring
 - Don't write tests AFTER the fix unless TDD wasn't possible — CLAUDE.md says TDD; honor it where you can
+
+## Running pytest from the Claude Bash sandbox vs user's PowerShell
+
+`pytest` can be invoked from either. The Bash sandbox uses the repo's `venv/` Python (since we're already `cd`'d into the repo root). Long runs (full suite) may exceed the Bash tool's timeout — use `run_in_background: true` and poll, or run in the user's PS terminal instead.
+
+**Known gotcha:** `tests/unit/test_voice.py` currently fails at collection time with `ModuleNotFoundError: No module named 'poob.voice.conversation'` — that module was removed but the test wasn't updated. Use `--ignore=tests/unit/test_voice.py` for clean unit runs until the test is repaired. Capture this in [update-docs](../update-docs/SKILL.md) if you fix it.
+
+## Cross-references
+
+- [`shell-ops`](../shell-ops/SKILL.md) — for running pytest across multiple arguments safely on PowerShell
+- [`update-docs`](../update-docs/SKILL.md) — if tests surface a bug with a non-obvious root cause, document the fix
+- [`poob-logs`](../poob-logs/SKILL.md) — when a test passes locally but production behaves differently, logs bridge the gap

@@ -85,3 +85,23 @@ Fix drift you find. That's also part of this skill.
 - Don't preserve outdated content "for history" — git log keeps history. The docs are present-tense.
 
 The bar is: **would a future agent reading this save time vs. having to re-derive it?** If yes, write it. If no, skip.
+
+## Verification discipline — before declaring done
+
+Every "I updated the docs" needs a verification step. The prior-agent failure mode was claiming a task complete when git operations had silently partially failed. Don't repeat it.
+
+After updating docs:
+
+1. **`git status`** — verify the doc file(s) you touched are in "modified" or "untracked" as expected. If nothing shows modified, your edit didn't land on disk.
+2. **`git diff <doc-file>`** — visually scan the diff. Does it say what you think it says? Any accidental Markdown breakage?
+3. **If you committed the doc update**: `git log -1 --stat` — confirm the commit contains the doc file. If missing, something you thought was staged wasn't.
+4. **If the doc references code you also changed**: re-read the relevant code one more time to catch "docs said X" / "code says Y" drift.
+5. **If the change was shell/deploy/infra related**: invoke the `poob-logs` skill to confirm the running system matches the doc's claim. Docs for a deploy change that didn't actually deploy are worse than no docs.
+
+For any git/shell operations during the doc update, follow the `shell-ops` skill's verification patterns — especially the "run `git status` after every stage/commit" rule. On Windows PowerShell, silent partial failure is the default.
+
+## Cross-references
+
+- [`shell-ops`](../shell-ops/SKILL.md) — safe git/shell patterns for committing doc changes
+- [`poob-logs`](../poob-logs/SKILL.md) — verify deployed state matches documented claims
+- [`run-tests`](../run-tests/SKILL.md) — if the docs describe test behavior, confirm the tests actually pass

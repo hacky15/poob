@@ -24,17 +24,29 @@ Every fix must be **robust, modular, and integrated**. Never stuff edge-case pat
 
 Also read `docs/architecture.md` for the full pipeline documentation.
 
+## CRITICAL: Shell Environment — Read Before Running ANY Command
+
+The user runs **Windows PowerShell 5.1** (prompt: `(venv) PS C:\Users\19203\Downloads\AgenticWebScraper>`). This matters. Bash syntax does not translate cleanly. Common lethal mistakes:
+
+- **`\` at end of line is NOT line continuation in PowerShell** — it's a literal character, splits your command, leaves files unstaged, produces `fatal: \: is outside repository`. Use one-liners, or backtick `` ` `` continuation, or separate commands. **Never write `git add foo.py \` followed by more files on new lines.** A prior agent did this and broke a multi-commit sequence.
+- **`&&` and `||` pipeline chains don't work in PS 5.1** — use `;` or separate calls.
+- **`warning: LF will be replaced by CRLF`** is normal on Windows, not an error. Ignore it.
+- **After every `git add` and `git commit`, run `git status`** to verify what actually happened. Silent partial failure is the default on Windows/PS.
+
+For the full cross-shell safety rules, invoke the **`shell-ops`** skill (see table below). Read it before writing any multi-line shell command for the user.
+
 ## CRITICAL: Project Skills — Use Them Without Asking
 
-This repo ships three project-scoped Claude skills under `.claude/skills/`. Each is a single SKILL.md with full instructions; the descriptions below are pointers, not the spec.
+This repo ships four project-scoped Claude skills under `.claude/skills/`. Each is a single SKILL.md with full instructions; the descriptions below are pointers, not the spec.
 
 | Skill | Trigger | Where |
 |---|---|---|
+| **`shell-ops`** | Running git, shell commands, multi-line operations, or staging multiple files. Knows PowerShell 5.1 quirks, safe commit patterns, verification discipline (`git status` after every stage/commit), commit-message escaping, Claude Bash sandbox limitations. **Read this before writing shell commands for the user.** | [.claude/skills/shell-ops/SKILL.md](skills/shell-ops/SKILL.md) |
 | **`poob-logs`** | Reading live container logs from homelab production. Investigating runtime behavior, verifying a deploy landed, debugging a shipped exception, auditing what poob did at a specific moment. **Read logs freely — don't ask permission.** | [.claude/skills/poob-logs/SKILL.md](skills/poob-logs/SKILL.md) |
 | **`update-docs`** | After EVERY meaningful change — code edits, dependency updates, deploy config tweaks, env var additions, bug fixes, architectural decisions, infra changes. **Documentation is part of the change, not cleanup.** Trigger before declaring any task complete. | [.claude/skills/update-docs/SKILL.md](skills/update-docs/SKILL.md) |
 | **`run-tests`** | Verifying a code change doesn't break the suite, reproducing a specific failing test, scoping to a single tier (unit/integration/e2e). Always run at minimum the unit suite before saying "done" on src/ edits. | [.claude/skills/run-tests/SKILL.md](skills/run-tests/SKILL.md) |
 
-These skills are auto-discovered by Claude Code from `.claude/skills/`. Their descriptions are loaded into every session's context — if your task matches one of them, invoke it. Don't reinvent log-querying, doc-updating, or test-running flows ad-hoc.
+These skills are auto-discovered by Claude Code from `.claude/skills/`. Their descriptions are loaded into every session's context — if your task matches one of them, invoke it. Don't reinvent log-querying, doc-updating, test-running, or shell-command flows ad-hoc.
 
 ## Overview
 Autonomous deal-hunting bot that monitors Facebook Marketplace, evaluates listings through a multi-stage VLM pipeline, and delivers deal alerts via Discord. Uses Playwright for browser automation, a cascade of cloud and local LLMs for evaluation, and SQLite for storage.

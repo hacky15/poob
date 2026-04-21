@@ -235,6 +235,43 @@ openwakeword's preprocessor models (`melspectrogram.onnx`, `embedding_model.onnx
 
 ---
 
+## Deploy Flow — Push to Main is the Deploy
+
+**The operator workflow is: commit → `git push origin main`. That's it.**
+
+No manual image pulls, no `docker compose up`, no SSH to the host. Everything downstream is automated:
+
+1. **GitHub Actions** (`.github/workflows/build.yml`) builds a Docker image from the pushed commit and pushes it to GHCR as `ghcr.io/hacky15/poob:latest`. Takes ~2–3 minutes.
+2. **Komodo** watches `ghcr.io/hacky15/poob:latest` for a new digest. When it sees one, it pulls the image and restarts the `poob` container in the stack. Takes another ~30–60 seconds.
+3. **Startup DM**: the container sends a `Poob is alive — v{version} ({sha})` DM to the owner ([bot.py:174](../src/poob/discord_bot/bot.py#L174)). When you see that DM with the SHA you just pushed, the deploy landed.
+
+**Typical wall-clock from `git push` to "Poob is alive" DM: 3–5 minutes.**
+
+### Do NOT manually pull / redeploy
+
+- `ssh ben@homelab "docker pull ..."` bypasses Komodo's audit trail.
+- `docker restart poob` from CLI loses the deploy-event record in MongoDB.
+- Direct manipulation also desyncs Komodo's state — it may think the old image is current.
+
+If auto-deploy seems stuck, the right path is the Komodo UI (`http://homelab:9120` → Stacks → poob → Redeploy), not raw docker commands. But first verify the build actually succeeded — the "stuck deploy" is almost always "GHA is still building" or "GHA failed and the image was never pushed."
+
+### Verification commands
+
+```powershell
+# Browser: GHA build status for the pushed commit
+Start-Process "https://github.com/hacky15/poob/actions"
+
+# Log line with running SHA (the startup DM writes this to stdout too)
+ssh ben@homelab "docker logs --since 10m poob 2>&1" | Select-String -Pattern "Poob is alive"
+
+# How long has the current container been up? Fresh deploy = seconds/minutes.
+ssh ben@homelab "docker ps --format '{{.Names}}: {{.Status}}' | grep poob"
+```
+
+If the container uptime is longer than "minutes since GHA finished," the deploy hasn't landed — check GHA, then the Komodo Updates panel for webhook events.
+
+---
+
 ## Production Log Access (for Agents)
 
 Any agent working in this repo has read access to live container logs on homelab. The capability is wired through `scripts/logs.sh` — see CLAUDE.md for the quick reference. This section explains how it works so agents can debug the *log access path itself* if it breaks, and so future contributors understand what's underneath the wrapper.
