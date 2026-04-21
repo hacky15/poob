@@ -25,7 +25,8 @@ COPY pyproject.toml ./
 COPY src ./src
 
 RUN pip install --no-cache-dir -e . && \
-    playwright install --with-deps chromium
+    playwright install --with-deps chromium && \
+    python -c "import openwakeword.utils; openwakeword.utils.download_models([])"
 
 COPY scripts ./scripts
 

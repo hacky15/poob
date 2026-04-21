@@ -231,6 +231,8 @@ Listing age distribution  timestamped=45  min_hours=0.2  max_hours=4.8  avg_hour
 
 `hey_poob.onnx` is baked into the Docker image at `/app/hey_poob.onnx` (NOT `/app/data/`). `/app/data` is a volume mount in `deploy/compose.yml` and anything baked into that path gets shadowed by the empty named volume at runtime. When deploying on homelab, the Komodo stack env must set `PORCUPINE_KEYWORD_PATH=/app/hey_poob.onnx` (absolute path). Local dev keeps `PORCUPINE_KEYWORD_PATH=data/hey_poob.onnx` since no volume mount is in play.
 
+openwakeword's preprocessor models (`melspectrogram.onnx`, `embedding_model.onnx`) don't ship with the pip package — they're downloaded on first use. The Dockerfile pre-fetches them at build time via `python -c "import openwakeword.utils; openwakeword.utils.download_models([])"` so the container has everything baked in and can start offline. Passing `[]` skips the pretrained hot-word models we don't use (alexa/hey_jarvis/etc.) — saves ~50 MB vs the default download.
+
 ### SerpAPI
 - Free tier: 250 searches/month
 - Gets rate-limited quickly during patrol cycles with many listings
