@@ -884,17 +884,23 @@ class VoiceSession:
             return b""
 
         # --- Stage 2: Apply warlord FFmpeg filter (works on any audio) ---
-        # Warlord filter chain (preset: 09_fast_warlord):
+        # Warlord filter chain — tuned April 21 2026 for less monotone + quicker:
         # - asetrate=16000: pitch DOWN (24kHz source → 16kHz = deeper)
         # - aresample=24000: resample back to playable rate
-        # - atempo=1.7: speed up (compensates pitch-stretch + faster delivery)
+        # - atempo=1.85: speed up (was 1.7 — user feedback "speak quicker")
+        # - vibrato=f=5.5:d=0.15: subtle pitch wobble, breaks the monotone.
+        #   f=5.5 Hz is natural speech-prosody territory (human vibrato is
+        #   ~4-7 Hz); d=0.15 is shallow enough to stay menacing, not drunk.
         # - bass=g=10:f=80: heavy bass boost (rumble)
         # - aecho=0.8:0.85:40:0.3: reverb (cavernous, menacing)
+        # - volume=1.35: +2.6 dB so Toob sits loud on top of music+mix
         filter_chain = (
             "asetrate=16000,aresample=24000,"
-            "atempo=1.7,"
+            "atempo=1.85,"
+            "vibrato=f=5.5:d=0.15,"
             "bass=g=10:f=80,"
-            "aecho=0.8:0.85:40:0.3"
+            "aecho=0.8:0.85:40:0.3,"
+            "volume=1.35"
         )
 
         try:
@@ -971,8 +977,11 @@ class VoiceSession:
                 and self.music_player.mixer is not None
                 and self.voice_client.is_playing()
             ):
-                # Wrap TTS with volume boost for clarity over music
-                boosted_tts = discord.PCMVolumeTransformer(tts_source, volume=2.0)
+                # Wrap TTS with volume boost for clarity over music.
+                # 2.5 = +8 dB over raw TTS; needed to cut through the ducked
+                # music bed (25%) and still register as prominent. Bumped
+                # from 2.0 on April 21 2026 per user feedback.
+                boosted_tts = discord.PCMVolumeTransformer(tts_source, volume=2.5)
                 self.music_player.inject_tts_overlay(boosted_tts)
                 log.info("TTS injected as overlay on music")
 
@@ -988,7 +997,8 @@ class VoiceSession:
                 return
 
             # --- Standard path (no music) ---
-            source = discord.PCMVolumeTransformer(tts_source, volume=2.0)
+            # 2.5 = +8 dB over raw TTS (was 2.0 — user asked for louder default).
+            source = discord.PCMVolumeTransformer(tts_source, volume=2.5)
 
             # Create a future to await playback completion
             play_done = self._loop.create_future()

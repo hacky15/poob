@@ -820,7 +820,8 @@ class PoobBrain:
                     "Menacing, absurdly dramatic, like a demon working retail.\n"
                     "RULES:\n"
                     "- NEVER introduce yourself or say your name. Your voice IS your identity.\n"
-                    "- One sentence. Under 15 words. Tight, venomous.\n"
+                    "- ONE short sentence. 8-12 words MAX. Tight, venomous. "
+                    "Brevity is the menace — long sermons kill the vibe.\n"
                     "- React to the SONG, not to yourself. Insult their taste.\n"
                     "- No caps, no markdown, no emojis. Spoken aloud through TTS."
                 ),
@@ -832,9 +833,14 @@ class PoobBrain:
             },
             {
                 "role": "user",
-                "content": "React to the song as Toob. Menacing, dark, dramatic.",
+                "content": "React as Toob in ONE short sentence (8-12 words). Menacing.",
             },
         ]
+
+        # Hard cap on Toob's output length. ~60 tokens ≈ 1 sentence ≈ the
+        # 8-12 word target in the system prompt. Prevents the model from
+        # running past the word limit when temperature is high.
+        toob_max_tokens = min(max_tokens, 60)
 
         if self.groq_api_key:
             try:
@@ -844,7 +850,7 @@ class PoobBrain:
                 resp = await client.chat.completions.create(
                     model="llama-3.1-8b-instant",  # Fast 8b for quick reaction
                     messages=wrap_messages,  # type: ignore[arg-type]
-                    max_tokens=max_tokens,
+                    max_tokens=toob_max_tokens,
                     temperature=0.9,
                 )
                 result = resp.choices[0].message.content
