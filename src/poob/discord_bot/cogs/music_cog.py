@@ -1,20 +1,23 @@
-"""Music cog — YouTube playback with agentic voice control.
+"""Music cog — YouTube playback with a single structured-input contract.
 
-Provides both traditional text commands (!play, !skip, etc.) as fallbacks
-and an agentic handler that PoobBrain routes voice/text music requests to.
-The agentic handler parses natural language intents and delegates to the
-same underlying GuildMusicPlayer.
+Every user input path funnels into ``handle_music_request(..., tool_args={...})``:
 
-Architecture:
-    Voice: User speaks → STT → PoobBrain → music_assistant tool → handle_music_request()
-    Text:  User types !play xyz → play() command
-    Both paths use the same GuildMusicPlayer per guild.
+- Voice: STT → PoobBrain → LLM ``music_assistant`` tool call → handler
+- Text @mention: PoobBrain → same LLM → handler
+- Button (⏭/⏸/🔁 on the now-playing embed): view callback → handler
+
+The LLM's only job is classifying unstructured speech/text into structured
+``tool_args``. Buttons skip the LLM because their intent is already
+classified — identical contract, no divergent code paths. The handler
+refreshes ``PoobBrain._music_playing_info`` from live player state on every
+call, keeping brain context in sync across modalities.
+
+No prefix commands. The system owns one entry point per guild.
 """
 
 from __future__ import annotations
 
 import asyncio
-import re
 from typing import TYPE_CHECKING
 
 import discord
@@ -110,39 +113,32 @@ class MusicCog(commands.Cog, name="Music"):
             if session:
                 session.music_player = None
 
-    async def _auto_join_voice(self, guild: discord.Guild) -> discord.VoiceClient | None:
-        """Auto-join the most populated voice channel in the guild.
+    async def _auto_join_requester_vc(
+        self, guild: discord.Guild, user_id: int,
+    ) -> discord.VoiceClient | None:
+        """Join the requester's voice channel — and only the requester's.
 
-        Used when a music request arrives from a text channel but the bot
-        isn't in any voice channel yet. Picks the voice channel with the
-        most human members so Poob plays where people actually are.
+        Used when a text-channel @mention music request arrives but the bot
+        isn't in any VC yet. The invariant is: Poob plays music where the
+        requester is, never where they aren't. If the requester isn't in a
+        VC, we return None and the caller text-replies to join first.
 
-        This is a lightweight join — no VoiceSession (STT/recording) is
-        created. Users can ``!join`` for full voice interaction. The music
-        player only needs a connected VoiceClient to stream audio.
-
-        Returns:
-            The connected VoiceClient, or None if no channels are available.
+        Lightweight join — no VoiceSession (STT/recording). For full voice
+        interaction the user invokes ``/join``. The music player only needs
+        a connected VoiceClient to stream audio.
         """
-        best_channel: discord.VoiceChannel | None = None
-        best_count = -1
-
-        for channel in guild.voice_channels:
-            humans = sum(1 for m in channel.members if not m.bot)
-            if humans > best_count:
-                best_count = humans
-                best_channel = channel
-
-        if not best_channel:
+        member = guild.get_member(user_id)
+        if not member or not member.voice or not member.voice.channel:
             return None
 
+        channel = member.voice.channel
         try:
-            vc = await best_channel.connect(timeout=15.0)
+            vc = await channel.connect(timeout=15.0)
             log.info(
-                "Auto-joined voice for music",
+                "Auto-joined requester's voice channel",
                 guild=guild.id,
-                channel=best_channel.name,
-                humans=best_count,
+                channel=channel.name,
+                requester=user_id,
             )
             return vc
         except Exception as exc:
@@ -202,23 +198,47 @@ class MusicCog(commands.Cog, name="Music"):
 
         vc = guild.voice_client
         if not vc or not vc.is_connected():
-            vc = await self._auto_join_voice(guild)
+            # Not in a VC yet — join the requester's channel (and ONLY theirs).
+            vc = await self._auto_join_requester_vc(guild, user_id)
             if not vc:
-                return "No voice channels available to join."
+                return (
+                    "you gotta be in a voice channel for me to play anything. "
+                    "hop in and try again."
+                )
+        else:
+            # Already in a VC. Requester must be in THE SAME one, otherwise
+            # music would play where they can't hear it. This is the invariant
+            # that keeps the UX coherent across voice, text, and button input.
+            member = guild.get_member(user_id)
+            in_same_vc = (
+                member is not None
+                and member.voice is not None
+                and member.voice.channel == vc.channel
+            )
+            # Structured UI actions (button clicks) pass structured tool_args
+            # and only appear on the now-playing embed — if the clicker isn't
+            # in the VC they see an ephemeral error from the view, so we don't
+            # re-check here. The gate only applies to "play"/"queue"-style
+            # requests where the action creates new audio output.
+            tool_action = (tool_args or {}).get("action", "")
+            starts_new_audio = tool_action in ("", "play")
+            if starts_new_audio and not in_same_vc:
+                return (
+                    "nah, you gotta be in the voice channel with me to request "
+                    "tunes. can't serenade an empty seat."
+                )
 
         player = self._get_or_create_player(vc, guild_id)
         member = guild.get_member(user_id)
         requester_name = member.display_name if member else f"User-{user_id}"
 
-        # Extract structured action from LLM tool args.
-        # If no tool_args (text command fallback), parse from raw request.
+        # Structured input is the only contract now. Voice/text @mention
+        # paths route through the LLM which produces tool_args; button
+        # callbacks build tool_args directly. Text command fallbacks are
+        # deleted — see docs/technical_notes.md "One-Handler Music Contract".
         action = (tool_args or {}).get("action", "")
         query = (tool_args or {}).get("query", "")
         value = (tool_args or {}).get("value")
-
-        if not action:
-            # Fallback: text commands (!play, !skip etc.) don't go through LLM
-            action, query, value = self._parse_intent_fallback(request)
 
         log.info("music.action", action=action, query=query[:60] if query else "",
                  value=value, user=user_id)
@@ -288,13 +308,7 @@ class MusicCog(commands.Cog, name="Music"):
             return f"[SILENT]Volume raised to {int(player.volume * 100)}%."
 
         # Default: "play" action (or unrecognized action treated as play)
-        if not query:
-            # Extract query from raw request as fallback
-            query = self._extract_play_query(request)
-
-        # Reject queries that are just the command word itself (no actual song name)
-        bare_commands = {"play", "queue", "put on", "throw on", "add", "play me"}
-        if not query or len(query) < 2 or query.lower().strip(" .!?,") in bare_commands:
+        if not query or len(query) < 2:
             return "What do you want me to play?"
 
         # Playlist URL
@@ -323,150 +337,28 @@ class MusicCog(commands.Cog, name="Music"):
         return f"Queued {track.title} [{track.duration_str}] at position {pos}."
 
     # ------------------------------------------------------------------
-    # Fallback parsing (text commands only — LLM path never hits this)
+    # Now-playing UI (embed + persistent buttons)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _parse_intent_fallback(request: str) -> tuple[str, str, int | None]:
-        """Parse intent from raw text when no LLM tool_args are available.
+    def build_now_playing_message(
+        self, guild_id: int,
+    ) -> tuple[discord.Embed, discord.ui.View] | None:
+        """Render the current track as (embed, persistent-view) for posting.
 
-        Used only for text commands (!play, !skip) that bypass the LLM.
-        Returns (action, query, value).
+        Called by AgentMessageHandler after a music action completes, to
+        attach the now-playing card to the text channel. Returns None when
+        nothing is playing (e.g. the action was a skip-with-empty-queue).
+
+        The view's button callbacks funnel through ``handle_music_request``
+        with structured ``tool_args`` — the same entry point voice/text
+        @mentions use. No divergent code paths.
         """
-        req_lower = request.lower().strip()
+        from poob.discord_bot.music_ui import build_now_playing_message as _build
 
-        if any(kw in req_lower for kw in ["skip", "next song", "next track"]):
-            return "skip", "", None
-        if "pause" in req_lower:
-            return "pause", "", None
-        if "resume" in req_lower or "unpause" in req_lower:
-            return "resume", "", None
-        if any(kw in req_lower for kw in [
-            "stop music", "stop the music", "stop playing", "stop this",
-            "stop it", "clear queue",
-        ]) or req_lower in ("stop", "stop stop"):
-            return "stop", "", None
-        if any(kw in req_lower for kw in [
-            "what's playing", "whats playing", "now playing", "what song",
-        ]):
-            return "now_playing", "", None
-        if "shuffle" in req_lower:
-            return "shuffle", "", None
-        if "loop" in req_lower:
-            return "loop", "", None
-
-        vol_match = re.search(r"volume\s*[,.]?\s*(?:to\s+)?(\d+)", req_lower)
-        if vol_match:
-            return "volume", "", int(vol_match.group(1))
-        if any(kw in req_lower for kw in ["turn down", "lower", "quieter"]):
-            return "volume_down", "", None
-        if any(kw in req_lower for kw in ["turn up", "louder"]):
-            return "volume_up", "", None
-
-        # Default to play
-        query = MusicCog._extract_play_query(request)
-        return "play", query, None
-
-    @staticmethod
-    def _extract_play_query(request: str) -> str:
-        """Extract the song/artist query from a play request."""
-        # Strip wake word prefix
-        cleaned = re.sub(
-            r'^(?:hey[,.]?\s*)?(?:poob|poop|pub|boob)[,.]?\s*',
-            '', request, flags=re.IGNORECASE,
-        ).strip()
-        if not cleaned:
-            cleaned = request
-
-        req_lower = cleaned.lower()
-        # Longer prefixes first to prevent "play " matching before "play me "
-        for prefix in [
-            "play the song called ", "play the song ", "can you play ",
-            "play some ", "play me ", "queue up ", "throw on ", "put on ",
-            "play ", "queue ", "add ",
-        ]:
-            idx = req_lower.find(prefix)
-            if idx != -1:
-                return cleaned[idx + len(prefix):].strip()
-        return cleaned
-
-    # ------------------------------------------------------------------
-    # Text commands (fallbacks)
-    # ------------------------------------------------------------------
-
-    @commands.command(name="play", aliases=["p"])
-    async def play_cmd(self, ctx: commands.Context, *, query: str) -> None:
-        """Play a song or add it to the queue.
-
-        Usage: !play <url or search query>
-        """
-        async with ctx.typing():
-            result = await self.handle_music_request(
-                f"play {query}",
-                ctx.author.id,
-                ctx.guild.id,
-            )
-        await ctx.send(result)
-
-    @commands.command(name="skip", aliases=["s", "next"])
-    async def skip_cmd(self, ctx: commands.Context) -> None:
-        """Skip the current track."""
-        result = await self.handle_music_request("skip", ctx.author.id, ctx.guild.id)
-        await ctx.send(result)
-
-    @commands.command(name="mpause")
-    async def pause_cmd(self, ctx: commands.Context) -> None:
-        """Pause music playback."""
-        result = await self.handle_music_request("pause music", ctx.author.id, ctx.guild.id)
-        await ctx.send(result)
-
-    @commands.command(name="mresume")
-    async def resume_cmd(self, ctx: commands.Context) -> None:
-        """Resume music playback."""
-        result = await self.handle_music_request("resume music", ctx.author.id, ctx.guild.id)
-        await ctx.send(result)
-
-    @commands.command(name="mstop")
-    async def stop_cmd(self, ctx: commands.Context) -> None:
-        """Stop music and clear the queue."""
-        result = await self.handle_music_request("stop music", ctx.author.id, ctx.guild.id)
-        await ctx.send(result)
-
-    @commands.command(name="np", aliases=["nowplaying"])
-    async def now_playing_cmd(self, ctx: commands.Context) -> None:
-        """Show what's currently playing."""
-        result = await self.handle_music_request("what's playing", ctx.author.id, ctx.guild.id)
-        await ctx.send(result)
-
-    @commands.command(name="queue", aliases=["q"])
-    async def queue_cmd(self, ctx: commands.Context) -> None:
-        """Show the music queue."""
-        player = self._get_player(ctx.guild.id)
-        if not player:
-            await ctx.send("Nothing playing.")
-            return
-        await ctx.send(player.queue.format_queue())
-
-    @commands.command(name="shuffle")
-    async def shuffle_cmd(self, ctx: commands.Context) -> None:
-        """Toggle queue shuffle."""
-        result = await self.handle_music_request("shuffle", ctx.author.id, ctx.guild.id)
-        await ctx.send(result)
-
-    @commands.command(name="loop")
-    async def loop_cmd(self, ctx: commands.Context) -> None:
-        """Cycle loop mode: off → track → queue."""
-        result = await self.handle_music_request("loop", ctx.author.id, ctx.guild.id)
-        await ctx.send(result)
-
-    @commands.command(name="volume", aliases=["vol"])
-    async def volume_cmd(self, ctx: commands.Context, vol: int) -> None:
-        """Set music volume (0-200).
-
-        Usage: !volume 50
-        """
-        result = await self.handle_music_request(f"volume {vol}", ctx.author.id, ctx.guild.id)
-        await ctx.send(result)
+        player = self._get_player(guild_id)
+        if player is None:
+            return None
+        return _build(player, self.handle_music_request)
 
     # ------------------------------------------------------------------
     # Cleanup

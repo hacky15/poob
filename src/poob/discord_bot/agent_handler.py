@@ -1,5 +1,17 @@
 """Discord message handler — routes @mentions and DMs through PoobBrain.
 
+Single source of truth for text messages targeting Poob. Flow:
+
+1. Generate response via :class:`PoobBrain` (LLM tool calling may route
+   to deal or music sub-agents — all signalled via structured tool_args
+   inside the brain).
+2. Post the text reply in the originating channel.
+3. Ask :class:`VoiceCog` to speak the response in VC — but only if the
+   author shares Poob's voice channel. Deterministic gate, no opt-in.
+4. If the response was music-related and a track is now playing, ask
+   :class:`MusicCog` for a (embed, persistent-view) pair and post it so
+   users get the now-playing card with control buttons.
+
 Fetches recent channel history so the brain has conversational context,
 mirroring how voice sessions maintain a rolling transcript.
 """
@@ -125,6 +137,12 @@ class AgentMessageHandler(commands.Cog):
             log.exception("agent.run_error", user=user_id)
             response = "Sorry, something went wrong processing your request."
 
+        # Track whether music just started so we can attach the now-playing
+        # card. We snapshot the current track *before* the brain call (which
+        # may queue/play as a side effect) and compare after.
+        music_cog = self._bot.get_cog("Music")
+        track_before = _current_track(music_cog, message.guild.id if message.guild else 0)
+
         # Discord has a 2000-char limit; split if needed
         try:
             for chunk in _split_message(response):
@@ -132,6 +150,32 @@ class AgentMessageHandler(commands.Cog):
             log.info("agent.reply_sent", user=user_id)
         except Exception:
             log.exception("agent.reply_error", user=user_id)
+            return
+
+        # Speak in VC iff the author is in Poob's voice channel.
+        # VoiceCog encapsulates the gate; we just ask.
+        voice_cog = self._bot.get_cog("Voice")
+        if voice_cog is not None and hasattr(voice_cog, "speak_if_in_channel"):
+            try:
+                await voice_cog.speak_if_in_channel(message, response)
+            except Exception:
+                log.exception("agent.voice_speak_error", user=user_id)
+
+        # Post the now-playing card when a new track just started as a
+        # side effect of this message (play/queue routed through the
+        # brain's music_assistant tool).
+        if music_cog is not None and message.guild is not None:
+            track_after = _current_track(music_cog, message.guild.id)
+            if track_after is not None and track_after is not track_before:
+                try:
+                    payload = music_cog.build_now_playing_message(message.guild.id)
+                    if payload is not None:
+                        embed, view = payload
+                        await message.channel.send(embed=embed, view=view)
+                        log.info("agent.now_playing_posted",
+                                 track=track_after.title[:60])
+                except Exception:
+                    log.exception("agent.now_playing_error", user=user_id)
 
     # ------------------------------------------------------------------
     # Channel context
@@ -194,6 +238,20 @@ class AgentMessageHandler(commands.Cog):
         # Strip any remaining unresolved mentions
         text = _MENTION_RE.sub("", text).strip()
         return text
+
+
+def _current_track(music_cog, guild_id: int):
+    """Read the currently playing Track from MusicCog, if any.
+
+    Used to detect "a new track started as a side effect of this message"
+    by comparing identity before and after the brain call.
+    """
+    if music_cog is None or guild_id == 0:
+        return None
+    player = music_cog._get_player(guild_id)
+    if player is None:
+        return None
+    return player.current_track
 
 
 def _split_message(text: str, limit: int = 2000) -> list[str]:

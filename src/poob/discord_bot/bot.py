@@ -134,12 +134,33 @@ class ScraperBot(commands.Bot):
 
         log.info("All cogs loaded")
 
+    def _register_persistent_views(self) -> None:
+        """Register Views with ``timeout=None`` so buttons survive restarts.
+
+        Each persistent view is keyed by the stable ``custom_id`` strings
+        assigned to its buttons (``poob:music:skip``, etc.). Pycord maps
+        incoming component interactions to registered views by those ids.
+        """
+        try:
+            music_cog = self.get_cog("Music")
+            if music_cog is not None:
+                from poob.discord_bot.music_ui import MusicControlsView
+
+                self.add_view(MusicControlsView(music_cog.handle_music_request))
+                log.info("Registered persistent MusicControlsView")
+        except Exception as exc:
+            log.warning("Persistent view registration failed", error=str(exc)[:120])
+
     async def on_ready(self) -> None:
         """Called when the bot has connected to Discord."""
         # Load cogs on first ready (Pycord doesn't have setup_hook)
         if not self._cogs_loaded:
             self._cogs_loaded = True
             await self._load_cogs()
+            # Re-register persistent views so button custom_ids route correctly
+            # after bot restarts. Without this, buttons on previously-posted
+            # now-playing embeds fail with "This interaction failed".
+            self._register_persistent_views()
 
         log.info("Bot is ready", user=str(self.user), guilds=len(self.guilds))
 

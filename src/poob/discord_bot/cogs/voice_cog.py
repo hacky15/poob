@@ -1,10 +1,20 @@
 """Voice chat cog — Discord VC integration for Poob (Pycord native).
 
-Commands: !join, !leave, !say, !voice.
+Slash commands: ``/join``, ``/leave`` — the only remaining command surface.
+Everything else (TTS, speech responses, music triggers) flows through
+natural-language @mentions or voice. Slash commands are the canonical
+Discord-UI equivalent of prefix commands and survive the "no commands
+with Poob" rule as infrastructure for entering VC.
+
 Uses Pycord's native start_recording() + custom RealtimeAudioSink for
 real-time voice receive with DAVE E2EE support.
 
 Stage channel support: auto-promotes bot and users to Speaker.
+
+Voice-output gating: exposes ``speak_if_in_channel(message, text)`` which
+AgentMessageHandler calls after it posts a text reply. Speaks via TTS iff
+the author is in the voice channel Poob is currently in — no opt-in toggle,
+no duplicate ``on_message`` listener.
 """
 
 from __future__ import annotations
@@ -44,7 +54,6 @@ class VoiceCog(commands.Cog, name="Voice"):
         self.bot = bot
         self._session_factory = session_factory
         self._sessions: dict[int, VoiceSession] = {}  # guild_id → session
-        self._text_to_voice: set[int] = set()  # guild_ids with text-to-voice enabled
 
     def _stop_tasks(self) -> None:
         """Stop background tasks."""
@@ -53,7 +62,6 @@ class VoiceCog(commands.Cog, name="Voice"):
     async def _force_disconnect(self, guild: discord.Guild) -> None:
         """Force-disconnect any existing voice client for this guild."""
         guild_id = guild.id
-        self._text_to_voice.discard(guild_id)
 
         if guild_id in self._sessions:
             session = self._sessions.pop(guild_id)
@@ -107,28 +115,35 @@ class VoiceCog(commands.Cog, name="Voice"):
         """Check if a channel is a stage channel."""
         return isinstance(channel, discord.StageChannel)
 
-    @commands.command(name="join", aliases=["vc"])
-    async def join_voice(self, ctx: commands.Context) -> None:  # type: ignore[type-arg]
-        """Join your voice channel. Bot speaks responses via TTS.
+    @discord.slash_command(name="join", description="Join your voice channel so Poob can listen and speak.")
+    async def join_voice(self, ctx: discord.ApplicationContext) -> None:
+        """Join the caller's voice channel.
 
-        Works in both regular voice channels and stage channels.
-        Usage: !join or !vc
+        Works in both regular voice channels and stage channels. This is
+        the only way to get Poob into a VC — all @mention / button / voice
+        interactions require the bot to already be connected.
         """
-        if not ctx.author.voice or not ctx.author.voice.channel:  # type: ignore[union-attr]
-            await ctx.send("You need to be in a voice channel first.")
+        if not ctx.author.voice or not ctx.author.voice.channel:
+            await ctx.respond(
+                "you gotta be in a voice channel first.", ephemeral=True,
+            )
             return
 
-        channel = ctx.author.voice.channel  # type: ignore[union-attr]
-        guild = ctx.guild  # type: ignore[union-attr]
+        channel = ctx.author.voice.channel
+        guild = ctx.guild
         guild_id = guild.id
         is_stage = self._is_stage_channel(channel)
+
+        # Slash commands must be acknowledged within 3s. The VC connect can
+        # take longer, so defer up front and then follow up.
+        await ctx.defer()
 
         # Already in this exact channel?
         if guild_id in self._sessions:
             existing = self._sessions[guild_id]
             if existing.voice_client.is_connected():
                 if existing.voice_client.channel == channel:
-                    await ctx.send("I'm already in your channel.")
+                    await ctx.followup.send("I'm already in your channel.")
                     return
 
         await self._force_disconnect(guild)
@@ -207,16 +222,13 @@ class VoiceCog(commands.Cog, name="Voice"):
                 dave_version=dave_version,
             )
 
-            # Enable text-to-voice mode
-            self._text_to_voice.add(guild_id)
-
             # Roll horniness level for this voice session (1-10)
             level = session.brain.roll_horniness()
 
-            await ctx.send(
+            await ctx.followup.send(
                 f"Joined **{channel.name}** and listening!\n"
-                f"I can hear you — talk and I'll respond.\n"
-                f"@mention me or type while in VC to chat. `!leave` to disconnect."
+                f"I hear you — talk, @mention, or tap buttons. "
+                f"Use `/leave` to disconnect."
             )
 
             # Play entrance catchphrase
@@ -232,130 +244,79 @@ class VoiceCog(commands.Cog, name="Voice"):
         except Exception as exc:
             await self._force_disconnect(guild)
             log.error("Failed to join voice", error=str(exc)[:120])
-            await ctx.send(f"Failed to join voice channel: {exc}")
+            await ctx.followup.send(f"Failed to join voice channel: {exc}")
 
-    @commands.command(name="leave", aliases=["dc"])
-    async def leave_voice(self, ctx: commands.Context) -> None:  # type: ignore[type-arg]
-        """Leave the current voice channel.
-
-        Usage: !leave or !dc
-        """
-        guild = ctx.guild  # type: ignore[union-attr]
+    @discord.slash_command(name="leave", description="Disconnect Poob from voice.")
+    async def leave_voice(self, ctx: discord.ApplicationContext) -> None:
+        """Leave the current voice channel."""
+        guild = ctx.guild
 
         if guild.id not in self._sessions and guild.voice_client is None:
-            await ctx.send("I'm not in a voice channel.")
+            await ctx.respond("I'm not in a voice channel.", ephemeral=True)
             return
 
+        await ctx.defer()
         await self._force_disconnect(guild)
-        await ctx.send("Left voice channel. Later!")
+        await ctx.followup.send("Left voice channel. Later!")
         log.info("Left voice channel", guild=guild.id)
 
-    @commands.command(name="say")
-    async def say_text(self, ctx: commands.Context, *, text: str) -> None:  # type: ignore[type-arg]
-        """Make the bot say something in voice chat via TTS.
+    # ------------------------------------------------------------------
+    # Voice-output gate for AgentMessageHandler
+    # ------------------------------------------------------------------
 
-        Usage: !say Hello, how are you?
+    async def speak_if_in_channel(
+        self, message: discord.Message, text: str,
+    ) -> bool:
+        """Speak ``text`` via TTS iff the message author is in Poob's VC.
+
+        Called by AgentMessageHandler after it posts a text reply so that
+        chat @mentions from users inside the VC also hear the response,
+        while chat @mentions from outside the VC get text only. No opt-in
+        toggle — the VC-membership check is the deterministic gate.
+
+        Args:
+            message: The triggering text message.
+            text: The response text to synthesize.
+
+        Returns:
+            True if audio was played, False otherwise.
         """
-        guild_id = ctx.guild.id  # type: ignore[union-attr]
-        session = self._get_session(guild_id)
+        # DMs and non-guild messages can never share a VC with the bot.
+        if not message.guild:
+            return False
 
-        if not session:
-            await ctx.send("I'm not in a voice channel. Use `!join` first.")
-            return
+        session = self._get_session(message.guild.id)
+        if session is None:
+            return False
 
-        await ctx.message.add_reaction("\U0001F50A")  # speaker emoji
+        # Must have voice state with a channel matching the session's VC.
+        author_voice = getattr(message.author, "voice", None)
+        if author_voice is None or author_voice.channel is None:
+            return False
+        if author_voice.channel != session.voice_client.channel:
+            return False
+
+        if not text or not text.strip():
+            return False
 
         try:
             audio = await session._synthesize(text)
-            if audio:
-                await session._play_audio(audio)
-                log.info("TTS played", text=text[:80], guild=guild_id)
-            else:
-                await ctx.send("TTS failed — no audio generated.")
+            if not audio:
+                return False
+            await session._play_audio(audio)
+            log.info(
+                "Spoke chat response in VC",
+                user=message.author.id,
+                bytes=len(audio),
+            )
+            return True
         except Exception as exc:
-            log.error("TTS playback failed", error=str(exc)[:100])
-            await ctx.send(f"TTS error: {exc}")
+            log.warning("speak_if_in_channel failed", error=str(exc)[:100])
+            return False
 
-    @commands.command(name="voice")
-    async def toggle_voice(self, ctx: commands.Context) -> None:  # type: ignore[type-arg]
-        """Toggle text-to-voice mode on/off.
-
-        When on, messages in this channel get spoken aloud in VC.
-        Usage: !voice
-        """
-        guild_id = ctx.guild.id  # type: ignore[union-attr]
-
-        if guild_id not in self._sessions:
-            await ctx.send("I'm not in a voice channel. Use `!join` first.")
-            return
-
-        if guild_id in self._text_to_voice:
-            self._text_to_voice.discard(guild_id)
-            await ctx.send("Text-to-voice **disabled**. Use `!say` for manual TTS.")
-        else:
-            self._text_to_voice.add(guild_id)
-            await ctx.send("Text-to-voice **enabled**. Type here and I'll respond in VC!")
-
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message) -> None:
-        """Respond to text messages with voice when in text-to-voice mode."""
-        if message.author.bot:
-            return
-        if not message.guild:
-            return
-        if message.content.startswith(self.bot.command_prefix):  # type: ignore[arg-type]
-            return
-
-        guild_id = message.guild.id
-        if guild_id not in self._text_to_voice:
-            return
-
-        session = self._get_session(guild_id)
-        if not session:
-            return
-
-        is_mention = self.bot.user in message.mentions if self.bot.user else False
-        user_in_vc = False
-        if hasattr(message.author, "voice") and message.author.voice:  # type: ignore[union-attr]
-            user_vc = message.author.voice.channel  # type: ignore[union-attr]
-            if user_vc and session.voice_client.channel == user_vc:
-                user_in_vc = True
-
-        if not is_mention and not user_in_vc:
-            return
-
-        text = message.content
-        if self.bot.user:
-            text = text.replace(f"<@{self.bot.user.id}>", "").strip()
-            text = text.replace(f"<@!{self.bot.user.id}>", "").strip()
-
-        if not text:
-            return
-
-        log.info("Text-to-voice triggered", user=message.author.id, text=text[:80])
-
-        try:
-            async with message.channel.typing():
-                response = await session.brain.respond(
-                    message=text,
-                    user_id=str(message.author.id),
-                    channel_id=str(message.channel.id),
-                    voice=True,
-                    guild_id=message.guild.id,
-                )
-
-            if not response:
-                return
-
-            await message.reply(response, mention_author=False)
-
-            audio = await session._synthesize(response)
-            if audio:
-                await session._play_audio(audio)
-                log.info("Voice response played", user=message.author.id)
-
-        except Exception as exc:
-            log.error("Text-to-voice failed", error=str(exc)[:120])
+    # ------------------------------------------------------------------
+    # Voice state bookkeeping
+    # ------------------------------------------------------------------
 
     @commands.Cog.listener()
     async def on_voice_state_update(
@@ -401,4 +362,3 @@ class VoiceCog(commands.Cog, name="Voice"):
                     session.voice_client.stop_recording()
                 await session.voice_client.disconnect()
         self._sessions.clear()
-        self._text_to_voice.clear()
