@@ -1248,3 +1248,58 @@ Music volume default (`config.music_volume = 0.5`) is user-adjustable via `/volu
 ### Related
 
 See "Toob Voice Tuning (April 21 2026)" above — the `volume=1.35` stage inside Toob's filter_chain is now upstream of speechnorm, so its absolute dB contribution is largely absorbed. Leaving it in place because the bass boost and echo stages can reduce perceived loudness; the pre-gain keeps Toob arriving at speechnorm with enough RMS to avoid over-expansion.
+
+---
+
+## Voice Addressee Confusion — Wrong-User Vocatives (April 22 2026)
+
+### Problem
+
+Ben asked Poob "How long was the song that you just played?" — Poob replied **"lab rat, are you asking because..."**. Jeweinery addressed Poob seconds later — Poob again opened with **"lab rat, you're speaking to me..."**. Neither user is Lab Rat. Lab Rat had been dominating the voice channel with long passive utterances.
+
+### Root cause
+
+The prompt assembled in `session.py:_process_single_response` concatenated:
+
+1. 15 lines of passive transcript (every user's speech, formatted `"Lab Rat (labrat24): blah blah"`), and
+2. The current speaker's address, buried at the bottom: `"Ben (hacky15) said to you: <transcript>"`.
+
+Compounding this, the Poob system prompt at `brain/poob.py:_build_system_prompt` instructed: *"Use people's names when talking to them (from the transcript)"* — actively telling the model to pull any name from the transcript. Smaller models (Groq llama-3.3-70b, Cerebras qwen-3-235b) weight the most-frequent name in context when choosing a vocative, and Lab Rat's name was over-represented. Result: confident wrong-name responses.
+
+### Fix
+
+Two changes, both at the right architectural layer:
+
+**1. `src/poob/voice/session.py` — make the current speaker visually unmissable.**
+
+```python
+prompt = (
+    f"[Recent conversation you've been listening to:\n{conv_context}]\n\n"
+    f"=== The user speaking to you RIGHT NOW is {user_name} ===\n"
+    f"{user_name} just said to you: {transcript}\n"
+    f"(If you address them by name at all, use ONLY \"{first_name}\" "
+    f"— never another user's name from the transcript above.)"
+)
+```
+
+The `=== ===` delimiter + explicit "RIGHT NOW" + negative instruction ("never another user's name") gives the model three independent signals, all pointing at the same identity. `first_name` is extracted from `"Ben (hacky15)"` by splitting on `" ("`.
+
+**2. `src/poob/brain/poob.py` — stop encouraging vocatives in voice mode.**
+
+```text
+- In voice, avoid vocatives (don't start responses with someone's name).
+  If you absolutely must address someone, use ONLY the name marked as the
+  CURRENT SPEAKER in the prompt — never a name from the passive transcript.
+```
+
+Replaces the old "Use people's names when talking to them" rule. In voice, vocatives are unnatural anyway — real speakers rarely prefix every reply with "Ben, ...".
+
+### Why not strip passive context
+
+Passive context stays in the prompt because "skip the song" / "turn it down" / "who said that thing about X" all need it. The fix is at the identity layer, not the context layer.
+
+### Validation
+
+- All 902 unit tests pass.
+- AST parse clean on both files.
+- Deploy signal to watch: subsequent `Response complete` lines should not start with wrong-user vocatives (e.g. no more `response="lab rat, ..."` when the addresser is someone other than Lab Rat).

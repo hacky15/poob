@@ -367,15 +367,23 @@ class VoiceSession:
         t0 = _time.monotonic()
 
         async with self._response_lock:
-            # Build context prompt
+            # Build context prompt. The CURRENT SPEAKER must be unambiguous —
+            # smaller LLMs will confuse addressee identity when passive-context
+            # names dominate the token distribution (real incident: Lab Rat was
+            # chatting heavily, Ben asked Poob a question, Poob replied "lab
+            # rat, ..." — picked the most-salient name from context).
             conv_context = self._build_context()
+            first_name = user_name.split(" (")[0]
             if conv_context:
                 prompt = (
                     f"[Recent conversation you've been listening to:\n{conv_context}]\n\n"
-                    f"{user_name} said to you: {transcript}"
+                    f"=== The user speaking to you RIGHT NOW is {user_name} ===\n"
+                    f"{user_name} just said to you: {transcript}\n"
+                    f"(If you address them by name at all, use ONLY \"{first_name}\" "
+                    f"— never another user's name from the transcript above.)"
                 )
             else:
-                prompt = f"{user_name}: {transcript}"
+                prompt = f"{user_name} said to you: {transcript}"
 
             # Update brain's music context so the LLM knows if music is playing.
             # This lets "skip" route to music_assistant instead of casual chat.
