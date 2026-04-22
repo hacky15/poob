@@ -134,6 +134,37 @@ class ScraperBot(commands.Bot):
 
         log.info("All cogs loaded")
 
+    async def _sync_slash_commands(self) -> None:
+        """Register slash commands with Discord after cogs are loaded.
+
+        Pycord's automatic sync runs in ``on_connect``, which fires before
+        ``on_ready`` — and we only add cogs in ``on_ready``. That means the
+        automatic sync sees zero slash commands and registers nothing.
+        This method catches that ordering gap.
+
+        Syncs per-guild (via every guild the bot is currently in) so commands
+        appear instantly. Global sync would work too, but Discord takes up to
+        one hour to propagate global commands — unusable for iterative work.
+        """
+        try:
+            guild_ids = [g.id for g in self.guilds]
+            if guild_ids:
+                await self.sync_commands(guild_ids=guild_ids)
+                log.info(
+                    "Synced slash commands per-guild",
+                    guilds=len(guild_ids),
+                )
+            else:
+                # No guilds yet — fall back to global sync. Not great (slow),
+                # but the bot will get per-guild sync on next restart.
+                await self.sync_commands()
+                log.info("Synced slash commands globally (no guilds cached)")
+        except Exception as exc:
+            log.error(
+                "Failed to sync slash commands",
+                error=str(exc)[:150],
+            )
+
     def _register_persistent_views(self) -> None:
         """Register Views with ``timeout=None`` so buttons survive restarts.
 
@@ -161,6 +192,15 @@ class ScraperBot(commands.Bot):
             # after bot restarts. Without this, buttons on previously-posted
             # now-playing embeds fail with "This interaction failed".
             self._register_persistent_views()
+            # Sync slash commands. Pycord's auto-sync in on_connect fires
+            # BEFORE on_ready, so at that point no cogs have been added and
+            # no slash commands exist to register. We must sync again here,
+            # after _load_cogs, or /join and /leave never reach Discord.
+            #
+            # Sync per-guild (not global) so commands appear INSTANTLY.
+            # Global sync takes up to 1 hour to propagate. Per-guild is
+            # cached on our side via self.guilds.
+            await self._sync_slash_commands()
 
         log.info("Bot is ready", user=str(self.user), guilds=len(self.guilds))
 

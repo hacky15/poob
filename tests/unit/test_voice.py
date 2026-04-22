@@ -15,7 +15,6 @@ from poob.voice.audio_buffer import (
     VADState,
     rms_energy,
 )
-from poob.voice.conversation import VoiceConversationManager
 from poob.voice.stt import GroqWhisperSTT, _pcm_to_wav, _stereo_to_mono
 
 
@@ -234,51 +233,9 @@ class TestGroqWhisperSTT:
         assert result == ""
 
 
-# ---------------------------------------------------------------------------
-# conversation tests
-# ---------------------------------------------------------------------------
-
-class TestVoiceConversationManager:
-    """Tests for voice conversation LLM manager."""
-
-    def test_history_management(self) -> None:
-        mgr = VoiceConversationManager(max_history=3)
-        messages = mgr._get_messages(user_id=1, user_text="hello")
-        # System + 1 user message
-        assert len(messages) == 2
-        assert messages[0]["role"] == "system"
-        assert messages[1]["content"] == "hello"
-
-    def test_history_trimming(self) -> None:
-        mgr = VoiceConversationManager(max_history=2)
-        # Add 3 messages
-        mgr._get_messages(1, "first")
-        mgr._save_response(1, "response1")
-        mgr._get_messages(1, "second")
-        mgr._save_response(1, "response2")
-        messages = mgr._get_messages(1, "third")
-
-        # Should have system + last 2 history entries (trimmed to max_history)
-        # max_history=2 means only 2 ConversationMessages kept
-        history = mgr._histories[1]
-        assert len(history) == 2
-
-    def test_clear_history(self) -> None:
-        mgr = VoiceConversationManager()
-        mgr._get_messages(1, "hello")
-        mgr._save_response(1, "hi")
-        assert len(mgr._histories[1]) > 0
-
-        mgr.clear_history(1)
-        assert 1 not in mgr._histories
-
-    @pytest.mark.asyncio
-    async def test_generate_fallback_message(self) -> None:
-        """With no API keys, should return fallback message."""
-        mgr = VoiceConversationManager(
-            groq_api_key="",
-            cerebras_api_key="",
-            ollama_base_url="http://localhost:99999",  # Won't connect
-        )
-        result = await mgr.generate(user_id=1, user_text="hello")
-        assert "offline" in result.lower() or "sorry" in result.lower()
+# TestVoiceConversationManager removed April 22 2026:
+# VoiceConversationManager and its source file src/poob/voice/conversation.py
+# were deprecated in the March 2026 PoobBrain unification refactor and have
+# been deleted. All voice conversation flows route through
+# poob.brain.poob.PoobBrain now — the dedicated smoke coverage for that path
+# lives in tests/unit/test_music_ui.py (dual-gate wake + VC-membership gate).

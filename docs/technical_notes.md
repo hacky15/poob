@@ -671,7 +671,7 @@ PoobBrain (tiny ~500 char prompt + deal_assistant tool)
 - **MODIFIED**: `voice/session.py` — `brain: PoobBrain` replaces `conversation: VoiceConversationManager`
 - **MODIFIED**: `discord_bot/cogs/voice_cog.py` — text-to-voice uses `session.brain.respond()`
 - **MODIFIED**: `main.py` — creates PoobBrain, passes to voice sessions and bot
-- **DEPRECATED** (not deleted): `voice/conversation.py` — VoiceConversationManager no longer used in production
+- **DELETED** (April 22 2026): `voice/conversation.py` — VoiceConversationManager was deprecated in the March 2026 unification refactor and has now been removed. `tests/unit/test_voice.py` lost its `TestVoiceConversationManager` class in the same cleanup; the remaining tests (audio buffer, VAD config, PCM/WAV conversion, Groq Whisper STT) still run. Voice dialog paths live in `poob.brain.poob.PoobBrain`; smoke tests for the VC-membership gate and dual-gate wake live in `tests/unit/test_music_ui.py`.
 
 ### Common Pitfalls
 - **Don't add personality to the deal agent prompt**: PoobBrain handles personality. If the deal agent has personality too, you get double personality (weird).
@@ -1111,3 +1111,60 @@ Any signal loop where the bot produces audio that can be captured by a mic in th
 `src/poob/brain/poob.py:_wrap_music_response` — system prompt tightened from "One sentence. Under 15 words" to "ONE short sentence. 8-12 words MAX" plus a hard `toob_max_tokens = min(max_tokens, 60)` cap. Prevents drift past the word limit at high temperature.
 
 TTS output volume (non-Toob and Toob alike) bumped from `PCMVolumeTransformer(volume=2.0)` to `2.5` in both the music-overlay and standalone playback paths — Poob was sitting quieter than the music bed after ducking.
+
+---
+
+## Slash Command Registration — `/join` Silent Failure (April 22 2026)
+
+### Problem
+
+User reported `/join` doesn't work. Container log showed the actual attempt:
+
+```
+discord.ext.commands.errors.CommandNotFound: Command "join" is not found
+```
+
+The user was typing `!join` — the old prefix command we deleted in the April 21 refactor. Prefix is gone, slash command replaces it. That part was intended.
+
+But also: `/join` wouldn't have worked either, because **our slash commands were never registered with Discord.**
+
+### Root cause — event ordering bug
+
+Pycord's `commands.Bot` auto-syncs slash commands in the `on_connect` event. `ScraperBot` overrides `on_ready` to load cogs (because Pycord has no `setup_hook`), and `on_ready` fires **after** `on_connect`.
+
+Order of events:
+1. `on_connect` fires → Pycord auto-sync runs → **zero slash commands exist yet** → nothing registers.
+2. `on_ready` fires → `_load_cogs()` adds `VoiceCog` with `@discord.slash_command` decorators.
+3. Commands sit in the bot's local cache, never reach Discord's API.
+
+### Fix
+
+Explicit `self.sync_commands()` call at the end of `_load_cogs()` in `on_ready`. Syncs **per-guild** (not global) because global sync takes up to 1 hour to propagate — unusable for iterative work. Per-guild sync is instant for every guild the bot is currently in.
+
+New commands in guilds the bot joins after startup only register on the next restart — acceptable tradeoff for the iteration speed gain. If this becomes a pain, the correct escalation is a `on_guild_join` handler that calls `sync_commands(guild_ids=[guild.id])`.
+
+### Common pitfall — `auto_sync_commands` isn't a hook
+
+Leaving `auto_sync_commands=True` (the Pycord default) does NOT fix this. The auto-sync fires at a single fixed moment (`on_connect`), before any late-loaded cogs exist. Any bot that loads cogs in `on_ready` (which is every Pycord bot that uses a `commands.Bot` subclass) hits this bug. The only fix is an explicit sync after `add_cog`.
+
+---
+
+## Brain Routing Audit (April 22 2026)
+
+### Old bandaid: fully removed
+
+The `_TOOL_INTENTS` keyword-routing fallback that used to bypass the LLM when Groq failed (Handoff Issue #11) has been **deleted**. No references remain in `src/poob/brain/poob.py` or anywhere else. The only mention is a comment at [poob.py:471](../src/poob/brain/poob.py#L471) describing the old behavior for historical context.
+
+### Current architecture
+
+When Groq's primary tool-calling path fails, `PoobBrain.respond` routes through `_handle_deal`, which invokes the `AgentRunner` and its own cascade (Groq → NVIDIA → Gemini → Ollama). The deal agent has native tool calling across every provider — no intent classification has to happen outside an LLM. Casual messages pass through the agent quickly with no tool calls and get personality-wrapped.
+
+### Secondary heuristic (kept, not a bandaid)
+
+`_groq_with_tools` at [poob.py:1018-1023](../src/poob/brain/poob.py#L1018-L1023) has a small `tool_signals` tuple used to decide whether to continue the provider cascade when the current provider returned text instead of a tool call. It does **not** route around the LLM. Mechanism: if the last user turn contains strings like `"wishlist"`, `"watchlist"`, `"scan"`, `"my list"`, and the first provider (Groq 70B) returned text-only, the next provider (Cerebras) gets a chance to tool-call. If none of them tool-call, the text response stands.
+
+This is provider-cascade stability, not intent routing. Keep it.
+
+### Known weakness
+
+The signal list at [poob.py:1018-1023](../src/poob/brain/poob.py#L1018-L1023) is English-only and hardcoded — novel phrasings ("hey check on my wishes") won't trigger the cascade-retry path. In practice the first Groq model usually routes correctly; this heuristic is only a safety net for weeks when Groq 70B is degraded. Acceptable to leave as-is; expand only if we see tool-miss telemetry.
