@@ -991,9 +991,17 @@ class VoiceSession:
             tmp.close()
             tmp_path = tmp.name
 
+            # speechnorm normalizes TTS RMS toward peak with a built-in
+            # limiter — fixes the root cause of "voice too quiet vs mastered
+            # music" (TTS peaks at ~-16 LUFS, music at ~-9 LUFS). e=12.5 is
+            # the expansion ceiling, r=0.0001 prevents pumping, l=1 keeps
+            # peaks from clipping before the PCMVolumeTransformer stage.
+            # Single-pass, no added latency — applies to both Poob and Toob
+            # (Toob's filter_chain output also flows through here).
             tts_source = discord.FFmpegPCMAudio(
                 tmp_path,
                 executable=FFMPEG_PATH,
+                options="-af speechnorm=e=12.5:r=0.0001:l=1",
             )
 
             # --- Music overlay path ---
@@ -1004,11 +1012,11 @@ class VoiceSession:
                 and self.music_player.mixer is not None
                 and self.voice_client.is_playing()
             ):
-                # Wrap TTS with volume boost for clarity over music.
-                # 2.5 = +8 dB over raw TTS; needed to cut through the ducked
-                # music bed (25%) and still register as prominent. Bumped
-                # from 2.0 on April 21 2026 per user feedback.
-                boosted_tts = discord.PCMVolumeTransformer(tts_source, volume=2.5)
+                # After speechnorm, TTS already sits near peak. 3.0 provides
+                # an extra +1.5 dB for presence over the ducked music bed
+                # (25%); gentle clipping here gives speech the same "fullness"
+                # as mastered music. Was 2.5 before speechnorm was added.
+                boosted_tts = discord.PCMVolumeTransformer(tts_source, volume=3.0)
                 self.music_player.inject_tts_overlay(boosted_tts)
                 log.info("TTS injected as overlay on music")
 
@@ -1024,8 +1032,10 @@ class VoiceSession:
                 return
 
             # --- Standard path (no music) ---
-            # 2.5 = +8 dB over raw TTS (was 2.0 — user asked for louder default).
-            source = discord.PCMVolumeTransformer(tts_source, volume=2.5)
+            # Post-speechnorm: TTS is already at broadcast-standard loudness.
+            # 3.0 brings speech up to match mastered music when Poob is the
+            # only thing playing on join. Was 2.5 before speechnorm was added.
+            source = discord.PCMVolumeTransformer(tts_source, volume=3.0)
 
             # Create a future to await playback completion
             play_done = self._loop.create_future()

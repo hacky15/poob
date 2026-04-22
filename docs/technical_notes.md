@@ -1136,7 +1136,7 @@ Any signal loop where the bot produces audio that can be captured by a mic in th
 
 `src/poob/brain/poob.py:_wrap_music_response` — system prompt tightened from "One sentence. Under 15 words" to "ONE short sentence. 8-12 words MAX" plus a hard `toob_max_tokens = min(max_tokens, 60)` cap. Prevents drift past the word limit at high temperature.
 
-TTS output volume (non-Toob and Toob alike) bumped from `PCMVolumeTransformer(volume=2.0)` to `2.5` in both the music-overlay and standalone playback paths — Poob was sitting quieter than the music bed after ducking.
+TTS output volume (non-Toob and Toob alike) bumped from `PCMVolumeTransformer(volume=2.0)` to `2.5` in both the music-overlay and standalone playback paths — Poob was sitting quieter than the music bed after ducking. **Superseded April 22 2026 — see "TTS Loudness — speechnorm Normalization" below.**
 
 ---
 
@@ -1194,3 +1194,57 @@ This is provider-cascade stability, not intent routing. Keep it.
 ### Known weakness
 
 The signal list at [poob.py:1018-1023](../src/poob/brain/poob.py#L1018-L1023) is English-only and hardcoded — novel phrasings ("hey check on my wishes") won't trigger the cascade-retry path. In practice the first Groq model usually routes correctly; this heuristic is only a safety net for weeks when Groq 70B is degraded. Acceptable to leave as-is; expand only if we see tool-miss telemetry.
+
+---
+
+## TTS Loudness — speechnorm Normalization (April 22 2026)
+
+### Problem
+
+Even after the April 21 bump of `PCMVolumeTransformer` from 2.0 → 2.5, the user reported that Poob's and Toob's voices were "far too quiet compared to base music volume on join." This is the second time the loudness complaint has surfaced — scaling the multiplier didn't fully solve it.
+
+### Root cause
+
+Multiplier-only gain (`PCMVolumeTransformer`) scales **peaks**, not perceived loudness. The actual gap is an RMS / LUFS mismatch between the two audio sources:
+
+- **Mastered music** (YouTube streams, Spotify rips) targets ~-9 to -14 LUFS with heavy compression — the audio "sits at the ceiling."
+- **Raw TTS** (Edge, Google, Kokoro) is produced for speech clarity and peaks at ~-16 LUFS with wide dynamic range.
+
+Multiplying a quiet-RMS signal by 2.5 only brings its peaks up; the *average* level stays perceptually quieter than the loudness-normalized music it sits next to. Hitting int16 peaks with PCMVolumeTransformer caused clipping artifacts before perceptual loudness caught up.
+
+### Fix
+
+Apply FFmpeg `speechnorm` at the decode step in `session.py:_play_audio`, which is the single funnel every TTS payload (Poob *and* Toob) flows through:
+
+```python
+tts_source = discord.FFmpegPCMAudio(
+    tmp_path,
+    executable=FFMPEG_PATH,
+    options="-af speechnorm=e=12.5:r=0.0001:l=1",
+)
+```
+
+`speechnorm` is FFmpeg's dedicated speech loudness normalizer (added in 4.1):
+- `e=12.5` — expansion ceiling; allows up to 12.5× gain on quiet segments
+- `r=0.0001` — per-frame rise max; prevents audible pumping
+- `l=1` — per-frame peak limiter; prevents clipping before the PCMVolumeTransformer stage
+
+Single-pass, low latency (unlike `loudnorm`'s two-pass ~100-200ms overhead), and preserves speech intelligibility. Toob's filter-chain output (which has its own internal `volume=1.35` pre-gain, bass boost, and echo) flows through this same path, so Toob gets the same normalization "for free."
+
+### PCMVolumeTransformer bumped 2.5 → 3.0
+
+After speechnorm, TTS arrives at the `PCMVolumeTransformer` stage near peak. The extra +1.5 dB from 3.0 pushes speech into gentle clipping territory — which, for voice, reads as "fullness" / "presence" and matches the perceptual loudness of mastered music. Both the music-overlay path and the standalone-playback path use 3.0.
+
+### Why not just lower music default
+
+Music volume default (`config.music_volume = 0.5`) is user-adjustable via `/volume` and the persistent UI buttons. Lowering the default would penalize users who wanted loud music. The correct fix was at the TTS layer — that's where the loudness deficit actually lived.
+
+### Validation
+
+- 43/43 voice + music_ui unit tests still pass.
+- AST parse clean on session.py.
+- Deployment signal: watch for `Playing audio` + `TTS injected as overlay on music` logs after `/join`; subjective volume check from user on first speak.
+
+### Related
+
+See "Toob Voice Tuning (April 21 2026)" above — the `volume=1.35` stage inside Toob's filter_chain is now upstream of speechnorm, so its absolute dB contribution is largely absorbed. Leaving it in place because the bass boost and echo stages can reduce perceived loudness; the pre-gain keeps Toob arriving at speechnorm with enough RMS to avoid over-expansion.
