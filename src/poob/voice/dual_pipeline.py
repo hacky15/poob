@@ -484,6 +484,7 @@ class DualPipelineProcessor:
         deepgram_api_key: str,
         on_addressed_utterance: Callable[[int, str, str], None] | None = None,
         on_passive_utterance: Callable[[int, str, str], None] | None = None,
+        bot_audio_active: Callable[[], bool] | None = None,
     ) -> None:
         """Initialize the dual pipeline.
 
@@ -495,6 +496,14 @@ class DualPipelineProcessor:
                 when wake word + speech detected.
             on_passive_utterance: Callback(user_id, user_name, transcript)
                 for passive context (no wake word).
+            bot_audio_active: Callable that returns True when Poob is currently
+                producing audio (TTS speaking, music playing). Used to decide
+                whether a text-only wake match is trustworthy. When the bot is
+                producing audio, mic loopback can cause Deepgram to hallucinate
+                wake phrases — in that window we require BOTH acoustic and
+                semantic confirmation. When the bot is silent, text-match alone
+                is sufficient because openwakeword misses legitimate wakes in
+                noisy environments (background TV/game audio, group calls).
         """
         self._wake_detector = WakeWordDetector(
             model_path=porcupine_keyword_path or None,  # None = use pre-trained hey_jarvis
@@ -503,6 +512,7 @@ class DualPipelineProcessor:
         self._deepgram = DeepgramStreamManager(api_key=deepgram_api_key)
         self._on_addressed = on_addressed_utterance
         self._on_passive = on_passive_utterance
+        self._bot_audio_active = bot_audio_active or (lambda: False)
         self._user_pipelines: dict[int, UserPipeline] = {}
         self._silence_counters: dict[int, int] = {}
         self._SILENCE_THRESHOLD = 50  # 50 frames × 20ms = 1000ms silence → end of speech
@@ -701,43 +711,67 @@ class DualPipelineProcessor:
             pipeline.is_active = False
             return
 
-        # Dual-gate wake word detection: BOTH acoustic and semantic required.
+        # Context-aware dual-gate wake word detection.
         #
-        # Previously text-match alone was sufficient. That path let Deepgram
-        # hallucinations trigger the bot — with keyterm=Poob/play/skip/...
-        # biasing the ASR, ambient audio from speakers (song lyrics, TV,
-        # crosstalk) could produce a transcript like "Hey Poob play X" that
-        # never actually came from a human mouth. Real-world example
-        # (April 21 2026 logs): Ben's mic picked up a song titled "Blah
-        # Blah Blah" 12 seconds after he legitimately asked Poob to play
-        # it, and Deepgram transcribed the loopback as another play request
-        # → duplicate Toob response + double queue.
+        # Three real classes of utterance we need to discriminate:
+        #   1. User says "Hey Poob" cleanly       → both audio + text fire
+        #   2. User says "Hey Poob" in noise       → text fires, audio misses
+        #                                             (openwakeword is brittle
+        #                                             in group calls / game
+        #                                             audio / background TV)
+        #   3. Bot's own music "hey poob" lyric   → text fires, audio misses
+        #      or TTS feedback via mic loopback     (Deepgram keyterm bias
+        #                                             hallucinates the phrase
+        #                                             from ambient loopback)
         #
-        # Industry standard for voice assistants (Alexa, Google Assistant,
-        # Siri) is to require actual acoustic wake-word detection, not just
-        # transcript matching. We do the same: ``pipeline.is_active`` is
-        # True when openwakeword fires during the utterance or in the 1.5s
-        # pre-speech window; text match must also confirm to filter audio
-        # false positives ("hey" without "poob"). Both gates must pass.
+        # Cases 1 and 2 are legitimate addresses; case 3 is the bug we hit
+        # on April 21 (Armin van Buuren "Blah Blah Blah" → duplicate Toob).
+        #
+        # The discriminator between cases 2 and 3 is: **is the bot currently
+        # producing audio?** Case 3 can only happen when the bot's own output
+        # is feeding back through someone's mic. When the bot is silent,
+        # loopback is impossible and text-alone is trustworthy.
+        #
+        # Rule:
+        #   text_match and audio_match                   → addressed
+        #   text_match and (bot silent)                  → addressed
+        #   text_match and (bot producing audio) and not audio_match
+        #                                                → reject (loopback)
+        #   not text_match                               → reject
+        #
+        # This keeps us robust to both failure modes (openwakeword misses in
+        # noise; Deepgram hallucinates during loopback) without overcorrecting.
         text_match = self._text_wake_word_match(transcript)
-        is_addressed = text_match and pipeline.is_active
+        audio_match = pipeline.is_active
+        try:
+            bot_audio = bool(self._bot_audio_active())
+        except Exception:
+            bot_audio = False  # Callable broken — fail open to text-only.
 
-        if text_match and not pipeline.is_active:
-            # Text claims wake word but no acoustic confirmation — reject as
-            # probable Deepgram/mic-loopback hallucination.
+        if text_match and audio_match:
+            is_addressed = True
+        elif text_match and not bot_audio:
+            # Bot is silent → no loopback risk → trust the transcript.
+            is_addressed = True
+        elif text_match and bot_audio and not audio_match:
+            # Bot producing audio + text hit without acoustic confirmation →
+            # high loopback probability, reject.
+            is_addressed = False
             log.info(
-                "Text wake word rejected (no acoustic confirmation)",
+                "Text wake word rejected (bot audio active, no acoustic confirmation)",
                 user=pipeline.user_name or user_id,
                 transcript=transcript[:80],
             )
-        elif pipeline.is_active and not text_match:
-            # Audio fired but text didn't — fine to reject, openwakeword
-            # has false positives on "hey" / coughs / laughs.
-            log.info(
-                "Audio wake word overridden by text (no match in transcript)",
-                user=pipeline.user_name or user_id,
-                transcript=transcript[:60],
-            )
+        else:
+            # No text match — audio-only fires are always rejected (openwakeword
+            # hits on "hey" / coughs / laughs without real wake intent).
+            is_addressed = False
+            if audio_match:
+                log.info(
+                    "Audio wake word overridden by text (no match in transcript)",
+                    user=pipeline.user_name or user_id,
+                    transcript=transcript[:60],
+                )
 
         self._do_emit(user_id, pipeline.user_name, pipeline.speech_start_time,
                       is_addressed, transcript)

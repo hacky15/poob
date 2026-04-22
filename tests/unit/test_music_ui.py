@@ -288,9 +288,18 @@ class TestSpeakIfInChannel:
 
 
 class TestWakeWordDualGate:
-    """``is_addressed = text_match and pipeline.is_active`` — symmetric gate."""
+    """Context-aware gate: require both signals ONLY when bot is producing audio.
 
-    def _make_processor(self):
+    Discrimination matrix:
+      text | audio | bot_audio_active | result
+      -----+-------+------------------+----------
+      yes  | yes   | any              | addressed
+      yes  | no    | no (bot silent)  | addressed   (openwakeword missed in noise)
+      yes  | no    | yes (loopback)   | rejected    (likely Deepgram hallucination)
+      no   | any   | any              | rejected    (no wake intent)
+    """
+
+    def _make_processor(self, *, bot_audio_active: bool = False):
         from poob.voice.dual_pipeline import DualPipelineProcessor, UserPipeline
 
         # Construct without actually initializing network/model components.
@@ -300,6 +309,7 @@ class TestWakeWordDualGate:
         proc._deepgram = MagicMock()
         proc._deepgram.get_transcript = MagicMock(return_value=("", False))
         proc._deepgram.reset_transcript = MagicMock()
+        proc._bot_audio_active = lambda: bot_audio_active
         proc._user_pipelines = {}
         proc._silence_counters = {}
         proc._loop = None
@@ -313,7 +323,7 @@ class TestWakeWordDualGate:
         return p
 
     def test_text_and_audio_both_fire_is_addressed(self) -> None:
-        proc, UserPipeline = self._make_processor()
+        proc, UserPipeline = self._make_processor(bot_audio_active=False)
         pipeline = self._make_pipeline(UserPipeline, is_active=True)
         proc._deepgram.get_transcript.return_value = (
             "Hey, Poob. Play pinball wizard.", True,
@@ -324,11 +334,28 @@ class TestWakeWordDualGate:
         proc._on_addressed.assert_called_once()
         proc._on_passive.assert_not_called()
 
-    def test_text_only_no_audio_is_rejected(self) -> None:
-        """The April 21 bug: Deepgram hallucinated 'Hey Poob' from loopback
-        audio, audio model didn't fire → under old rule, fired anyway.
-        New rule: text without acoustic confirmation is passive."""
-        proc, UserPipeline = self._make_processor()
+    def test_text_only_bot_silent_is_addressed(self) -> None:
+        """Real-world case: openwakeword misses 'Hey Poob' in noisy game
+        audio, text match catches it. Bot is silent → no loopback risk →
+        trust the transcript. This is what my first dual-gate fix killed
+        (April 22 bug: Ben said 'Hey, Poob. Are you even there, bro?' and
+        the rule rejected it)."""
+        proc, UserPipeline = self._make_processor(bot_audio_active=False)
+        pipeline = self._make_pipeline(UserPipeline, is_active=False)
+        proc._deepgram.get_transcript.return_value = (
+            "Hey, Poob. Are you even there, bro?", True,
+        )
+
+        proc._emit_utterance(42, pipeline)
+
+        proc._on_addressed.assert_called_once()
+        proc._on_passive.assert_not_called()
+
+    def test_text_only_bot_speaking_is_rejected(self) -> None:
+        """The April 21 bug: Deepgram hallucinated 'Hey Poob' from music
+        loopback. Audio model didn't fire. Bot is actively playing music →
+        high loopback probability → reject."""
+        proc, UserPipeline = self._make_processor(bot_audio_active=True)
         pipeline = self._make_pipeline(UserPipeline, is_active=False)
         proc._deepgram.get_transcript.return_value = (
             "Hey, Poob. Play jah jah jah blah blah blah.", True,
@@ -339,9 +366,23 @@ class TestWakeWordDualGate:
         proc._on_addressed.assert_not_called()
         proc._on_passive.assert_called_once()
 
+    def test_text_and_audio_both_fire_even_when_bot_speaking(self) -> None:
+        """Legitimate address during bot audio: text + acoustic both confirm."""
+        proc, UserPipeline = self._make_processor(bot_audio_active=True)
+        pipeline = self._make_pipeline(UserPipeline, is_active=True)
+        proc._deepgram.get_transcript.return_value = (
+            "Hey, Poob. Skip this song.", True,
+        )
+
+        proc._emit_utterance(42, pipeline)
+
+        proc._on_addressed.assert_called_once()
+
     def test_audio_only_no_text_is_rejected(self) -> None:
-        """Audio model false positive without text confirmation."""
-        proc, UserPipeline = self._make_processor()
+        """Audio model false positive without text confirmation — openwakeword
+        fires on 'hey', coughs, laughs. Always rejected regardless of bot
+        audio state."""
+        proc, UserPipeline = self._make_processor(bot_audio_active=False)
         pipeline = self._make_pipeline(UserPipeline, is_active=True)
         proc._deepgram.get_transcript.return_value = (
             "hey what's up guys", True,
@@ -353,7 +394,7 @@ class TestWakeWordDualGate:
         proc._on_passive.assert_called_once()
 
     def test_neither_signal_is_passive(self) -> None:
-        proc, UserPipeline = self._make_processor()
+        proc, UserPipeline = self._make_processor(bot_audio_active=False)
         pipeline = self._make_pipeline(UserPipeline, is_active=False)
         proc._deepgram.get_transcript.return_value = (
             "just regular conversation", True,

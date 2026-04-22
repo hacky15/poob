@@ -126,6 +126,7 @@ class VoiceSession:
                     deepgram_api_key=dg_key,
                     on_addressed_utterance=self._on_dual_addressed,
                     on_passive_utterance=self._on_dual_passive,
+                    bot_audio_active=self._bot_audio_active,
                 )
                 self._dual_pipeline.set_loop(self._loop)
                 log.info(
@@ -169,6 +170,32 @@ class VoiceSession:
         self._user_names: dict[int, str] = {}
         # Multi-signal fusion address detector (research-backed)
         self._address_detector = MultiSignalAddressDetector()
+
+    def _bot_audio_active(self) -> bool:
+        """True when Poob is currently producing audio the mic could pick up.
+
+        Used by the dual-pipeline wake-word gate to decide whether a text-only
+        wake match is trustworthy. When True, we demand acoustic confirmation
+        too because a listener mic could be picking up our TTS or music back
+        through their speakers (the Deepgram keyterm-bias loopback class of
+        bug). When False, the environment is quiet enough on our side that
+        text alone is a reliable signal.
+        """
+        if self._is_speaking:
+            return True
+        try:
+            if self.voice_client.is_playing():
+                return True
+        except Exception:
+            pass
+        player = self.music_player
+        if player is not None:
+            try:
+                if getattr(player, "is_playing", False):
+                    return True
+            except Exception:
+                pass
+        return False
 
     async def play_entrance(self) -> None:
         """Synthesize and play Poob's entrance catchphrase."""

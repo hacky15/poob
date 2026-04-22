@@ -1086,17 +1086,43 @@ Ben said "Hey Poob play jah jah jah blah blah blah" → music played (Armin van 
 
 Root cause: Ben's speakers played the song → his mic captured the loopback → Discord transmitted as his audio → Deepgram transcribed the lyrics + ambient noise + any murmurs. With keyterm bias (`keyterm=Poob&keyterm=play&keyterm=skip...`), Deepgram hallucinated a wake phrase from the song's "blah blah blah" lyrics. The old rule accepted **text match alone** as addressing → hallucination became a command.
 
-### Fix — require BOTH acoustic AND semantic confirmation
+### Fix v1 (April 21) — require BOTH acoustic AND semantic confirmation
 
-`src/poob/voice/dual_pipeline.py:_emit_utterance`:
+First pass was `is_addressed = text_match and pipeline.is_active`. Hard rule, both gates required. Intent: match the Alexa/Google/Siri pattern where acoustic detection is primary.
+
+### Problem with v1 (discovered April 22)
+
+openwakeword is **not reliable** in noisy environments. Real-world logs showed Ben saying "Hey, Poob. Sing us a congratulatory song." and "Hey, Poob. Are you even there, bro?" — text match clean, but openwakeword missed the acoustic wake because background game audio (Rocket League: "fumbled", "aerials", crowd) drowned the signal. The v1 rule rejected both legitimate addresses. Had to loosen.
+
+### Fix v2 — context-aware gate
 
 ```python
-is_addressed = text_match and pipeline.is_active
+if text_match and audio_match:
+    is_addressed = True
+elif text_match and not bot_audio_active():
+    is_addressed = True     # bot silent → no loopback risk → trust transcript
+elif text_match and bot_audio_active() and not audio_match:
+    is_addressed = False    # bot producing audio, likely mic loopback
+else:
+    is_addressed = False    # no text match
 ```
 
-`pipeline.is_active` is True iff openwakeword fired during the utterance or the 1.5 s pre-speech window. Requires an actual wake-word acoustic signal, not a bias-primed transcript hallucination. Matches the industry standard (Alexa / Google Assistant / Siri all require acoustic wake-word detection as the primary gate).
+`bot_audio_active` is a callback the session provides — returns True when Poob is TTS-speaking, playing music, or the voice client's audio output is active. `dual_pipeline.py` receives it via `DualPipelineProcessor(..., bot_audio_active=...)`. Session's `_bot_audio_active()` ORs `self._is_speaking`, `voice_client.is_playing()`, and `music_player.is_playing`.
 
-Cost: very rare real requests where openwakeword totally misses will now fall through to passive. Benefit: self-triggering and ambient-hallucination classes of bug are eliminated. Acceptable tradeoff.
+### Why this is correct
+
+Three real classes of failure:
+- **Case 1**: user says "Hey Poob" cleanly → both signals → addressed (both rules).
+- **Case 2**: user says "Hey Poob" in noise, openwakeword misses → text-only → v1 rejected (bug), v2 addresses when bot is silent (correct — no loopback possible).
+- **Case 3**: music lyric / TTS loopback through mic, Deepgram hallucinates "Hey Poob" → text-only while bot produces audio → v1 rejected, v2 also rejects.
+
+Discriminator between cases 2 and 3 is exactly `bot_audio_active`. Case 3 requires the bot to be producing audio; case 2 requires it not to be. Binary, clean, no magic cooldowns.
+
+### Cost / benefit
+
+Cost: a user shouting "Hey Poob skip" while music is playing AND openwakeword misses their wake → gets rejected. Acceptable because (a) when music is playing the user can also click the persistent Skip button on the now-playing embed, and (b) openwakeword usually fires on clear speech even with music underneath.
+
+Benefit: both the "legitimate request in noise missed" (v1 regression) and the "music lyric hallucinated as wake word" (original April 21 bug) are eliminated.
 
 ### Common pitfall (saved for future)
 
