@@ -12,4 +12,8 @@ A reference note is not a re-summary of upstream docs. It's what *we* care about
 
 ## Entries
 
-<!-- Populated as references are atomized. -->
+- [[browser-stealth-signals]] — what Facebook tracks; mouse, scroll, viewport, tab patterns
+- [[facebook-graphql-anonymous-client]] — anonymous HTTP client, session bootstrap, price field shapes
+- [[serpapi]] — free tier burned through; retained as an adapter, not routed by default
+- [[triage-vlm-context-inputs]] — exact input list each evaluation stage sees
+- [[vlm-cascade-operational-findings]] — per-provider performance, cascade order, voting consensus

@@ -14,4 +14,14 @@ Resolved incidents stay `status: resolved`. Open ones stay `status: active`. If 
 
 ## Entries
 
-<!-- Populated as incidents are atomized. Most recent at top. -->
+### 2026-04
+
+- [[music-tool-hallucination]] — LLM played "Bad Guy" from 20-minute-old context
+- [[wake-gate-over-rejection-during-music]] — wake gate rejected legit addresses while music was playing
+- [[voice-addressee-confusion]] — Poob called Ben "lab rat" and Jeweinery "lab rat"
+- [[slash-command-sync-on-ready]] — `/join` silently unregistered; Pycord sync fired before cogs loaded
+
+### 2026-03
+
+- [[graphql-amount-with-offset-cents-bug]] — $18.50 listings appeared as $1850 (cents treated as dollars)
+- [[detail-enrichment-empty-og-jsonld]] — detail enrichment returned empty data on every listing

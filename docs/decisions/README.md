@@ -14,4 +14,11 @@ Write a new note (don't edit in place) when a decision is reversed or materially
 
 ## Entries
 
-<!-- Populated as decisions are atomized. Keep sorted by most recent at top. -->
+- [[brain-routing-audit]] — LLM cascade for tool routing; keyword-intent bandaid removed (2026-04-22)
+- [[just-listed-rework]] — split freshness knobs, auto-start patrol, observability + canary (2026-04-22)
+- [[one-handler-discord]] — one `on_message` listener, one voice owner, one music owner (2026-04-21)
+- [[one-handler-music-contract]] — all music flows through `handle_music_request(tool_args=...)` (2026-04-21)
+- [[search-provider-cascade]] — Tavily → Serper → SearXNG → empty (2026-03-30)
+- [[toob-voice-filter-chain]] — FFmpeg warlord chain; retuned for intelligibility + speed (2026-04-22)
+- [[tts-loudness-speechnorm]] — FFmpeg speechnorm at decode step for RMS normalization (2026-04-22)
+- [[wake-word-dual-gate]] — context-aware acoustic + text, bot-TTS-only loopback gate (2026-04-21 → 2026-04-22)

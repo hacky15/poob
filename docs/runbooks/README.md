@@ -12,4 +12,5 @@ Each runbook is copy-pasteable. If a step has a surprise, link out to a gotcha o
 
 ## Entries
 
-<!-- Populated as runbooks are atomized. -->
+- [[deploy-flow]] — `git push origin main` is the deploy; verification + rollback
+- [[production-log-access]] — reading live container logs on homelab via Tailscale + SSH
