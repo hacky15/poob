@@ -1056,7 +1056,7 @@ class PoobBrain:
             except Exception as exc:
                 if not is_last:
                     log.warning("Tool detection failed, trying next",
-                                provider=provider, model=model, error=str(exc)[:60])
+                                provider=provider, model=model, error=str(exc)[:500])
                     continue
                 # All providers exhausted — return last text we have (or raise)
                 if last_text:
