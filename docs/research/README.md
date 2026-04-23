@@ -14,6 +14,7 @@ When research leads to a commitment, open a matching decision note and link to i
 
 ### Voice / Brain
 
+- [[voice-pipeline-optimization-prompt]] — 2026 research prompt: end-to-end latency + accuracy, ready-to-dispatch
 - [[conversation-classifier]] — intelligent address detection for multi-user voice
 - [[wake-word-latency]] — custom wake-word detection + response latency
 
