@@ -1344,6 +1344,33 @@ def _bot_audio_active(self) -> bool:
 
 Also tightened Poob's non-tool casual-chat system prompt from "2-4 sentences is the sweet spot, but go longer if you're on a roll" to "1-2 sentences max, ~20 words." The previous rule produced 100+ char responses that spoke for 10-13 seconds via TTS — the dominant component of perceived "slow response" latency, since total_ms measures through playback completion. Short replies also interrupt less awkwardly in voice chat.
 
-### Known follow-up (not fixed here)
+---
 
-Log at 02:29:10 shows the LLM issuing a `music_assistant` tool call for "The Untold by Secession Studios" when Ben's transcript was just "Oh," — the model pulled the song title from passive conversation context. This is a separate tool-hallucination bug: the tool-routing prompt includes recent chatter, which confuses smaller models into treating historical requests as current ones. Candidate fix: post-validate tool-call arguments against the current user transcript; if the query field has no lexical overlap, treat as hallucination. Documented here so the pattern isn't lost.
+## Music Tool Hallucination from Passive Context (April 22 2026)
+
+### Problem
+
+The LLM issued `music_assistant(action=play, query=...)` calls for songs the user never requested in their current turn — pulling song titles from 20-minute-old passive-conversation context.
+
+Two confirmed incidents from the same session:
+
+1. Ben's transcript: `"Oh,"` (wake_word=True). LLM tool-called `play "The Untold by Secession Studios"` (previously requested earlier in the session).
+2. Ben's transcript: `"I said, hey, Poob, knock it off with the horniness."` — a purely behavioral request, zero music intent. LLM tool-called `play "bad guy by Billie Eilish"` (requested 20 minutes prior). Other users reacted: *"Two played, bro. Bad guy? Why?"*.
+
+### Root cause
+
+The tool-detection prompt includes `[Recent conversation you've been listening to:]` with 15 lines of passive chatter. When a prior music request sits in that context, small tool-calling models (Groq llama-3.3-70b) weight the frequent title tokens and fire `music_assistant` even when the current turn has no music intent. The system prompt compounds this with: *"If the user says ANYTHING that could be a request to play... you MUST call music_assistant."* — a strong bias toward tool-calling when any music-adjacent token appears anywhere in the prompt.
+
+### Fix
+
+Post-validation in `brain/poob.py:_handle_music`: for `action == "play"` calls, tokenize both the `query` field and the current user message, strip a small stopword list (`the`, `by`, `play`, `song`, etc.), and require at least one meaningful query token to appear in the user's message. If the query has zero lexical overlap with what the user actually said, the call is logged (`music.play hallucinated from context — drop`) and dropped. Voice returns empty string (no TTS fires); text channels get a brief acknowledgement.
+
+Why this layer: the brain's tool-routing cascade has four providers, all of which can hallucinate under context contamination. A single post-validation step catches all of them. The alternative — stripping music history from the prompt — would cost legitimate contextual routing (e.g. "play something else" after a prior request). Token-overlap preserves that path.
+
+### Stopword list (keep short)
+
+Stopwords intentionally restricted to high-frequency function words and generic music verbs. Adding too many risks masking legitimate short queries (e.g. a user asking for "Run" by OneRepublic with the message "play Run"). The current list covers articles, prepositions, and the words the LLM most commonly fills queries with when hallucinating.
+
+### Validation signal
+
+Post-deploy, look for `music.play hallucinated from context — drop` warnings in logs. Each one is a hallucination caught. A legitimate-request false positive would also log here — review any triggering message that looks like a real request.

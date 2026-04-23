@@ -756,6 +756,35 @@ class PoobBrain:
         if self._music_handler is None:
             return "Music isn't set up right now."
 
+        # Drop play-tool calls whose query has no lexical overlap with the
+        # current user message — a defense against the LLM pulling song
+        # titles from passive conversation context. See technical_notes.md.
+        if tool_args and tool_args.get("action") == "play":
+            query = (tool_args.get("query") or "").strip()
+            if query:
+                _STOPWORDS = {
+                    "the", "a", "an", "by", "and", "or", "of", "to", "for",
+                    "some", "any", "song", "songs", "music", "track", "play",
+                    "put", "on", "it", "that", "this", "please", "can", "you",
+                    "me", "us", "up",
+                }
+                import re as _re
+                msg_tokens = {
+                    t for t in _re.findall(r"[a-z0-9']+", original_message.lower())
+                }
+                query_tokens = {
+                    t for t in _re.findall(r"[a-z0-9']+", query.lower())
+                    if t not in _STOPWORDS
+                }
+                if query_tokens and not (query_tokens & msg_tokens):
+                    log.warning(
+                        "music.play hallucinated from context — drop",
+                        current_message=original_message[:120],
+                        hallucinated_query=query[:80],
+                        user=user_id,
+                    )
+                    return "" if voice else "I didn't catch a music request there."
+
         # Use explicitly passed guild_id (text channels), fall back to
         # voice session's guild_id (voice path sets _voice_guild_id).
         resolved_guild_id = guild_id or self._voice_guild_id
