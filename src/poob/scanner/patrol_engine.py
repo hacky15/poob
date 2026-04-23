@@ -278,7 +278,19 @@ class PatrolEngine:
         log.info("Starting patrol cycle", sweep_mode=self._sweep_mode)
 
         try:
-            page = await self._browser.get_page()
+            # The authenticated browser is last-resort only (DOM fallback) —
+            # the primary paths are anonymous GraphQL (no browser needed) and
+            # the separate anonymous browser. If the main browser failed to
+            # start (common on homelab: Chromium cold-start > 45s timeout),
+            # we proceed with page=None and skip the auth-DOM fallback tier.
+            page: object | None = None
+            try:
+                page = await self._browser.get_page()
+            except Exception as exc:
+                log.warning(
+                    "Main browser unavailable — running anon-only",
+                    error=str(exc)[:120],
+                )
 
             # Pre-fetch known listing IDs for early-exit pagination.
             # On cycle 2+, most GQL results are already in the DB.
@@ -429,11 +441,18 @@ class PatrolEngine:
             # image — descriptions are only on individual listing pages.
             # Without descriptions, text triage and VLM evaluation are blind
             # to item details (condition, brand, features, seller motivation).
-            # This also fixes broken DOM extractions ("Just listed" titles)
-            # as a side effect, since detail pages have real OG/JSON-LD data.
-            new_listings = await self._enrich_listings_from_detail_pages(
-                page, new_listings,
-            )
+            # Skipped entirely when the main browser failed to start — the
+            # GQL source still provides title/price/creation_time/photos,
+            # just without descriptions. Better than no data at all.
+            if page is not None:
+                new_listings = await self._enrich_listings_from_detail_pages(
+                    page, new_listings,
+                )
+            else:
+                log.info(
+                    "Detail-page enrichment skipped — main browser unavailable",
+                    listings=len(new_listings),
+                )
 
             # Step 2h: Post-enrichment filtering (unified filter chain).
             # Runs: GarbageFilter, CategoryFilter (with descriptions),
@@ -616,7 +635,15 @@ class PatrolEngine:
             self._consecutive_empty_sweeps = 0
             return combined, "anonymous_graphql"
 
-        # Step 3: Fall back to authenticated browser DOM (last resort)
+        # Step 3: Fall back to authenticated browser DOM (last resort).
+        # Skip entirely if the main browser never came up — nothing below
+        # this point works without a valid page object, and running with a
+        # stale/unauthenticated session just wastes time.
+        if page is None:
+            log.info("Auth DOM fallback skipped — main browser unavailable")
+            self._consecutive_empty_sweeps += 1
+            return [], "no_data"
+
         try:
             await page.evaluate(self._INJECT_GQL_CAPTURE_JS)
         except Exception as exc:
@@ -939,9 +966,11 @@ class PatrolEngine:
                     or getattr(self._config, "marketplace_default_location", None)
                 )
 
-                # DOM fallback only when GQL got < 5 results
+                # DOM fallback only when GQL got < 5 results AND the auth
+                # browser page is actually available. If the main browser
+                # failed to start, GQL-only results stand alone.
                 dom_listings: list[Listing] = []
-                if len(gql_listings) < 5:
+                if len(gql_listings) < 5 and page is not None:
                     dom_listings = await self._scanner.sweep_search(
                         page,
                         item.interest,
