@@ -919,21 +919,26 @@ class VoiceSession:
             return b""
 
         # --- Stage 2: Apply warlord FFmpeg filter (works on any audio) ---
-        # Warlord filter chain — tuned April 21 2026 for less monotone + quicker:
-        # - asetrate=16000: pitch DOWN (24kHz source → 16kHz = deeper)
-        # - aresample=24000: resample back to playable rate
-        # - atempo=1.85: speed up (was 1.7 — user feedback "speak quicker")
+        # Warlord filter chain — retuned April 22 2026 per user feedback
+        # ("still too deep, could be faster"):
+        # - asetrate=18500: pitch DOWN but less (24kHz→18.5kHz ≈ -4.5 semitones;
+        #   was 16000 = -7 semitones which read as "Darth Vader deep"). Still
+        #   menacing, but intelligible and clearly Toob-not-Poob.
+        # - aresample=24000: resample back to playable rate.
+        # - atempo=2.0: speed up more (was 1.85; user still wanted quicker).
+        #   2.0 is atempo's per-stage max — any faster needs chained atempo.
         # - vibrato=f=5.5:d=0.15: subtle pitch wobble, breaks the monotone.
         #   f=5.5 Hz is natural speech-prosody territory (human vibrato is
         #   ~4-7 Hz); d=0.15 is shallow enough to stay menacing, not drunk.
-        # - bass=g=10:f=80: heavy bass boost (rumble)
-        # - aecho=0.8:0.85:40:0.3: reverb (cavernous, menacing)
-        # - volume=1.35: +2.6 dB so Toob sits loud on top of music+mix
+        # - bass=g=6:f=80: lighter bass boost (was g=10 which amplified the
+        #   deep-pitch effect — reducing with shallower asetrate).
+        # - aecho=0.8:0.85:40:0.3: reverb (cavernous, menacing).
+        # - volume=1.35: retained; speechnorm in _play_audio handles loudness.
         filter_chain = (
-            "asetrate=16000,aresample=24000,"
-            "atempo=1.85,"
+            "asetrate=18500,aresample=24000,"
+            "atempo=2.0,"
             "vibrato=f=5.5:d=0.15,"
-            "bass=g=10:f=80,"
+            "bass=g=6:f=80,"
             "aecho=0.8:0.85:40:0.3,"
             "volume=1.35"
         )

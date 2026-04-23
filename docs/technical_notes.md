@@ -1134,6 +1134,8 @@ Any signal loop where the bot produces audio that can be captured by a mic in th
 
 `src/poob/voice/session.py:_synthesize_toob` — FFmpeg filter chain updated from `atempo=1.7` to `atempo=1.85` (faster delivery per user feedback) and a subtle `vibrato=f=5.5:d=0.15` added between the atempo and bass stages. 5.5 Hz is human-prosody territory (natural vibrato is 4-7 Hz); depth 0.15 is shallow enough to preserve the warlord menace without sounding drunk. Final `volume=1.35` (+2.6 dB) sits Toob prominent in the mix.
 
+**Updated April 22 2026** (user: "still too deep, could be faster"): `asetrate` raised from `16000` → `18500` (pitch shift eased from −7 semitones to ~−4.5), `atempo` bumped `1.85` → `2.0` (the per-stage maximum for atempo; chaining two stages is the next step if more speed is needed), `bass=g` lowered from `10` → `6` (the bass boost was amplifying the deep-pitch effect — reducing alongside the shallower asetrate keeps the timbre balanced). Net: Toob is still menacing and clearly distinct from Poob, but intelligible at lower playback latency.
+
 `src/poob/brain/poob.py:_wrap_music_response` — system prompt tightened from "One sentence. Under 15 words" to "ONE short sentence. 8-12 words MAX" plus a hard `toob_max_tokens = min(max_tokens, 60)` cap. Prevents drift past the word limit at high temperature.
 
 TTS output volume (non-Toob and Toob alike) bumped from `PCMVolumeTransformer(volume=2.0)` to `2.5` in both the music-overlay and standalone playback paths — Poob was sitting quieter than the music bed after ducking. **Superseded April 22 2026 — see "TTS Loudness — speechnorm Normalization" below.**
