@@ -1,5 +1,14 @@
+---
+type: research
+status: active
+date: 2026-03-17
+tags: [marketplace, facebook, graphql, schema]
+related: [[facebook-graphql-anonymous-client]] [[graphql-amount-units-cents-vs-dollars]]
+---
+
 # Research: Facebook Marketplace GraphQL API — Schema & Anonymous Access
-**Date:** March 17, 2026 | **Status:** CONFIRMED | **Sources:** results_2.md, results_4.md
+
+Sources: results_2.md, results_4.md.
 
 ## Anonymous Access (__user=0)
 

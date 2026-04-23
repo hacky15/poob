@@ -1,6 +1,14 @@
+---
+type: research
+status: active
+date: 2026-03-17
+tags: [search, providers, free-tier]
+related: [[search-provider-cascade]] [[serpapi]]
+---
+
 # Research: Free Web Search & Price Comparison APIs
-**Date:** March 17, 2026 | **Status:** CURRENT | **Sources:** results_5.md
-**MUTABLE: Free tiers change frequently. Verify before relying on any provider.**
+
+**MUTABLE: Free tiers change frequently. Verify before relying on any provider.** Sources: results_5.md.
 
 ## Dead/Deprecated (Do Not Use)
 - **Bing Search API**: Retired August 11, 2025. Replaced by "Grounding with Bing" at $35/1K (Azure only)

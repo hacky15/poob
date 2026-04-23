@@ -1,3 +1,11 @@
+---
+type: plan
+status: active
+date: 2026-03-22
+tags: [voice, latency, vad, stt, tts]
+related: [[voice-architecture]] [[wake-word-dual-gate]] [[wake-word-latency]]
+---
+
 # Voice Latency Optimization Plan
 
 ## Problem

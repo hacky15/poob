@@ -1,6 +1,14 @@
+---
+type: research
+status: active
+date: 2026-03-17
+tags: [vlm, llm, providers, free-tier]
+related: [[vlm-cascade-operational-findings]] [[google-vlm-ipm-undocumented-limit]] [[new-provider-integration-quirks]]
+---
+
 # Research: Free-Tier VLM/LLM Providers for Deal Evaluation
-**Date:** March 17, 2026 | **Status:** CURRENT | **Sources:** results_3.md
-**MUTABLE: Update when provider limits change or new providers appear.**
+
+**MUTABLE: Update when provider limits change or new providers appear.** Sources: results_3.md.
 
 ## Google AI Studio (Current Primary)
 

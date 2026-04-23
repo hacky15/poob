@@ -1,5 +1,14 @@
+---
+type: research
+status: active
+date: 2026-03-17
+tags: [marketplace, facebook, extraction, data-sjs]
+related: [[detail-enrichment-empty-og-jsonld]] [[facebook-og-jsonld-are-dead]] [[facebook-scrolling-and-listing-volume]]
+---
+
 # Research: Facebook Marketplace Detail Page Data Extraction
-**Date:** March 17, 2026 | **Status:** CONFIRMED | **Sources:** results_1.md, results_4.md
+
+Sources: results_1.md, results_4.md.
 
 ## Key Findings
 

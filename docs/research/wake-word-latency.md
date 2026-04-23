@@ -1,3 +1,11 @@
+---
+type: research
+status: active
+date: 2026-03-15
+tags: [voice, wake-word, latency, openwakeword]
+related: [[voice-architecture]] [[wake-word-dual-gate]]
+---
+
 # Research Prompt: Custom Wake Word Detection + Response Latency for Discord Voice Bot
 
 ## Two Connected Problems

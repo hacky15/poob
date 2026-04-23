@@ -1,3 +1,11 @@
+---
+type: research
+status: active
+date: 2026-03-17
+tags: [voice, address-detection, stt, llm]
+related: [[voice-architecture]] [[wake-word-dual-gate]]
+---
+
 # Research Prompt: Intelligent Conversation Address Detection for Multi-User Voice Bot
 
 ## The Problem

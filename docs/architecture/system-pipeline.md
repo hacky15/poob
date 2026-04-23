@@ -1,6 +1,14 @@
-# Architecture
+---
+type: architecture
+status: active
+date: 2026-04-01
+tags: [pipeline, scanner, patrol, system-overview]
+related: [[poobbrain-architecture]] [[facebook-scrolling-and-listing-volume]] [[vlm-triage-pipeline]] [[unified-filter-pipeline]]
+---
 
-Complete pipeline documentation. Every stage, every data flow, every decision point.
+# System pipeline — end-to-end
+
+Complete pipeline documentation. Every stage, every data flow, every decision point. Complements the subsystem-level notes by showing how collect → filter → enrich → evaluate → match → notify fit together.
 
 ---
 

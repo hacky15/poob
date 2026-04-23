@@ -1,5 +1,15 @@
+---
+type: plan
+status: superseded
+date: 2026-03-17
+tags: [scanner, vlm, pipeline, historical]
+superseded_by: [[unified-filter-pipeline]]
+related: [[unified-filter-pipeline]] [[vlm-triage-pipeline]] [[common-scanner-pitfalls]]
+---
+
 # Implementation Plan — Pipeline Robustness Overhaul
-**Created:** March 17, 2026 | **Based on:** Full codebase audit + 5 research documents + run analysis
+
+Based on a full codebase audit + 5 research documents + run analysis. Most items landed in the [[unified-filter-pipeline|unified filter pipeline refactor]]. Retained for historical context.
 
 ## Guiding Principles
 1. Every change must be a **net positive** — no new debt

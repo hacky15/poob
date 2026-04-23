@@ -1,6 +1,14 @@
+---
+type: research
+status: active
+date: 2026-03-17
+tags: [marketplace, facebook, stealth, anti-bot]
+related: [[browser-stealth-signals]] [[facebook-scrolling-and-listing-volume]]
+---
+
 # Research: Facebook Anti-Bot Defenses & Scraping Landscape 2025-2026
-**Date:** March 17, 2026 | **Status:** CURRENT | **Sources:** results_1.md, results_4.md
-**MUTABLE: Facebook's defenses evolve constantly.**
+
+**MUTABLE: Facebook's defenses evolve constantly.** Sources: results_1.md, results_4.md.
 
 ## Defense Layers (6 total)
 

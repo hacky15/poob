@@ -12,4 +12,19 @@ When research leads to a commitment, open a matching decision note and link to i
 
 ## Entries
 
-<!-- Existing research will be imported in Phase 4. -->
+### Voice / Brain
+
+- [[conversation-classifier]] — intelligent address detection for multi-user voice
+- [[wake-word-latency]] — custom wake-word detection + response latency
+
+### Scanner / Marketplace
+
+- [[fb-anti-bot-defenses]] — Facebook anti-bot defenses & scraping landscape (mutable)
+- [[fb-detail-page-extraction]] — detail-page data extraction approaches
+- [[fb-graphql-schema]] — Marketplace GraphQL API schema + anonymous access
+- [[free-search-providers]] — survey of free web-search + price-comparison APIs (mutable)
+- [[free-vlm-providers]] — survey of free-tier VLM/LLM providers (mutable)
+
+### Historical audits
+
+- [[handoff-audit-april-2026]] — spring 2026 pipeline audit; most items landed in [[unified-filter-pipeline]]

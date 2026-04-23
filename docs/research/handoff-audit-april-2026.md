@@ -1,3 +1,12 @@
+---
+type: research
+status: superseded
+date: 2026-04-01
+tags: [audit, handoff, scanner, historical]
+superseded_by: [[unified-filter-pipeline]]
+related: [[unified-filter-pipeline]] [[common-scanner-pitfalls]] [[just-listed-rework]]
+---
+
 # Handoff: Complete Audit of Issues Identified (March-April 2026 Session)
 
 **Context:** This document catalogs every issue identified during an extended debugging and development session. Many "fixes" were applied as bandaids that violate the project's core principles: robust, modular, integrated, industry-standard code with no hardcoded workarounds. The new developer must READ the full codebase (`docs/technical_notes.md`, `docs/research/*.md`, `.claude/CLAUDE.md`) before making ANY changes.

@@ -1,4 +1,15 @@
+---
+type: plan
+status: superseded
+date: 2026-03-19
+tags: [voice, disnake, dave, historical]
+superseded_by: [[voice-architecture]]
+related: [[voice-architecture]]
+---
+
 # Plan: Custom Voice Receive on Disnake + dave.py (libdave C++)
+
+Superseded — we migrated to Pycord 2.7.0 with `voice_compat.py` (adapted from GabrielAgrela/Discord-Brain-Rot). See [[voice-architecture]] for the current implementation.
 
 ## Why This Is The Only Path
 
