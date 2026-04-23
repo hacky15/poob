@@ -17,6 +17,7 @@ from poob.browser.graphql_interceptor import (
     parse_graphql_listings,
 )
 from poob.browser.stealth import random_delay
+from poob.scanner.canary import CanaryRegistry
 from poob.scanner.interest_matcher import InterestMatcher
 from poob.scanner.listing_filter import (
     CategoryFilter,
@@ -29,6 +30,7 @@ from poob.scanner.listing_filter import (
     LocationTextFilter,
     SponsoredFilter,
 )
+from poob.scanner.observability import log_sweep, measure_sweep
 from poob.sites.facebook.graphql_client import (
     AnonymousGraphQLClient,
     build_search_params,
@@ -251,6 +253,18 @@ class PatrolEngine:
         # Shadow ban tracking
         self._consecutive_empty_sweeps = 0
 
+        # Canary registry: ground-truth "did we see every listing" measurement.
+        # Populated out-of-band by an admin command that registers a magic
+        # token when the operator posts a dummy listing from a burner account.
+        # Every raw sweep result is scanned for active tokens so a canary
+        # detected by ANY path (anon GQL / anon DOM / watchlist) is recorded.
+        self._canaries = CanaryRegistry()
+
+    @property
+    def canaries(self) -> CanaryRegistry:
+        """Public read/write handle for admin canary registration commands."""
+        return self._canaries
+
     async def run_patrol_cycle(self) -> PatrolCycleResult:
         """Execute one full 4-phase patrol cycle.
 
@@ -291,6 +305,17 @@ class PatrolEngine:
                 watchlist_listings = await self._sweep_watchlist_items(
                     page, result, known_ids=known_ids,
                 )
+                if watchlist_listings:
+                    log_sweep(
+                        measure_sweep(
+                            watchlist_listings,
+                            days_since_listed=self._config.patrol_days_since_listed,
+                        ),
+                        source="watchlist_sweep",
+                    )
+                    self._canaries.check_batch(
+                        watchlist_listings, source="watchlist_sweep",
+                    )
                 # Merge; dedup handles overlap below
                 existing_ids = {l.external_id for l in all_listings if l.external_id}
                 for wl in watchlist_listings:
@@ -537,6 +562,15 @@ class PatrolEngine:
         # Runs broad keyword searches (electronics, furniture, etc.) to get
         # diverse, depersonalized listings. This is the primary source.
         anon_listings = await self._fetch_anonymous_graphql(result, known_ids=known_ids)
+        if anon_listings:
+            log_sweep(
+                measure_sweep(
+                    anon_listings,
+                    days_since_listed=self._config.patrol_days_since_listed,
+                ),
+                source="anonymous_graphql",
+            )
+            self._canaries.check_batch(anon_listings, source="anonymous_graphql")
 
         # Step 2: Anonymous browser DOM sweep (separate headless profile)
         # Uses a clean browser with NO login, NO cookies, NO search history
@@ -553,6 +587,14 @@ class PatrolEngine:
                         "Anonymous browser DOM sweep",
                         count=len(anon_dom_listings),
                     )
+                    log_sweep(
+                        measure_sweep(
+                            anon_dom_listings,
+                            days_since_listed=self._config.patrol_days_since_listed,
+                        ),
+                        source="anonymous_dom",
+                    )
+                    self._canaries.check_batch(anon_dom_listings, source="anonymous_dom")
             except Exception as exc:
                 log.warning("Anonymous browser sweep failed", error=str(exc)[:100])
 
@@ -1410,10 +1452,14 @@ class PatrolEngine:
     ) -> None:
         """Route deals to public channel or user DMs.
 
-        Public channel: only deals meeting deal_public_min_score (INCREDIBLE).
-        Watchlist DMs: deals meeting deal_watchlist_min_score (GOOD+),
-        sent to the Discord user who owns the matching watch item.
-        Excludes listings matching user exclusion keywords.
+        Public channel: deals at ``deal_public_min_score`` (default INCREDIBLE)
+        AND posted within ``public_notification_max_age_minutes`` (default 10).
+        Watchlist DMs: deals at per-user ``notification_threshold`` (default GOOD)
+        AND posted within ``watchlist_notification_max_age_minutes`` (default 30).
+
+        The evaluation cutoff (``listing_max_age_hours``) lets older listings
+        through for backlog recovery and measurement; these minute-level
+        cutoffs are what actually gate user-visible notifications.
         """
         listing_map = {l.id: l for l in listings if l.id}
         exclusions = await self._load_exclusion_keywords()
@@ -1424,6 +1470,18 @@ class PatrolEngine:
         watchlist_min = DealScore(
             getattr(self._config, "deal_watchlist_min_score", "good")
         )
+        public_max_age_min = float(getattr(
+            self._config, "public_notification_max_age_minutes", 10,
+        ))
+        watchlist_max_age_min = float(getattr(
+            self._config, "watchlist_notification_max_age_minutes", 30,
+        ))
+        now = datetime.now(timezone.utc)
+
+        def _age_minutes(l: Listing) -> float | None:
+            if l.posted_at is None:
+                return None
+            return (now - l.posted_at).total_seconds() / 60.0
 
         # Public channel: non-watchlist deals at INCREDIBLE threshold
         global_excluded = exclusions.get("__global__", set())
@@ -1434,6 +1492,18 @@ class PatrolEngine:
                 log.info(
                     "notify.blocked_no_timestamp",
                     title=(listing.title or "")[:50],
+                    score=deal.score.value,
+                )
+                continue
+            # Minute-level freshness gate — "just listed" product rule.
+            age_min = _age_minutes(listing) if listing else None
+            if age_min is None or age_min > public_max_age_min:
+                log.info(
+                    "notify.skip_too_old",
+                    channel="public",
+                    title=(listing.title[:50] if listing else "?"),
+                    age_minutes=round(age_min, 1) if age_min is not None else None,
+                    limit_minutes=public_max_age_min,
                     score=deal.score.value,
                 )
                 continue
@@ -1479,6 +1549,19 @@ class PatrolEngine:
                 log.info(
                     "notify.blocked_no_timestamp",
                     title=(listing.title or "")[:50],
+                    score=deal.score.value,
+                    interest=deal.watch_item_id,
+                )
+                continue
+            # Minute-level freshness gate — "just listed" for watchlist DMs.
+            age_min = _age_minutes(listing)
+            if age_min is None or age_min > watchlist_max_age_min:
+                log.info(
+                    "notify.skip_too_old",
+                    channel="watchlist_dm",
+                    title=(listing.title or "")[:50],
+                    age_minutes=round(age_min, 1) if age_min is not None else None,
+                    limit_minutes=watchlist_max_age_min,
                     score=deal.score.value,
                     interest=deal.watch_item_id,
                 )

@@ -183,6 +183,10 @@ class AppConfig(BaseSettings):
 
     # --- Patrol ---
     patrol_enabled: bool = True
+    # Auto-start the patrol scheduler loop on bot startup. When False, patrols
+    # only run when the user types "scan" or !scan. "Just listed" detection is
+    # incompatible with manual triggering, so this defaults to True.
+    patrol_scheduler_auto_start: bool = True
     patrol_sweep_mode: str = "unified"  # "unified" (1 page) or "categories" (10+ pages)
     patrol_categories: list[str] = [
         "electronics", "furniture", "sports", "garden",
@@ -204,7 +208,19 @@ class AppConfig(BaseSettings):
     patrol_peak_hours_end: int = 21
     patrol_include_all_categories: bool = True
     patrol_days_since_listed: int = 1
-    listing_max_age_hours: int = 6  # Drop listings older than this from evaluation
+    # Evaluation cutoff: listings older than this are dropped from the VLM pipeline.
+    # Notification cutoffs (below) are what enforce the user-facing "just listed"
+    # product requirement — evaluation can still run on older items so the
+    # watchlist backlog recovery and measurement/observability work.
+    listing_max_age_hours: int = 6
+    # Public channel notification cutoff: a deal reaching the public
+    # #facebook-marketplace channel must be posted within this many minutes.
+    # This is the "just listed AND clearly worth something" product rule.
+    public_notification_max_age_minutes: int = 10
+    # Watchlist DM cutoff: a watchlist match DMed to the interest owner must
+    # be within this many minutes old. Slightly laxer than public because
+    # missing a watchlist match hurts the user more than a stale public post.
+    watchlist_notification_max_age_minutes: int = 30
     patrol_deep_inspect_enabled: bool = True
     # --- Anonymous GraphQL ---
     patrol_anonymous_graphql_enabled: bool = True  # Try depersonalized GraphQL before browser

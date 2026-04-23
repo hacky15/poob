@@ -672,10 +672,18 @@ async def startup() -> None:
             log.warning("Anonymous browser failed/timed out", error=str(exc)[:100])
             anonymous_browser = None
 
+    # Auto-start the patrol scheduler loop unless explicitly disabled.
+    # scheduler.start() creates a background asyncio task and returns
+    # immediately; the bot event loop below owns the lifetime.
+    if getattr(config, "patrol_scheduler_auto_start", True):
+        await scheduler.start()
+        log.info("Patrol scheduler auto-started")
+    else:
+        log.info("Patrol scheduler NOT auto-started (patrol_scheduler_auto_start=False)")
+
     try:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(bot.start(config.discord_bot_token))
-            # Scheduler is NOT auto-started — user triggers via !scan or "scan"
     finally:
         await browser_manager.stop()
         if anonymous_browser:

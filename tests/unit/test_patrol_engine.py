@@ -956,9 +956,11 @@ class TestWatchlistExemption:
         mock_notifier,
     ):
         """Watchlist-matched listings need timestamps to be notified (freshness gate)."""
-        # Listing needs a timestamp — freshness gate blocks NO_TS listings
+        # Listing needs a recent timestamp — the minute-level freshness gate
+        # in _notify blocks listings older than
+        # watchlist_notification_max_age_minutes (default 30).
         listing = _make_listing("111", title="PS5 Console Bundle", price=300.0,
-                                posted_at=datetime.now(timezone.utc) - timedelta(hours=1))
+                                posted_at=datetime.now(timezone.utc) - timedelta(minutes=5))
         interest = _make_interest("watch-1", "PS5", 500.0, discord_user_id="987654321")
 
         watchlist_deal = Deal(
@@ -1035,9 +1037,11 @@ class TestWatchlistExemption:
         now = datetime.now(timezone.utc)
         # Fresh listing with timestamp (passes filter normally)
         fresh = _make_listing("111", title="Table", price=50.0, posted_at=now)
-        # Watchlist match with timestamp (should be notified)
+        # Watchlist match with a RECENT timestamp — must be within the
+        # minute-level DM cutoff (watchlist_notification_max_age_minutes,
+        # default 30) so the _notify freshness gate passes.
         exempt = _make_listing("222", title="PS5 Disc Edition", price=250.0,
-                                posted_at=now - timedelta(hours=1))
+                                posted_at=now - timedelta(minutes=5))
         # No timestamp, doesn't match watchlist (should be discarded)
         discard = _make_listing("333", title="Random Junk", price=10.0, posted_at=None)
 
