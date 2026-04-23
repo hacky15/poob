@@ -172,30 +172,22 @@ class VoiceSession:
         self._address_detector = MultiSignalAddressDetector()
 
     def _bot_audio_active(self) -> bool:
-        """True when Poob is currently producing audio the mic could pick up.
+        """True when Poob's OWN VOICE is playing and could loop back through
+        a user's mic as a hallucinated wake word.
 
-        Used by the dual-pipeline wake-word gate to decide whether a text-only
-        wake match is trustworthy. When True, we demand acoustic confirmation
-        too because a listener mic could be picking up our TTS or music back
-        through their speakers (the Deepgram keyterm-bias loopback class of
-        bug). When False, the environment is quiet enough on our side that
-        text alone is a reliable signal.
+        Scope narrowed April 22 2026: previously this also returned True when
+        the music_player or voice_client was playing. That was wrong — the
+        loopback class of bug is specifically Poob's TTS ("Hey there!")
+        being re-transcribed via a listener's speakers; music tracks
+        contain no wake-word phonemes and aren't a loopback risk. Treating
+        music as bot-audio-active caused legitimate wake words ("Hey Poob,
+        play the untold...") to be rejected during music playback — the
+        exact failure mode Ben reported with Secession Studios.
+
+        `_is_speaking` covers both standalone TTS and music-overlay TTS paths
+        (set in `_play_audio` around the inject_tts_overlay/vc.play calls).
         """
-        if self._is_speaking:
-            return True
-        try:
-            if self.voice_client.is_playing():
-                return True
-        except Exception:
-            pass
-        player = self.music_player
-        if player is not None:
-            try:
-                if getattr(player, "is_playing", False):
-                    return True
-            except Exception:
-                pass
-        return False
+        return self._is_speaking
 
     async def play_entrance(self) -> None:
         """Synthesize and play Poob's entrance catchphrase."""

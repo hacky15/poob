@@ -1305,3 +1305,45 @@ Passive context stays in the prompt because "skip the song" / "turn it down" / "
 - All 902 unit tests pass.
 - AST parse clean on both files.
 - Deploy signal to watch: subsequent `Response complete` lines should not start with wrong-user vocatives (e.g. no more `response="lab rat, ..."` when the addresser is someone other than Lab Rat).
+
+---
+
+## Wake-Word Gate — Over-Rejection During Music (April 22 2026, second correction)
+
+### Problem
+
+User reported Poob "missing wake words" during active music sessions. Smoking-gun log line:
+
+```
+02:19:57 Text wake word match      transcript='Hey, Poob. Play the untold by Succession Studios.'
+02:19:57 Text wake word rejected (bot audio active, no acoustic confirmation)
+```
+
+Ben's cleanly-spoken request was dropped because music was playing. He then had to repeat himself ~40 seconds later, which is the source of apparent "playing songs twice" — the user wasn't getting a duplicate play, they were getting an ignore-then-retry pattern.
+
+### Root cause
+
+`session.py:_bot_audio_active` was returning True for three conditions:
+
+1. `self._is_speaking` (TTS in progress)
+2. `self.voice_client.is_playing()` (any Discord VC playback)
+3. `self.music_player.is_playing` (music player active)
+
+The loopback-class bug this gate is defending against is specifically *Poob's own TTS* being re-transcribed via a listener's speakers back into the mic (e.g. Poob says "Hey there!" → mic loops it → STT produces "hey" → wake fires spuriously). Music tracks don't contain wake-word phonemes, so music playback is NOT a loopback risk. Treating music as bot-audio-active amounted to "whenever music is playing, demand acoustic confirmation too" — and in noisy environments (game audio from other users in the channel, TV, crosstalk), the acoustic model routinely misses clean wake words.
+
+### Fix
+
+`_bot_audio_active` now returns `self._is_speaking` only. `_is_speaking` is set around both the standalone-TTS path and the music-overlay path in `_play_audio`, so TTS-loopback protection is preserved; music-only playback no longer gates wake detection.
+
+```python
+def _bot_audio_active(self) -> bool:
+    return self._is_speaking
+```
+
+### Related: casual-chat response length (same deploy)
+
+Also tightened Poob's non-tool casual-chat system prompt from "2-4 sentences is the sweet spot, but go longer if you're on a roll" to "1-2 sentences max, ~20 words." The previous rule produced 100+ char responses that spoke for 10-13 seconds via TTS — the dominant component of perceived "slow response" latency, since total_ms measures through playback completion. Short replies also interrupt less awkwardly in voice chat.
+
+### Known follow-up (not fixed here)
+
+Log at 02:29:10 shows the LLM issuing a `music_assistant` tool call for "The Untold by Secession Studios" when Ben's transcript was just "Oh," — the model pulled the song title from passive conversation context. This is a separate tool-hallucination bug: the tool-routing prompt includes recent chatter, which confuses smaller models into treating historical requests as current ones. Candidate fix: post-validate tool-call arguments against the current user transcript; if the query field has no lexical overlap, treat as hallucination. Documented here so the pattern isn't lost.
