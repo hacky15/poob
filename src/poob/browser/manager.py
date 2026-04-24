@@ -61,6 +61,7 @@ class BrowserManager:
             profile_path = self._profiles_dir / Path(cookies_file).parent
             profile_path.mkdir(parents=True, exist_ok=True)
             user_data_dir = str(profile_path)
+            self._cleanup_stale_singleton_locks(profile_path)
 
         profile = BrowserProfile(
             headless=self._headless,
@@ -72,6 +73,35 @@ class BrowserManager:
         self._browser = BrowserSession(browser_profile=profile)
         await self._browser.start()
         log.info("Browser started", headless=self._headless)
+
+    @staticmethod
+    def _cleanup_stale_singleton_locks(profile_path: Path) -> None:
+        """Remove Chromium SingletonLock / SingletonCookie / SingletonSocket
+        entries left behind by a non-graceful previous shutdown.
+
+        Chromium's profile locking assumes the owning process will `unlink`
+        these on exit. When the process is SIGKILLed (container stop, OOM,
+        hard kill), the symlinks remain, point at a dead hostname-PID, and
+        the next launch hangs in `LocalBrowserWatchdog.on_BrowserLaunchEvent`
+        for ~30-45s waiting for the "other" instance to release the profile.
+
+        Removing these before launch is safe: they are pure lock files,
+        no user data is stored in them.
+        """
+        for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            lock_path = profile_path / lock_name
+            try:
+                # Use lexists() to catch broken symlinks — the symlink
+                # target often lives in /tmp of a container that's gone.
+                if lock_path.is_symlink() or lock_path.exists():
+                    lock_path.unlink()
+                    log.info("Removed stale Chromium singleton lock", path=str(lock_path))
+            except OSError as exc:
+                log.warning(
+                    "Could not remove stale singleton lock",
+                    path=str(lock_path),
+                    error=str(exc),
+                )
 
     async def stop(self) -> None:
         """Gracefully close the browser."""

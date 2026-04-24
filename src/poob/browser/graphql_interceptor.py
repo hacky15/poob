@@ -20,13 +20,13 @@ if TYPE_CHECKING:
 
 log = get_logger("browser.graphql_interceptor")
 
-# One-shot diagnostic: the first N listing-node payloads parsed by this
-# process get their key sets logged once, so an operator can identify
-# which field holds creation_time (or confirm FB stripped it from
-# anonymous `__user=0` browse entirely). Naturally silent after N dumps.
-# Default ON because this answers the blocking question for Phase 1.5;
-# set POOB_DEBUG_GQL_KEYS=0 in env to disable when no longer needed.
-_DEBUG_GQL_KEYS = os.environ.get("POOB_DEBUG_GQL_KEYS", "1").strip() in {"1", "true", "yes"}
+# One-shot diagnostic: when `POOB_DEBUG_GQL_KEYS=1`, the first N listing
+# nodes parsed by this process get their key sets logged once, to identify
+# which field carries `creation_time` on the current FB response shape.
+# Default OFF — the Phase 1.5 investigation already answered the question
+# (FB stripped `creation_time` from anonymous `__user=0` browse entirely).
+# Kept as reusable instrumentation in case the schema shifts again.
+_DEBUG_GQL_KEYS = os.environ.get("POOB_DEBUG_GQL_KEYS", "").strip() in {"1", "true", "yes"}
 _DEBUG_KEYS_REMAINING = 3 if _DEBUG_GQL_KEYS else 0
 
 
