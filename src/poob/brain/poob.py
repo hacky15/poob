@@ -110,8 +110,9 @@ def _build_system_prompt(level: int, voice: bool = False) -> str:
         "people have been saying. ONLY reference things that were ACTUALLY said in "
         "that transcript. Never invent names, topics, or events that aren't there.\n\n"
         "RULES:\n"
-        "- Keep it SHORT in voice chat. 1-2 sentences max, ~20 words. "
-        "People interrupt fast and long monologues feel laggy over TTS.\n"
+        "- BRUTALLY SHORT in voice. 1 sentence, 10 words max. "
+        "If it fits in 6 words, use 6. People interrupt you before you finish. "
+        "Long monologues kill the vibe over TTS. Punch once and stop.\n"
         "- If you don't know something, say so — don't make stuff up.\n"
         "- You can just sorta yell or be spurradic sometimes. You only live once.\n"
         "- In voice, avoid vocatives (don't start responses with someone's name). "
@@ -327,7 +328,7 @@ class PoobBrain:
     ollama_model: str = "qwen3:8b"
     max_history: int = 15
     max_tokens: int = 300
-    max_tokens_voice: int = 300
+    max_tokens_voice: int = 80
 
     # Music handler — set by VoiceCog/MusicCog when music system is wired.
     # Async callback: (request, user_id, guild_id) -> response string
@@ -903,7 +904,7 @@ class PoobBrain:
                     "Menacing, absurdly dramatic, like a demon working retail.\n"
                     "RULES:\n"
                     "- NEVER introduce yourself or say your name. Your voice IS your identity.\n"
-                    "- ONE short sentence. 8-12 words MAX. Tight, venomous. "
+                    "- ONE sentence. 6-10 words MAX. Tight, venomous. "
                     "Brevity is the menace — long sermons kill the vibe.\n"
                     "- React to the SONG, not to yourself. Insult their taste.\n"
                     "- No caps, no markdown, no emojis. Spoken aloud through TTS."
@@ -916,14 +917,14 @@ class PoobBrain:
             },
             {
                 "role": "user",
-                "content": "React as Toob in ONE short sentence (8-12 words). Menacing.",
+                "content": "React as Toob in ONE sentence (6-10 words). Menacing.",
             },
         ]
 
         # Hard cap on Toob's output length. ~60 tokens ≈ 1 sentence ≈ the
         # 8-12 word target in the system prompt. Prevents the model from
         # running past the word limit when temperature is high.
-        toob_max_tokens = min(max_tokens, 60)
+        toob_max_tokens = min(max_tokens, 40)
 
         if self.groq_api_key:
             try:
@@ -966,7 +967,7 @@ class PoobBrain:
                     "made it. Menacing, absurdly dramatic, like a demon working retail.\n"
                     "RULES:\n"
                     "- NEVER introduce yourself or say your name. Your voice IS your identity.\n"
-                    "- ONE short sentence. 8-12 words MAX. Tight, venomous.\n"
+                    "- ONE sentence. 6-10 words MAX. Tight, venomous.\n"
                     "- React to THE REQUEST (what the user asked for), not to yourself. "
                     "Insult their taste.\n"
                     "- No caps, no markdown, no emojis. Spoken aloud through TTS."
@@ -976,13 +977,13 @@ class PoobBrain:
             {
                 "role": "user",
                 "content": (
-                    "React as Toob in ONE short sentence (8-12 words). Menacing. "
+                    "React as Toob in ONE sentence (6-10 words). Menacing. "
                     "The user is requesting this — mock them for wanting it."
                 ),
             },
         ]
 
-        toob_max_tokens = min(max_tokens, 60)
+        toob_max_tokens = min(max_tokens, 40)
 
         from groq import AsyncGroq
 
