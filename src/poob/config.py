@@ -54,7 +54,7 @@ class AppConfig(BaseSettings):
     deepgram_api_key: str = ""  # Deepgram Nova-3 STT ($200 free credit)
     picovoice_access_key: str = ""  # Porcupine wake word engine (free tier)
     porcupine_keyword_path: str = ""  # Path to .ppn wake word model file
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "openai/gpt-oss-20b"
     groq_vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     # Agent brain primary: GPT-OSS 120B — reasoning-capable, 500 T/sec on Groq
     agent_groq_model: str = "openai/gpt-oss-120b"

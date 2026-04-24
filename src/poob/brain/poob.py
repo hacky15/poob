@@ -296,7 +296,7 @@ class PoobBrain:
 
     deal_agent: AgentRunner
     groq_api_key: str = ""
-    groq_model: str = "llama-3.3-70b-versatile"  # 70b for text + function calling
+    groq_model: str = "openai/gpt-oss-20b"  # Harmony-format tool calling, not affected by llama-3.3-70b parser regression
     cerebras_api_key: str = ""
     cerebras_model: str = "llama-3.3-70b"
     nvidia_api_key: str = ""
@@ -1095,6 +1095,46 @@ class PoobBrain:
         # All providers tried, none called a tool — return last text response
         return last_text, last_tool, last_args
 
+    @staticmethod
+    def _recover_tool_call_from_groq_400(
+        exc: Exception, model: str,
+    ) -> tuple[str, str, dict] | None:
+        """Parse a Groq 400 `tool_use_failed` error for an embedded tool
+        call. Returns (text, tool_name, tool_args) on success, or None.
+
+        Known regression: some Groq-hosted models emit Meta's native
+        `<function=name>{...}</function>` wrapper instead of the structured
+        `tool_calls` array. Groq's parser rejects it; the raw output is
+        preserved in `failed_generation`.
+        """
+        import json as _json
+        import re as _re
+        body = getattr(exc, "body", None) or {}
+        err = body.get("error", {}) if isinstance(body, dict) else {}
+        if err.get("code") != "tool_use_failed":
+            return None
+        failed = err.get("failed_generation") or ""
+        if not isinstance(failed, str) or "<function" not in failed:
+            return None
+        name_match = _re.search(r"<function\s*=\s*([a-zA-Z0-9_-]+)", failed)
+        if not name_match:
+            return None
+        tool_name = name_match.group(1)
+        brace_start = failed.find("{", name_match.end())
+        if brace_start < 0:
+            return None
+        try:
+            args, _consumed = _json.JSONDecoder().raw_decode(failed[brace_start:])
+        except ValueError:
+            return None
+        if not isinstance(args, dict):
+            return None
+        log.info(
+            "groq.tool_call_recovered_from_function_tag",
+            model=model, tool=tool_name,
+        )
+        return "", tool_name, args
+
     async def _call_provider_with_tools(
         self,
         provider: str,
@@ -1121,16 +1161,28 @@ class PoobBrain:
         """
         if provider == "groq":
             import json as _json
+            import re as _re
             from groq import AsyncGroq
+            from groq import BadRequestError as _GroqBadRequest
             client = AsyncGroq(api_key=self.groq_api_key)
-            response = await client.chat.completions.create(
-                model=model,
-                messages=messages,  # type: ignore[arg-type]
-                tools=tools,  # type: ignore[arg-type]
-                tool_choice="auto",
-                max_tokens=max_tokens,
-                temperature=0.8,
-            )
+            try:
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=messages,  # type: ignore[arg-type]
+                    tools=tools,  # type: ignore[arg-type]
+                    tool_choice="auto",
+                    max_tokens=max_tokens,
+                    temperature=0.8,
+                )
+            except _GroqBadRequest as exc:
+                # Recover from Groq's tool_use_failed parser regression —
+                # some models emit <function=name>{...}</function> which
+                # Groq's OpenAI-compat parser cannot convert. Parse the
+                # raw failed_generation client-side.
+                recovered = self._recover_tool_call_from_groq_400(exc, model)
+                if recovered is not None:
+                    return recovered
+                raise
             choice = response.choices[0]
             if choice.message.tool_calls:
                 tc = choice.message.tool_calls[0]
