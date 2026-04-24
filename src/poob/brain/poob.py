@@ -613,37 +613,48 @@ class PoobBrain:
                 yield "something went wrong"
                 return
 
-        # --- Step 3: No tool needed → fast 8b casual response ---
+        # --- Step 3: No tool needed → streamed casual response ---
+        # Stream sentence-by-sentence via Groq so session can synth the
+        # first sentence as soon as the LLM closes a `.`, `!`, or `?`,
+        # not after the full response arrives. Parity with the
+        # speculative-wrap music path.
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {self.groq_api_key}"},
-                    json={
-                        "model": "llama-3.1-8b-instant",
-                        "messages": messages,
-                        "max_tokens": max_tok,
-                        "temperature": 0.9,
-                    },
-                )
-                r.raise_for_status()
-                data = r.json()
-                text = data["choices"][0]["message"]["content"]
+            from groq import AsyncGroq
 
-            if not text:
+            client = AsyncGroq(api_key=self.groq_api_key)
+            stream = await client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=messages,  # type: ignore[arg-type]
+                max_tokens=max_tok,
+                temperature=0.9,
+                stream=True,
+            )
+
+            async def _raw_chunks() -> AsyncIterator[str]:
+                async for chunk in stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        yield chunk.choices[0].delta.content
+
+            full_text = ""
+            any_yielded = False
+            async for sentence in _stream_sentences_from_chunks(_raw_chunks()):
+                # Strip leaked function-call markup token-side.
+                cleaned = sentence
+                if "<function=" in cleaned:
+                    cleaned = re.sub(
+                        r"\s*<function=\w+>.*?</function>\s*", "", cleaned,
+                    ).strip()
+                if not cleaned:
+                    continue
+                full_text += cleaned + " "
+                any_yielded = True
+                yield cleaned
+
+            if not any_yielded:
                 yield "got nothing to say right now"
                 return
 
-            # Strip any raw function-call markup that leaked into text
-            if "<function=" in text:
-                text = re.sub(r'\s*<function=\w+>.*?</function>\s*', '', text).strip()
-            if not text:
-                yield "got nothing to say right now"
-                return
-
-            self._save_response(user_id, text)
-            for _s in _yield_sentences(text):
-                yield _s
+            self._save_response(user_id, full_text.strip())
 
         except Exception as exc:
             log.warning("Voice streaming failed", error=str(exc)[:100])
