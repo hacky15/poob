@@ -485,6 +485,7 @@ class DualPipelineProcessor:
         on_addressed_utterance: Callable[[int, str, str], None] | None = None,
         on_passive_utterance: Callable[[int, str, str], None] | None = None,
         bot_audio_active: Callable[[], bool] | None = None,
+        deepgram_model: str = "nova-3",
     ) -> None:
         """Initialize the dual pipeline.
 
@@ -504,12 +505,17 @@ class DualPipelineProcessor:
                 semantic confirmation. When the bot is silent, text-match alone
                 is sufficient because openwakeword misses legitimate wakes in
                 noisy environments (background TV/game audio, group calls).
+            deepgram_model: Deepgram streaming model. Default "nova-3".
+                Set to "flux-general-en" via DEEPGRAM_MODEL env var to try
+                Deepgram Flux (Oct 2025, ~450ms P50 faster per benchmarks).
         """
         self._wake_detector = WakeWordDetector(
             model_path=porcupine_keyword_path or None,  # None = use pre-trained hey_jarvis
             threshold=0.7,  # Raised for multi-user — 0.5 causes false positives in group calls
         )
-        self._deepgram = DeepgramStreamManager(api_key=deepgram_api_key)
+        self._deepgram = DeepgramStreamManager(
+            api_key=deepgram_api_key, model=deepgram_model,
+        )
         self._on_addressed = on_addressed_utterance
         self._on_passive = on_passive_utterance
         self._bot_audio_active = bot_audio_active or (lambda: False)

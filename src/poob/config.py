@@ -51,7 +51,10 @@ class AppConfig(BaseSettings):
 
     # --- Groq (free tier: 30 RPM, 14,400 RPD, no credit card) ---
     groq_api_key: str = ""
-    deepgram_api_key: str = ""  # Deepgram Nova-3 STT ($200 free credit)
+    deepgram_api_key: str = ""  # Deepgram streaming STT ($200 free credit)
+    # Deepgram streaming model. "nova-3" (stable, default) or
+    # "flux-general-en" (Oct 2025, ~450ms P50 faster, same keyterm API).
+    deepgram_model: str = "nova-3"
     picovoice_access_key: str = ""  # Porcupine wake word engine (free tier)
     porcupine_keyword_path: str = ""  # Path to .ppn wake word model file
     groq_model: str = "openai/gpt-oss-20b"

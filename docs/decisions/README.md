@@ -14,6 +14,7 @@ Write a new note (don't edit in place) when a decision is reversed or materially
 
 ## Entries
 
+- [[deepgram-flux-optional]] — Deepgram model now configurable via env; opt-in Flux path available (2026-04-23, proposed)
 - [[speculative-music-wrap]] — run ytdl search and Toob wrap in parallel; stream wrap so Toob speaks within 500ms (2026-04-23, proposed)
 - [[groq-gpt-oss-20b-swap]] — swap Groq primary to gpt-oss-20b + client-side `<function=...>` recovery (2026-04-23, proposed)
 - [[brain-routing-audit]] — LLM cascade for tool routing; keyword-intent bandaid removed (2026-04-22)

@@ -169,6 +169,7 @@ class VoiceSession:
         if dual_pipeline_config:
             dg_key = dual_pipeline_config.get("deepgram_api_key", "")
             model_path = dual_pipeline_config.get("porcupine_keyword_path", "")
+            dg_model = dual_pipeline_config.get("deepgram_model", "nova-3")
             if dg_key:
                 from poob.voice.dual_pipeline import DualPipelineProcessor
                 self._dual_pipeline = DualPipelineProcessor(
@@ -178,6 +179,7 @@ class VoiceSession:
                     on_addressed_utterance=self._on_dual_addressed,
                     on_passive_utterance=self._on_dual_passive,
                     bot_audio_active=self._bot_audio_active,
+                    deepgram_model=dg_model,
                 )
                 self._dual_pipeline.set_loop(self._loop)
                 log.info(

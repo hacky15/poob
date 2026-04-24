@@ -613,6 +613,7 @@ async def startup() -> None:
             "picovoice_access_key": config.picovoice_access_key,
             "porcupine_keyword_path": config.porcupine_keyword_path,
             "deepgram_api_key": config.deepgram_api_key,
+            "deepgram_model": config.deepgram_model,
         }
 
         def _make_voice_session(vc: object) -> VoiceSession:
