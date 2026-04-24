@@ -654,14 +654,18 @@ async def startup() -> None:
 
     log.info("Startup complete. Launching bot and scheduler.")
 
-    # Start browsers with timeout — don't let browser deadlock block Discord
+    # Start browsers with timeout — don't let browser deadlock block Discord.
+    # The main authenticated browser loads a real user_data_dir with days of
+    # extensions + cookies and genuinely takes 45-60s to cold-start on homelab.
+    # 90s gives comfortable headroom now that singleton-lock cleanup
+    # (BrowserManager.start) eliminates the prior hang-forever failure mode.
     try:
         await asyncio.wait_for(
             browser_manager.start(cookies_file="facebook/cookies.json"),
-            timeout=45.0,
+            timeout=90.0,
         )
     except asyncio.TimeoutError:
-        log.warning("Browser startup timed out (45s) — continuing without browser")
+        log.warning("Browser startup timed out (90s) — continuing without browser")
     except Exception as exc:
         log.warning("Browser startup failed", error=str(exc)[:100])
 
