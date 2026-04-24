@@ -12,6 +12,7 @@ import asyncio
 import glob
 import os
 import shutil
+import subprocess
 from typing import Any, TYPE_CHECKING
 
 import discord
@@ -50,6 +51,54 @@ def _find_ffmpeg() -> str:
 
 FFMPEG_PATH = _find_ffmpeg()
 
+
+_TOOB_FILTER_CHAIN = (
+    "asetrate=18500,aresample=24000,"
+    "atempo=2.0,"
+    "vibrato=f=5.5:d=0.15,"
+    "bass=g=6:f=80,"
+    "aecho=0.8:0.85:40:0.3,"
+    "volume=1.35"
+)
+
+
+def _prewarm_ffmpeg() -> None:
+    """Prime FFmpeg's binary + filter-graph init caches at import.
+
+    Toob's first filter-chain invocation cold-starts at ~770ms on a
+    fresh container — most of it is FFmpeg binary load + filter graph
+    construction. We do both up front:
+
+    1. `-version` call — pulls the binary into the OS page cache.
+    2. A 0.3s silence through the real Toob filter chain — primes the
+       filter-graph initialization path and exposes any compatibility
+       issues before first production use.
+
+    Synchronous (~150-400ms total). Runs once per container lifetime.
+    Failures are swallowed — prewarm is an optimization, not a
+    correctness requirement.
+    """
+    try:
+        subprocess.run(
+            [FFMPEG_PATH, "-hide_banner", "-version"],
+            capture_output=True, timeout=2.0,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return
+    try:
+        subprocess.run(
+            [
+                FFMPEG_PATH, "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+                "-t", "0.3",
+                "-af", _TOOB_FILTER_CHAIN,
+                "-f", "null", "-",
+            ],
+            capture_output=True, timeout=3.0,
+        )
+    except (subprocess.SubprocessError, OSError):
+        pass
+
 from poob.utils.logging import get_logger
 from poob.voice.audio_buffer import (
     BYTES_PER_FRAME,
@@ -74,6 +123,8 @@ if TYPE_CHECKING:
 
 log = get_logger("voice.session")
 log.info("ffmpeg resolved", path=FFMPEG_PATH)
+_prewarm_ffmpeg()
+log.info("ffmpeg prewarmed")
 
 
 class VoiceSession:
@@ -926,14 +977,9 @@ class VoiceSession:
         #   deep-pitch effect — reducing with shallower asetrate).
         # - aecho=0.8:0.85:40:0.3: reverb (cavernous, menacing).
         # - volume=1.35: retained; speechnorm in _play_audio handles loudness.
-        filter_chain = (
-            "asetrate=18500,aresample=24000,"
-            "atempo=2.0,"
-            "vibrato=f=5.5:d=0.15,"
-            "bass=g=6:f=80,"
-            "aecho=0.8:0.85:40:0.3,"
-            "volume=1.35"
-        )
+        # The chain lives at module level so _prewarm_ffmpeg can exercise
+        # the same path during startup without drift.
+        filter_chain = _TOOB_FILTER_CHAIN
 
         try:
             with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_in:

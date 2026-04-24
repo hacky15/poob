@@ -47,6 +47,12 @@ Stage rationale:
 
 ## Consequences
 
-- FFmpeg processing adds ~100-230ms (cold start ~770ms). Acceptable for the character effect; Toob is only active on music-play requests where some delay is already expected.
+- FFmpeg processing adds ~100-230ms (cold start ~770ms previously — see prewarm note below). Acceptable for the character effect; Toob is only active on music-play requests where some delay is already expected.
 - Fallback: if FFmpeg fails, raw Enceladus audio is used; if TTS fails entirely, regular Poob voice.
 - Word-length cap in `_wrap_music_response`: "ONE short sentence. 8-12 words MAX" + `toob_max_tokens = min(max_tokens, 60)` to prevent drift past the word limit at high temperature.
+
+## Startup prewarm (2026-04-23)
+
+`_prewarm_ffmpeg()` runs at `session.py` module import. Two passes: (1) `ffmpeg -version` pulls the binary into OS page cache, (2) a 0.3-second silence through the real Toob filter chain primes FFmpeg's filter-graph initialization path. Total ~150-400ms of startup cost, amortized into container-boot time nobody waits on. Kills the 770ms cold start on the first post-deploy Toob speak — subsequent invocations were already ~100-230ms.
+
+The module-level `_TOOB_FILTER_CHAIN` constant is now the single source of truth; `_synthesize_toob` references it directly so the prewarm and live paths never drift.
