@@ -923,11 +923,6 @@ class VoiceSession:
         The FFmpeg processing works on any audio source, so Toob's voice
         identity is preserved even when Google TTS is down.
         """
-        import asyncio
-        import os
-        import subprocess
-        import tempfile
-
         # --- Stage 1: Get raw audio (any provider) ---
         raw_audio = b""
         source = "unknown"
@@ -977,37 +972,45 @@ class VoiceSession:
         # the same path during startup without drift.
         filter_chain = _TOOB_FILTER_CHAIN
 
+        # Pipe-based FFmpeg call — no tempfiles, no executor round-trip.
+        # Input and output are MP3; `-analyzeduration 0 -probesize 32`
+        # skip the format probe (we know it's MP3) and shave startup.
         try:
-            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_in:
-                tmp_in.write(raw_audio)
-                tmp_in_path = tmp_in.name
-            tmp_out_path = tmp_in_path.replace(".mp3", "_toob.mp3")
-
-            proc = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    [FFMPEG_PATH, "-y", "-i", tmp_in_path,
-                     "-af", filter_chain, tmp_out_path],
-                    capture_output=True, timeout=5,
-                ),
+            proc = await asyncio.create_subprocess_exec(
+                FFMPEG_PATH,
+                "-hide_banner", "-loglevel", "error",
+                "-analyzeduration", "0", "-probesize", "32",
+                "-f", "mp3", "-i", "pipe:0",
+                "-af", filter_chain,
+                "-f", "mp3", "pipe:1",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            if proc.returncode == 0:
-                with open(tmp_out_path, "rb") as f:
-                    processed = f.read()
-                log.info("Toob TTS synthesized", bytes=len(processed), source=source)
-                return processed
-            else:
-                log.warning("Toob FFmpeg failed", stderr=proc.stderr[:80] if proc.stderr else "")
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(raw_audio), timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                log.warning("Toob FFmpeg timeout")
                 return raw_audio
+
+            if proc.returncode == 0 and stdout:
+                log.info(
+                    "Toob TTS synthesized", bytes=len(stdout), source=source,
+                )
+                return stdout
+
+            stderr_msg = (stderr or b"").decode("utf-8", errors="replace")[:80]
+            log.warning("Toob FFmpeg failed", stderr=stderr_msg)
+            return raw_audio
         except Exception as exc:
             log.warning("Toob FFmpeg processing error", error=str(exc)[:80])
             return raw_audio
-        finally:
-            for p in [tmp_in_path, tmp_out_path]:
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
 
     async def _play_audio(self, audio_data: bytes) -> None:
         """Play audio bytes through the Discord voice client.
