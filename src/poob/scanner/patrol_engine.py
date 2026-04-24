@@ -437,20 +437,50 @@ class PatrolEngine:
                 new_listings = new_listings[: self._max_evaluations]
 
             # Step 2g: Enrich capped listings by visiting their detail pages.
-            # The search results grid only shows title, price, location, and
-            # image — descriptions are only on individual listing pages.
-            # Without descriptions, text triage and VLM evaluation are blind
-            # to item details (condition, brand, features, seller motivation).
-            # Skipped entirely when the main browser failed to start — the
-            # GQL source still provides title/price/creation_time/photos,
-            # just without descriptions. Better than no data at all.
-            if page is not None:
+            # The search grid gives title/price/location/image; detail pages
+            # add the crucial field FB stripped from anonymous GQL in April
+            # 2026: creation_time. Without it the notification gate blocks
+            # 100% of deals as "no timestamp".
+            #
+            # Browser selection, in order of preference:
+            #   1. main (authenticated) — richest data, no login modal.
+            #   2. anonymous — data-sjs payload is still served to anon
+            #      viewers; the login modal only overlays the visual UI.
+            enrich_page = page
+            enrich_source = "main"
+            if enrich_page is None and self._anonymous_browser is not None:
+                try:
+                    enrich_page = await self._anonymous_browser.get_page()
+                    enrich_source = "anonymous"
+                    log.info(
+                        "Detail-page enrichment: using anonymous browser "
+                        "(main unavailable)",
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "Anonymous browser page unavailable for enrichment",
+                        error=str(exc)[:120],
+                    )
+
+            if enrich_page is not None:
                 new_listings = await self._enrich_listings_from_detail_pages(
-                    page, new_listings,
+                    enrich_page, new_listings,
+                )
+                # Phase 1.75 ground truth: how many listings gained a
+                # posted_at from enrichment? If this stays at 0, the
+                # detail-page data-sjs payload is redacted for the
+                # browser identity we're using — escalate from here.
+                with_ts = sum(1 for lst in new_listings if lst.posted_at is not None)
+                log.info(
+                    "post_enrichment.timestamp_coverage",
+                    source=enrich_source,
+                    total=len(new_listings),
+                    with_timestamp=with_ts,
+                    no_timestamp=len(new_listings) - with_ts,
                 )
             else:
                 log.info(
-                    "Detail-page enrichment skipped — main browser unavailable",
+                    "Detail-page enrichment skipped — no browser available",
                     listings=len(new_listings),
                 )
 
