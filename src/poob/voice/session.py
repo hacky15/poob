@@ -444,10 +444,13 @@ class VoiceSession:
             self._is_speaking = True
 
             try:
-                # Collect all sentences. The first yielded value may be a voice
-                # signal (VOICE_TOOB) indicating which persona/voice to use.
+                # Stream sentences from the brain and synth+play each one
+                # as it arrives — don't collect the full response first.
+                # Speculative-wrap music paths depend on this: the brain
+                # yields a wrap sentence early while ytdl search is still
+                # running; synth must start on that first yield, not wait
+                # for the rest of the generator to finish.
                 from poob.brain.poob import VOICE_TOOB
-                sentences = []
                 use_toob_voice = False
                 async for item in self.brain.respond_streaming(
                     prompt, str(user_id),
@@ -455,10 +458,9 @@ class VoiceSession:
                     # Voice signal — not text, just routing control
                     if item == VOICE_TOOB:
                         use_toob_voice = True
-                        continue  # Don't add to sentences
+                        continue
 
                     full_response += item + " "
-                    sentences.append(item)
 
                     if first_sentence:
                         t_llm = _time.monotonic()
@@ -470,35 +472,27 @@ class VoiceSession:
                         )
                         first_sentence = False
 
-                # Pipeline: synthesize sentence N+1 while sentence N plays.
-                synth = self._synthesize_toob if use_toob_voice else self._synthesize
-                next_audio_task = None
-                for i, sentence in enumerate(sentences):
-                    if next_audio_task is not None:
-                        audio = await next_audio_task
-                    else:
-                        audio = await synth(sentence)
+                    synth = (
+                        self._synthesize_toob
+                        if use_toob_voice
+                        else self._synthesize
+                    )
+                    audio = await synth(item)
+                    if not audio:
+                        continue
 
-                    if i + 1 < len(sentences):
-                        next_audio_task = asyncio.create_task(
-                            synth(sentences[i + 1])
-                        )
-                    else:
-                        next_audio_task = None
-
-                    if audio:
-                        # When music is playing, go straight to _play_audio()
-                        # which handles TTS overlay (music ducks automatically).
-                        # Only wait for previous TTS to finish, not music.
-                        music_active = (
-                            self.music_player is not None
-                            and self.music_player.mixer is not None
-                            and self.music_player.is_playing  # @property, not method
-                        )
-                        if not music_active:
-                            while self.voice_client.is_playing():
-                                await asyncio.sleep(0.02)
-                        await self._play_audio(audio)
+                    # When music is playing, go straight to _play_audio()
+                    # which handles TTS overlay (music ducks automatically).
+                    # Only wait for previous TTS to finish, not music.
+                    music_active = (
+                        self.music_player is not None
+                        and self.music_player.mixer is not None
+                        and self.music_player.is_playing
+                    )
+                    if not music_active:
+                        while self.voice_client.is_playing():
+                            await asyncio.sleep(0.02)
+                    await self._play_audio(audio)
 
                 # Update state
                 self._address_detector.mark_bot_spoke(full_response.strip())

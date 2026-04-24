@@ -67,6 +67,15 @@ If the speculative wrap feels worse (persistent mismatch, awkward silences, cras
 
 Revert the `action == "play"` branch in `respond_streaming` to unconditionally call `_handle_music`. The streaming helpers (`_stream_toob_wrap_from_query`, `_handle_music_voice_streaming`, `_stream_sentences_from_chunks`) can stay — they're inert unless called.
 
+## Session synth-as-yield (2026-04-23 follow-up)
+
+The first version of this decision landed the brain-side concurrency but capped the win: `session._process_single_response` was collecting the full sentence stream before starting synth. That made the brain-side `await music_task` block session's TTS. Both halves are now aligned:
+
+- **Session** (`voice/session.py:_process_single_response`): rewritten to synth + play each sentence as it yields from `respond_streaming`. The previous cross-sentence pipelining (`next_audio_task`) is dropped. For Toob (one sentence max) the pipelining never helped; for casual Poob (1-2 sentences, ~20 words) the simpler loop captures most of the benefit and unlocks speculative streaming.
+- **Brain** (`_handle_music_voice_streaming`): no longer awaits `music_task` after the wrap finishes. Attaches a done-callback for background observability (`music.response` / `Music handler (background) failed`), and does a non-blocking `music_task.done()` check at the end — if it finished with a failure we still yield a recovery sentence, otherwise the task runs in the background and the session ends its iteration promptly.
+
+The combined effect: session starts TTS synth within ~300-500ms of end-of-speech instead of after the whole stream (including music_task) resolves.
+
 ## Results
 
 <!-- Filled in after real voice use. -->

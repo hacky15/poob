@@ -1051,6 +1051,24 @@ class PoobBrain:
             )
         )
 
+        # Observability for the background task. We don't await it here
+        # because blocking would defeat speculative wrap — session needs
+        # the wrap sentences to start synth'ing immediately.
+        def _log_music_task_result(t: asyncio.Task) -> None:
+            try:
+                resp = t.result()
+                log.info(
+                    "music.response", user=user_id,
+                    response=(resp or "")[:80],
+                )
+            except Exception as exc:
+                log.warning(
+                    "Music handler (background) failed",
+                    error=str(exc)[:120],
+                )
+
+        music_task.add_done_callback(_log_music_task_result)
+
         # Concurrently stream the speculative wrap.
         wrap_text_parts: list[str] = []
         try:
@@ -1062,30 +1080,28 @@ class PoobBrain:
         except Exception as exc:
             log.warning("Speculative wrap failed", error=str(exc)[:80])
 
-        # Wait for music handler to finish (queue resolution). Recover
-        # if it raised, yield a fallback if it reported failure.
-        music_response: str | None = None
-        try:
-            music_response = await music_task
-        except Exception as exc:
-            log.warning("Music handler (background) failed", error=str(exc)[:120])
-            yield "couldn't find it, chief"
-            return
-
-        if music_response:
-            log.info(
-                "music.response", user=user_id, response=music_response[:80],
-            )
-            # Success signals: "Playing ..." / "Queued ...".
-            # Anything else (e.g. "Couldn't find ...") is a failure.
-            success = (
-                music_response.startswith("Playing")
-                or music_response.startswith("Queued")
-                or music_response.startswith("[SILENT]")
-            )
-            if not success:
+        # Non-blocking check: if music_task already finished while the
+        # wrap streamed, surface a failure message. If it's still
+        # running (the common case), we let it complete in the
+        # background — the deferred-playback logic in the session will
+        # start music when it's ready, and a total failure just means
+        # the user doesn't hear music. Acceptable per the ~2% mismatch
+        # trade-off documented in [[speculative-music-wrap]].
+        if music_task.done():
+            try:
+                music_response = music_task.result()
+            except Exception:
                 yield "couldn't find it, chief"
                 return
+            if music_response:
+                success = (
+                    music_response.startswith("Playing")
+                    or music_response.startswith("Queued")
+                    or music_response.startswith("[SILENT]")
+                )
+                if not success:
+                    yield "couldn't find it, chief"
+                    return
 
         if wrap_text_parts:
             self._save_response(user_id, " ".join(wrap_text_parts))
