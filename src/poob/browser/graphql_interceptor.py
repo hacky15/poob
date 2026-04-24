@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -18,6 +19,15 @@ if TYPE_CHECKING:
     from browser_use import BrowserSession
 
 log = get_logger("browser.graphql_interceptor")
+
+# One-shot diagnostic: the first N listing-node payloads parsed by this
+# process get their key sets logged once, so an operator can identify
+# which field holds creation_time (or confirm FB stripped it from
+# anonymous `__user=0` browse entirely). Naturally silent after N dumps.
+# Default ON because this answers the blocking question for Phase 1.5;
+# set POOB_DEBUG_GQL_KEYS=0 in env to disable when no longer needed.
+_DEBUG_GQL_KEYS = os.environ.get("POOB_DEBUG_GQL_KEYS", "1").strip() in {"1", "true", "yes"}
+_DEBUG_KEYS_REMAINING = 3 if _DEBUG_GQL_KEYS else 0
 
 
 @dataclass
@@ -186,6 +196,52 @@ def _extract_page_info(data: dict) -> tuple[str | None, bool]:
     return None, False
 
 
+def _dump_listing_node_keys(
+    edge: dict, node: dict, listing: dict, ext_id: str,
+) -> None:
+    """One-shot diagnostic — emit key sets for the first 3 listing nodes.
+
+    Used to identify whether Facebook's anonymous GraphQL response carries
+    ``creation_time`` on the listing node, nested elsewhere, or not at all.
+    Gated by the ``POOB_DEBUG_GQL_KEYS`` env var; no-op when disabled.
+    """
+    global _DEBUG_KEYS_REMAINING
+    if _DEBUG_KEYS_REMAINING <= 0:
+        return
+    _DEBUG_KEYS_REMAINING -= 1
+    try:
+        edge_keys = sorted(edge.keys()) if isinstance(edge, dict) else []
+        node_keys = sorted(node.keys()) if isinstance(node, dict) else []
+        listing_keys = sorted(listing.keys()) if isinstance(listing, dict) else []
+        # Time-adjacent fields and their values — catches creation_time if
+        # present, and any renamed field like listing_creation_time /
+        # time_created / posted_at / date_listed.
+        time_fields: dict[str, Any] = {}
+        for key in listing_keys:
+            key_lower = key.lower()
+            if (
+                "creat" in key_lower
+                or "post" in key_lower
+                or "time" in key_lower
+                or "date" in key_lower
+                or "listed" in key_lower
+            ):
+                val = listing[key]
+                # Trim to keep log readable — these can be nested objects.
+                time_fields[key] = str(val)[:120]
+        log.info(
+            "graphql.listing_node_keys",
+            remaining=_DEBUG_KEYS_REMAINING,
+            ext_id=ext_id,
+            edge_keys=edge_keys,
+            node_keys=node_keys,
+            listing_keys=listing_keys,
+            time_related=time_fields,
+        )
+    except Exception as exc:
+        log.debug("listing_node_keys dump failed", error=str(exc)[:100])
+
+
 def _parse_edge_node(edge: dict) -> GraphQLListingData | None:
     """Parse a single edge node into GraphQLListingData."""
     try:
@@ -195,6 +251,8 @@ def _parse_edge_node(edge: dict) -> GraphQLListingData | None:
         ext_id = str(listing.get("id", ""))
         if not ext_id:
             return None
+
+        _dump_listing_node_keys(edge, node, listing, ext_id)
 
         # Real Facebook listing IDs are pure numeric strings (e.g., "1234567890").
         # Non-listing nodes have compound IDs like
