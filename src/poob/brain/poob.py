@@ -14,6 +14,7 @@ Architecture:
 from __future__ import annotations
 
 import random
+import asyncio
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -244,6 +245,27 @@ _CONTEXT_RE = re.compile(
 def _yield_sentences(text: str) -> list[str]:
     """Split text into sentences for TTS streaming."""
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+
+
+async def _stream_sentences_from_chunks(
+    chunks: AsyncIterator[str],
+) -> AsyncIterator[str]:
+    """Buffer streaming LLM tokens and yield on sentence boundaries."""
+    buffer = ""
+    _BOUNDARY = re.compile(r"([.!?])(\s|$)")
+    async for chunk in chunks:
+        buffer += chunk
+        while True:
+            m = _BOUNDARY.search(buffer)
+            if not m:
+                break
+            end = m.end()
+            sentence = buffer[:end].strip()
+            if sentence:
+                yield sentence
+            buffer = buffer[end:]
+    if buffer.strip():
+        yield buffer.strip()
 
 
 def _split_context(raw: str) -> tuple[str, str]:
@@ -537,15 +559,34 @@ class PoobBrain:
                 clean_message, tool_name, tool_args,
             )
 
-        # --- Step 2a: Music tool detected → execute via handler, Toob responds ---
+        # --- Step 2a: Music tool detected → Toob responds ---
         if tool_name == "music_assistant":
+            action = (tool_args or {}).get("action")
+            # Speculative-wrap path: action=play streams a query-based
+            # Toob reaction while ytdl search runs in the background.
+            # Hides the 2-3s search latency behind TTS playback.
+            if action == "play":
+                try:
+                    yield VOICE_TOOB
+                    async for sentence in self._handle_music_voice_streaming(
+                        clean_message, user_id, max_tok, tool_args,
+                    ):
+                        yield sentence
+                    return
+                except Exception as exc:
+                    log.warning("Voice music route (streaming) failed",
+                                error=str(exc)[:80])
+                    yield "something went wrong with the music"
+                    return
+            # Non-play actions (skip/pause/stop/volume/etc.) use the
+            # blocking path — they return [SILENT]... fast and don't
+            # benefit from speculative wrap.
             try:
                 response = await self._handle_music(
                     clean_message, user_id, voice=True, max_tok=max_tok,
                     tool_args=tool_args,
                 )
                 if response:
-                    # Signal: use Toob's voice (Charon) for this response
                     yield VOICE_TOOB
                     self._save_response(user_id, response)
                     for _s in _yield_sentences(response):
@@ -892,6 +933,162 @@ class PoobBrain:
 
         # Fallback: still use Toob voice for the raw music result
         return music_result
+
+    async def _stream_toob_wrap_from_query(
+        self, user_message: str, max_tokens: int,
+    ) -> AsyncIterator[str]:
+        """Stream Toob's reaction using only the user's request, not the
+        music search result. Yields complete sentences as they form.
+
+        Used by the speculative-wrap music path so TTS can start while
+        ytdl search is still resolving in the background.
+        """
+        if not self.groq_api_key:
+            return
+
+        wrap_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Toob — a dark, malevolent spirit cursed to DJ for mortals. "
+                    "You DESPISE every request put to you. You wish suffering on whoever "
+                    "made it. Menacing, absurdly dramatic, like a demon working retail.\n"
+                    "RULES:\n"
+                    "- NEVER introduce yourself or say your name. Your voice IS your identity.\n"
+                    "- ONE short sentence. 8-12 words MAX. Tight, venomous.\n"
+                    "- React to THE REQUEST (what the user asked for), not to yourself. "
+                    "Insult their taste.\n"
+                    "- No caps, no markdown, no emojis. Spoken aloud through TTS."
+                ),
+            },
+            {"role": "user", "content": user_message},
+            {
+                "role": "user",
+                "content": (
+                    "React as Toob in ONE short sentence (8-12 words). Menacing. "
+                    "The user is requesting this — mock them for wanting it."
+                ),
+            },
+        ]
+
+        toob_max_tokens = min(max_tokens, 60)
+
+        from groq import AsyncGroq
+
+        client = AsyncGroq(api_key=self.groq_api_key)
+        stream = await client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=wrap_messages,  # type: ignore[arg-type]
+            max_tokens=toob_max_tokens,
+            temperature=0.9,
+            stream=True,
+        )
+
+        async def _chunks() -> AsyncIterator[str]:
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+
+        async for sentence in _stream_sentences_from_chunks(_chunks()):
+            yield sentence
+
+    async def _handle_music_voice_streaming(
+        self,
+        original_message: str,
+        user_id: str,
+        max_tok: int,
+        tool_args: dict | None,
+    ) -> AsyncIterator[str]:
+        """Speculative-wrap variant of _handle_music for voice + play action.
+
+        Runs the music handler (ytdl search + deferred queue) in the
+        background while streaming a query-based Toob reaction. The user
+        hears Toob within ~500ms instead of waiting 2-3s for search. The
+        deferred-playback logic in the session starts music after TTS.
+
+        Yields sentences. Yields nothing if the play query looks like a
+        hallucination from passive context (see music-tool-hallucination).
+        """
+        if self._music_handler is None:
+            yield "music isn't set up right now"
+            return
+
+        # Hallucination guard — matches _handle_music. Drop play calls whose
+        # query has zero lexical overlap with the current user message.
+        if tool_args and tool_args.get("action") == "play":
+            query = (tool_args.get("query") or "").strip()
+            if query:
+                _STOPWORDS = {
+                    "the", "a", "an", "by", "and", "or", "of", "to", "for",
+                    "some", "any", "song", "songs", "music", "track", "play",
+                    "put", "on", "it", "that", "this", "please", "can", "you",
+                    "me", "us", "up",
+                }
+                msg_tokens = {
+                    t for t in re.findall(r"[a-z0-9']+", original_message.lower())
+                }
+                query_tokens = {
+                    t for t in re.findall(r"[a-z0-9']+", query.lower())
+                    if t not in _STOPWORDS
+                }
+                if query_tokens and not (query_tokens & msg_tokens):
+                    log.warning(
+                        "music.play hallucinated from context — drop",
+                        current_message=original_message[:120],
+                        hallucinated_query=query[:80],
+                        user=user_id,
+                    )
+                    return
+
+        resolved_guild_id = self._voice_guild_id
+
+        # Fan out music handler as a background task — queues with
+        # deferred=True so playback waits for TTS to finish.
+        music_task = asyncio.create_task(
+            self._music_handler(
+                original_message, int(user_id), resolved_guild_id,
+                voice=True, tool_args=tool_args,
+            )
+        )
+
+        # Concurrently stream the speculative wrap.
+        wrap_text_parts: list[str] = []
+        try:
+            async for sentence in self._stream_toob_wrap_from_query(
+                original_message, max_tok,
+            ):
+                wrap_text_parts.append(sentence)
+                yield sentence
+        except Exception as exc:
+            log.warning("Speculative wrap failed", error=str(exc)[:80])
+
+        # Wait for music handler to finish (queue resolution). Recover
+        # if it raised, yield a fallback if it reported failure.
+        music_response: str | None = None
+        try:
+            music_response = await music_task
+        except Exception as exc:
+            log.warning("Music handler (background) failed", error=str(exc)[:120])
+            yield "couldn't find it, chief"
+            return
+
+        if music_response:
+            log.info(
+                "music.response", user=user_id, response=music_response[:80],
+            )
+            # Success signals: "Playing ..." / "Queued ...".
+            # Anything else (e.g. "Couldn't find ...") is a failure.
+            success = (
+                music_response.startswith("Playing")
+                or music_response.startswith("Queued")
+                or music_response.startswith("[SILENT]")
+            )
+            if not success:
+                yield "couldn't find it, chief"
+                return
+
+        if wrap_text_parts:
+            self._save_response(user_id, " ".join(wrap_text_parts))
 
     async def _wrap_in_personality(
         self,
