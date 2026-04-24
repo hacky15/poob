@@ -1232,29 +1232,23 @@ class PoobBrain:
         if self._music_handler is not None:
             tools.append(MUSIC_TOOL)
 
-        # Multi-provider tool-calling cascade.
-        # Benchmarked: all models below correctly detect music/deal intents.
-        # Different providers avoid single-provider rate limit failures.
+        # Multi-provider tool-calling cascade. See docs/decisions for the
+        # rationale and docs/references/vlm-cascade-operational-findings.
         #
-        # | Provider   | Model                  | Latency | Tool accuracy |
-        # |------------|------------------------|---------|---------------|
-        # | Groq       | llama-3.3-70b          |  925ms  | Excellent     |
-        # | Groq       | llama-4-scout-17b      |  858ms  | Excellent     |
-        # | Cerebras   | qwen-3-235b            |  752ms  | Good          |
-        # | NVIDIA NIM | qwen3-next-80b         |  930ms  | Good          |
+        # Cerebras qwen-3-235b used to sit between Groq and NVIDIA but was
+        # chronically 429-ed in production and added ~200-300ms of dead
+        # retry tax without ever serving a successful call. Dropped.
+        # Re-enable only if Cerebras lifts the rate limit AND a benchmark
+        # shows a latency win over NVIDIA.
 
         providers = []
-        # 1. Groq 70B primary (best tool-calling accuracy)
+        # 1. Groq primary (openai/gpt-oss-20b by default; see
+        #    decisions/groq-gpt-oss-20b-swap). The <function=...> recovery
+        #    regex in _call_provider_with_tools handles the known
+        #    llama-3.3-70b parser regression if that model is ever set.
         if self.groq_api_key:
             providers.append(("groq", self.groq_model))
-        # 2. Cerebras (DIFFERENT provider — bypasses Groq rate limits entirely)
-        #    Benchmarked: 752ms, correct on play/deal detection.
-        #    This is the primary fallback because Groq 70B hits 429 constantly
-        #    in multi-user sessions, and Groq's other models (Scout 17B)
-        #    misroute aggressively (e.g., "stop" → YouTube search for "stop").
-        if self.cerebras_api_key:
-            providers.append(("cerebras", "qwen-3-235b-a22b-instruct-2507"))
-        # 3. NVIDIA NIM (third provider, different company)
+        # 2. NVIDIA NIM — different provider, sidesteps Groq rate limits.
         if self.nvidia_api_key:
             providers.append(("nvidia", self.nvidia_model))
         # 4. Groq Scout 17B — LAST resort only. Fast but routes too aggressively

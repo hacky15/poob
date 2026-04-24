@@ -20,8 +20,11 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import collections
+import os
 import struct
 import time
+import wave
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -516,6 +519,30 @@ class DualPipelineProcessor:
         self._deepgram = DeepgramStreamManager(
             api_key=deepgram_api_key, model=deepgram_model,
         )
+
+        # Wake-word false-positive PCM capture (opt-in via env var).
+        # On "Audio wake word overridden by text" events, dump a rolling
+        # ~2s window of the user's 16kHz mono PCM to WAV for offline
+        # wake-word retraining. Set WAKE_FP_CAPTURE_DIR=/app/data/wake_fp
+        # in the Komodo env to enable. Each user gets a 100-frame ring.
+        self._wake_fp_capture_dir = os.environ.get(
+            "WAKE_FP_CAPTURE_DIR", "",
+        ).strip()
+        # 100 frames × 20ms = 2s at 16kHz mono 16-bit = ~64KB per user.
+        self._wake_fp_buffers: dict[int, collections.deque[bytes]] = {}
+        if self._wake_fp_capture_dir:
+            try:
+                os.makedirs(self._wake_fp_capture_dir, exist_ok=True)
+                log.info(
+                    "Wake-word FP capture enabled",
+                    dir=self._wake_fp_capture_dir,
+                )
+            except OSError as exc:
+                log.warning(
+                    "Wake-word FP capture dir create failed",
+                    dir=self._wake_fp_capture_dir, error=str(exc)[:80],
+                )
+                self._wake_fp_capture_dir = ""
         self._on_addressed = on_addressed_utterance
         self._on_passive = on_passive_utterance
         self._bot_audio_active = bot_audio_active or (lambda: False)
@@ -605,6 +632,15 @@ class DualPipelineProcessor:
         pcm_16k = downsample_48k_stereo_to_16k_mono(pcm_stereo_48k)
         if not pcm_16k:
             return
+
+        # Rolling 2-second ring buffer per user for wake-FP training capture.
+        # No-op when WAKE_FP_CAPTURE_DIR is unset (opt-in).
+        if getattr(self, "_wake_fp_capture_dir", ""):
+            buf = self._wake_fp_buffers.get(user_id)
+            if buf is None:
+                buf = collections.deque(maxlen=100)
+                self._wake_fp_buffers[user_id] = buf
+            buf.append(pcm_16k)
 
         # Check energy (simple VAD)
         samples = np.frombuffer(pcm_16k, dtype=np.int16)
@@ -778,6 +814,7 @@ class DualPipelineProcessor:
                     user=pipeline.user_name or user_id,
                     transcript=transcript[:60],
                 )
+                self._dump_wake_fp(user_id, pipeline.user_name, transcript)
 
         self._do_emit(user_id, pipeline.user_name, pipeline.speech_start_time,
                       is_addressed, transcript)
@@ -838,6 +875,53 @@ class DualPipelineProcessor:
             gap_ms = (now - pipeline.last_audio_time) * 1000
             if gap_ms > 1200:  # Match silence threshold (~1s) + buffer
                 self._emit_utterance(user_id, pipeline)
+
+    def _dump_wake_fp(
+        self, user_id: int, user_name: str, transcript: str,
+    ) -> None:
+        """Serialize the per-user rolling PCM ring to a WAV file.
+
+        Called on audio-wake-word-overridden-by-text events. The buffer
+        holds ~2 seconds of 16kHz mono PCM ending at the point where
+        the text gate overrode the acoustic hit. No-op if capture is
+        disabled, the buffer is empty, or the processor was constructed
+        via __new__ in tests (attribute not set).
+        """
+        capture_dir = getattr(self, "_wake_fp_capture_dir", "")
+        if not capture_dir:
+            return
+        buffers = getattr(self, "_wake_fp_buffers", None)
+        if not buffers:
+            return
+        buf = buffers.get(user_id)
+        if not buf:
+            return
+        pcm_bytes = b"".join(buf)
+        if not pcm_bytes:
+            return
+        ts = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+        safe_user = "".join(
+            c for c in (user_name or str(user_id)) if c.isalnum() or c in "-_"
+        )[:32] or str(user_id)
+        filename = f"{ts}_{safe_user}_{user_id}.wav"
+        path = os.path.join(capture_dir, filename)
+        try:
+            with wave.open(path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)  # 16-bit
+                wf.setframerate(16000)
+                wf.writeframes(pcm_bytes)
+        except (OSError, wave.Error) as exc:
+            log.warning(
+                "Wake-word FP capture write failed",
+                path=path, error=str(exc)[:80],
+            )
+            return
+        log.info(
+            "Wake-word FP captured",
+            path=path, transcript=transcript[:60],
+            duration_ms=int(len(pcm_bytes) / 32),  # 2 bytes/sample × 16000 Hz
+        )
 
     async def cleanup(self) -> None:
         """Release all resources."""

@@ -14,6 +14,8 @@ Write a new note (don't edit in place) when a decision is reversed or materially
 
 ## Entries
 
+- [[drop-cerebras-from-cascade]] — Cerebras chronically 429-rate-limited; removed from tool-call cascade (2026-04-23, proposed)
+- [[wake-fp-pcm-capture]] — save 2s PCM windows of wake-word false positives for offline retraining (2026-04-23, proposed)
 - [[deepgram-flux-optional]] — Deepgram model now configurable via env; opt-in Flux path available (2026-04-23, proposed)
 - [[speculative-music-wrap]] — run ytdl search and Toob wrap in parallel; stream wrap so Toob speaks within 500ms (2026-04-23, proposed)
 - [[groq-gpt-oss-20b-swap]] — swap Groq primary to gpt-oss-20b + client-side `<function=...>` recovery (2026-04-23, proposed)
