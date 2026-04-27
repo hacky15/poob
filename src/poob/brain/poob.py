@@ -34,6 +34,15 @@ log = get_logger("brain.poob")
 
 SENTENCE_END = re.compile(r"[.!?]+\s*$")
 
+# Tool-call JSON emission needs enough tokens to complete a clean
+# {"name": "...", "arguments": {...}} object even when the response-
+# length cap is squeezed for short voice replies. 256 covers a generous
+# tool envelope (verbatim deal_assistant request payloads can be
+# ~120 tokens; music_assistant args ~30-50; JSON wrapper ~30). Lower
+# values cause models to truncate mid-arguments and trigger
+# tool_use_failed 400s on Groq.
+_TOOL_DETECTION_MAX_TOKENS = 256
+
 # ---------------------------------------------------------------------------
 # Voice signal constants — yielded as first item from respond_streaming
 # to tell the session which voice persona to use for TTS.
@@ -348,6 +357,14 @@ class PoobBrain:
     # Value is a brief context snippet from the deal agent's last response.
     _deal_context: dict[str, str] = field(default_factory=dict, init=False)
 
+    # Last `play` tool call per user — (lowercase_query, monotonic_ts).
+    # Used to drop duplicate plays when the user retries the same request
+    # within the dedup window because they didn't hear an immediate
+    # acknowledgement.
+    _last_play: dict[str, tuple[str, float]] = field(
+        default_factory=dict, init=False,
+    )
+
     def set_music_handler(self, handler: MusicHandler) -> None:
         """Register the music command handler."""
         self._music_handler = handler
@@ -394,6 +411,47 @@ class PoobBrain:
             original=clean_message[:60], query=query[:60],
         )
         return "music_assistant", {"action": "play", "query": query}
+
+    # Suppress repeat play requests within this many seconds (same
+    # user, same normalized query). Tuned for "user retried because
+    # they didn't hear Toob over the duck-faded music."
+    _DEDUP_WINDOW_S: float = 20.0
+
+    @staticmethod
+    def _normalize_play_query(query: str) -> str:
+        """Lowercase + collapse whitespace for dedup equality."""
+        return " ".join(query.lower().split())
+
+    def _is_duplicate_play(self, user_id: str, query: str) -> bool:
+        """Return True if (user_id, normalized query) matches a previous
+        play within the dedup window. Records this call as the new
+        last-play regardless of the outcome — but the record is cleared
+        by `_clear_play_on_failure` if the music handler ultimately
+        reports failure, so a retry-after-failure isn't blocked.
+        """
+        import time as _t
+        now = _t.monotonic()
+        norm = self._normalize_play_query(query)
+        prev = self._last_play.get(user_id)
+        self._last_play[user_id] = (norm, now)
+        if not prev:
+            return False
+        prev_query, prev_ts = prev
+        if now - prev_ts > self._DEDUP_WINDOW_S:
+            return False
+        return prev_query == norm
+
+    def _clear_play_on_failure(self, user_id: str, query: str) -> None:
+        """Drop this user's dedup record if it still matches `query`.
+
+        Called when the music handler returns a non-success response
+        (e.g. ytdl couldn't find the track). Lets the user retry the
+        same request without hitting the dedup block.
+        """
+        norm = self._normalize_play_query(query)
+        cur = self._last_play.get(user_id)
+        if cur and cur[0] == norm:
+            self._last_play.pop(user_id, None)
 
     def roll_horniness(self) -> int:
         """Roll a new horniness level (1-10) for a voice session."""
@@ -838,9 +896,28 @@ class PoobBrain:
                     )
                     return "" if voice else "I didn't catch a music request there."
 
+            # Duplicate-play suppression. Users frequently retry the
+            # same request when they don't hear immediate audio
+            # acknowledgement (Toob duck-fades the music while
+            # speaking, which can read as silence). Drop a play call
+            # whose normalized query matches the previous play from
+            # the same user within DEDUP_WINDOW_S.
+            if self._is_duplicate_play(user_id, query):
+                log.warning(
+                    "music.play duplicate suppressed",
+                    query=query[:80], user=user_id,
+                )
+                return "" if voice else "Already queued that one."
+
         # Use explicitly passed guild_id (text channels), fall back to
         # voice session's guild_id (voice path sets _voice_guild_id).
         resolved_guild_id = guild_id or self._voice_guild_id
+
+        play_query_for_dedup = (
+            (tool_args or {}).get("query", "")
+            if (tool_args or {}).get("action") == "play"
+            else ""
+        )
 
         try:
             music_response = await self._music_handler(
@@ -849,9 +926,22 @@ class PoobBrain:
             )
         except Exception as exc:
             log.error("Music handler failed", error=str(exc)[:120])
+            if play_query_for_dedup:
+                self._clear_play_on_failure(user_id, play_query_for_dedup)
             return "Something broke trying to do the music thing."
 
         log.info("music.response", user=user_id, response=music_response[:80])
+
+        # Clear the dedup record if the play attempt failed (no audio
+        # produced) so the user can retry the same query immediately.
+        if play_query_for_dedup:
+            success_marker = (
+                music_response.startswith("Playing")
+                or music_response.startswith("Queued")
+                or music_response.startswith("[SILENT]")
+            )
+            if not success_marker:
+                self._clear_play_on_failure(user_id, play_query_for_dedup)
 
         # [SILENT] prefix = control command (skip, pause, volume, etc.)
         # Voice: execute silently — no personality wrap, no TTS.
@@ -1052,6 +1142,16 @@ class PoobBrain:
                     )
                     return
 
+            # Duplicate-play suppression. See _handle_music for the
+            # full rationale — same dedup window applies to the
+            # speculative-wrap streaming path.
+            if self._is_duplicate_play(user_id, query):
+                log.warning(
+                    "music.play duplicate suppressed",
+                    query=query[:80], user=user_id,
+                )
+                return
+
         resolved_guild_id = self._voice_guild_id
 
         # Fan out music handler as a background task — queues with
@@ -1065,21 +1165,36 @@ class PoobBrain:
 
         # Observability for the background task. We don't await it here
         # because blocking would defeat speculative wrap — session needs
-        # the wrap sentences to start synth'ing immediately.
-        def _log_music_task_result(t: asyncio.Task) -> None:
+        # the wrap sentences to start synth'ing immediately. The
+        # callback also clears the dedup record on failure so the user
+        # can retry the same query without being blocked.
+        play_query_for_dedup = (tool_args or {}).get("query") or ""
+
+        def _on_music_task_done(t: asyncio.Task) -> None:
             try:
                 resp = t.result()
-                log.info(
-                    "music.response", user=user_id,
-                    response=(resp or "")[:80],
-                )
             except Exception as exc:
                 log.warning(
                     "Music handler (background) failed",
                     error=str(exc)[:120],
                 )
+                if play_query_for_dedup:
+                    self._clear_play_on_failure(user_id, play_query_for_dedup)
+                return
+            log.info(
+                "music.response", user=user_id,
+                response=(resp or "")[:80],
+            )
+            if play_query_for_dedup and resp:
+                success_marker = (
+                    resp.startswith("Playing")
+                    or resp.startswith("Queued")
+                    or resp.startswith("[SILENT]")
+                )
+                if not success_marker:
+                    self._clear_play_on_failure(user_id, play_query_for_dedup)
 
-        music_task.add_done_callback(_log_music_task_result)
+        music_task.add_done_callback(_on_music_task_done)
 
         # Concurrently stream the speculative wrap.
         wrap_text_parts: list[str] = []
@@ -1276,11 +1391,18 @@ class PoobBrain:
         last_tool: str | None = None
         last_args: dict | None = None
 
+        # Tool-call emission has its own token budget (see
+        # _TOOL_DETECTION_MAX_TOKENS). Independent of the response cap,
+        # which only governs casual streaming length. Conflating them
+        # caused gpt-oss-20b to truncate mid-arguments at 80 tokens
+        # and trigger Groq tool_use_failed 400s.
+        tool_max_tokens = max(max_tokens, _TOOL_DETECTION_MAX_TOKENS)
+
         for idx, (provider, model) in enumerate(providers):
             is_last = idx == len(providers) - 1
             try:
                 text, tool_name, tool_args = await self._call_provider_with_tools(
-                    provider, model, messages, tools, max_tokens,
+                    provider, model, messages, tools, tool_max_tokens,
                 )
                 if tool_name:
                     log.info("poob.tool_route", tool=tool_name,

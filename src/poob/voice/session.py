@@ -412,20 +412,18 @@ class VoiceSession:
         t0 = _time.monotonic()
 
         async with self._response_lock:
-            # Build context prompt. The CURRENT SPEAKER must be unambiguous —
-            # smaller LLMs will confuse addressee identity when passive-context
-            # names dominate the token distribution (real incident: Lab Rat was
-            # chatting heavily, Ben asked Poob a question, Poob replied "lab
-            # rat, ..." — picked the most-salient name from context).
+            # Build context prompt. The CURRENT SPEAKER must be unambiguous,
+            # but the addressee rule lives in the system prompt now — the
+            # earlier user-message version was leaking into tool_call query
+            # arguments (e.g. play tool got query="low by\n(If you address
+            # them by name...)"). Trailing line is the transcript so the
+            # LLM treats it as the user intent.
             conv_context = self._build_context()
-            first_name = user_name.split(" (")[0]
             if conv_context:
                 prompt = (
                     f"[Recent conversation you've been listening to:\n{conv_context}]\n\n"
                     f"=== The user speaking to you RIGHT NOW is {user_name} ===\n"
-                    f"{user_name} just said to you: {transcript}\n"
-                    f"(If you address them by name at all, use ONLY \"{first_name}\" "
-                    f"— never another user's name from the transcript above.)"
+                    f"{user_name} just said to you: {transcript}"
                 )
             else:
                 prompt = f"{user_name} said to you: {transcript}"
