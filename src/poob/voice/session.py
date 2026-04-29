@@ -214,6 +214,9 @@ class VoiceSession:
         # Addressed utterance queue — requests that arrive while Poob is
         # already responding get queued instead of dropped. Processed FIFO.
         self._addressed_queue: asyncio.Queue[tuple[int, str, str]] = asyncio.Queue(maxsize=5)
+        # In-flight response tasks. Tracked so cleanup() can cancel
+        # pending work when the bot leaves a voice channel.
+        self._inflight_tasks: set[asyncio.Task] = set()
 
         # --- Passive context + multi-signal address detection ---
         # Rolling transcript of recent conversation (all users, attributed).
@@ -351,12 +354,16 @@ class VoiceSession:
         if hasattr(self, "_last_utterance_time"):
             self._last_utterance_time = _time.monotonic()
 
-        # Build prompt and respond — transcript already available, no STT needed
-        self._loop.call_soon_threadsafe(
-            lambda: self._loop.create_task(
+        # Build prompt and respond — transcript already available, no STT needed.
+        # Track the task so cleanup() can cancel it on disconnect.
+        def _spawn() -> None:
+            task = self._loop.create_task(
                 self._respond_to_transcript(user_id, user_name, transcript)
             )
-        )
+            self._inflight_tasks.add(task)
+            task.add_done_callback(self._inflight_tasks.discard)
+
+        self._loop.call_soon_threadsafe(_spawn)
 
     def _on_dual_passive(self, user_id: int, user_name: str, transcript: str) -> None:
         """Called for non-wake-word utterances. Just add to passive context."""
@@ -1111,8 +1118,14 @@ class VoiceSession:
 
     async def cleanup(self) -> None:
         """Clean up resources when leaving voice channel."""
-        if self._current_task and not self._current_task.done():
-            self._current_task.cancel()
+        # Cancel any in-flight response tasks. Pre-`8b960bb` this
+        # block referenced an undefined `_current_task` attribute and
+        # crashed `/join` when the slash command tried to disconnect a
+        # stale session before connecting fresh.
+        for task in list(self._inflight_tasks):
+            if not task.done():
+                task.cancel()
+        self._inflight_tasks.clear()
 
         # Flush all user buffers/detectors
         for buffer in self._user_buffers.values():

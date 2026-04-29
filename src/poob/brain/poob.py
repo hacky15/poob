@@ -101,12 +101,19 @@ def _get_vibe(level: int) -> str:
     return _HORNINESS_VIBES[range(5, 7)]  # fallback to default
 
 
-def _build_system_prompt(level: int, voice: bool = False) -> str:
+def _build_system_prompt(
+    level: int, voice: bool = False, with_tools: bool = True,
+) -> str:
     """Build Poob's system prompt scaled to the current horniness level.
 
     Args:
         level: Horniness level 1-10.
         voice: If True, appends voice-mode constraints.
+        with_tools: If True, append the tool-routing instructions. Set
+            to False on the casual fall-through path so the model
+            doesn't echo tool names like ``music_assistant`` as plain
+            text — by then routing has already happened and the
+            casual model has no tools defined anyway.
     """
     vibe = _get_vibe(level)
 
@@ -131,20 +138,26 @@ def _build_system_prompt(level: int, voice: bool = False) -> str:
         "NEVER:\n"
         "- Say \"as an AI\" or break character\n"
         "- Reference things nobody actually said\n"
-        "- Use markdown, bullet points, emojis, or formatting (this is spoken out loud)\n\n"
-        "You have a deal_assistant tool for shopping stuff. Only use when explicitly asked.\n"
-        "You have a music_assistant tool for playing music. "
-        "CRITICAL: If the user says ANYTHING that could be a request to play, queue, "
-        "skip, pause, stop, or control music, you MUST call music_assistant. "
-        "Do NOT talk about music instead of playing it. Do NOT comment on the request. "
-        "Do NOT ask clarifying questions. Just call the tool.\n"
-        "Examples that MUST trigger music_assistant:\n"
-        "- 'play some jazz' → action=play, query='jazz'\n"
-        "- 'play something chill' → action=play, query='chill music'\n"
-        "- 'play whimsical music' → action=play, query='whimsical music'\n"
-        "- 'put on some beats' → action=play, query='beats'\n"
-        "When in doubt, call the tool. Never respond with text about a music request."
+        "- Use markdown, bullet points, emojis, or formatting (this is spoken out loud)\n"
+        "- Mention any internal tool, function, or routing names — these are "
+        "implementation details and have no place in spoken responses."
     )
+
+    if with_tools:
+        prompt += (
+            "\n\nYou have a deal_assistant tool for shopping stuff. Only use when explicitly asked.\n"
+            "You have a music_assistant tool for playing music. "
+            "CRITICAL: If the user says ANYTHING that could be a request to play, queue, "
+            "skip, pause, stop, or control music, you MUST call music_assistant. "
+            "Do NOT talk about music instead of playing it. Do NOT comment on the request. "
+            "Do NOT ask clarifying questions. Just call the tool.\n"
+            "Examples that MUST trigger music_assistant:\n"
+            "- 'play some jazz' → action=play, query='jazz'\n"
+            "- 'play something chill' → action=play, query='chill music'\n"
+            "- 'play whimsical music' → action=play, query='whimsical music'\n"
+            "- 'put on some beats' → action=play, query='beats'\n"
+            "When in doubt, call the tool. Never respond with text about a music request."
+        )
 
     if voice:
         prompt += (
@@ -417,6 +430,60 @@ class PoobBrain:
     # they didn't hear Toob over the duck-faded music."
     _DEDUP_WINDOW_S: float = 20.0
 
+    # Sentence cleanup for casual streaming — strips leaked
+    # function-call markup AND standalone tool-name tokens (the LLM
+    # sometimes emits "music_assistant" or "deal_assistant" as plain
+    # text when the casual model has no tools wired up).
+    _TOOL_NAME_LEAK_RE = re.compile(
+        r"(?:^|[\s,;:.])(?:music_assistant|deal_assistant)\b\.?",
+        re.IGNORECASE,
+    )
+    _FUNCTION_TAG_RE = re.compile(
+        r"\s*<function=\w+>.*?</function>\s*", re.DOTALL,
+    )
+
+    @classmethod
+    def _scrub_tool_leakage(cls, text: str) -> str:
+        """Remove tool-call markup and leaked tool-name tokens from a
+        casual-path sentence. Returns the cleaned sentence (possibly
+        empty after stripping)."""
+        if not text:
+            return ""
+        out = text
+        if "<function=" in out:
+            out = cls._FUNCTION_TAG_RE.sub("", out)
+        out = cls._TOOL_NAME_LEAK_RE.sub("", out)
+        return out.strip(" .,;:")
+
+    def _rebuild_messages_no_tools(
+        self, messages: list[dict], voice: bool,
+    ) -> list[dict]:
+        """Return a copy of `messages` with the system prompt swapped
+        for the tool-free variant. Leaves user / assistant / context
+        turns intact."""
+        no_tools_system = _build_system_prompt(
+            self._horniness_level if voice else 5,
+            voice=voice, with_tools=False,
+        )
+        if voice:
+            no_tools_system += (
+                "\n\nVOICE MODE: This is spoken out loud through TTS. Talk "
+                "naturally. Don't use ALL CAPS — use normal casing. "
+                "Never use markdown, bullet points, emojis, or any formatting. "
+                "Match the energy of the conversation — don't force it."
+            )
+        rebuilt: list[dict] = []
+        replaced = False
+        for m in messages:
+            if not replaced and m.get("role") == "system":
+                rebuilt.append({"role": "system", "content": no_tools_system})
+                replaced = True
+            else:
+                rebuilt.append(m)
+        if not replaced:
+            rebuilt.insert(0, {"role": "system", "content": no_tools_system})
+        return rebuilt
+
     @staticmethod
     def _normalize_play_query(query: str) -> str:
         """Lowercase + collapse whitespace for dedup equality."""
@@ -677,13 +744,21 @@ class PoobBrain:
         # first sentence as soon as the LLM closes a `.`, `!`, or `?`,
         # not after the full response arrives. Parity with the
         # speculative-wrap music path.
+        #
+        # The casual path uses a tool-free system prompt: routing has
+        # already happened, this model has no tools defined, and
+        # leaving tool descriptions in the prompt causes leakage like
+        # the model emitting 'music_assistant' as plain text.
+        casual_messages = self._rebuild_messages_no_tools(
+            messages, voice=True,
+        )
         try:
             from groq import AsyncGroq
 
             client = AsyncGroq(api_key=self.groq_api_key)
             stream = await client.chat.completions.create(
                 model="llama-3.1-8b-instant",
-                messages=messages,  # type: ignore[arg-type]
+                messages=casual_messages,  # type: ignore[arg-type]
                 max_tokens=max_tok,
                 temperature=0.9,
                 stream=True,
@@ -697,12 +772,7 @@ class PoobBrain:
             full_text = ""
             any_yielded = False
             async for sentence in _stream_sentences_from_chunks(_raw_chunks()):
-                # Strip leaked function-call markup token-side.
-                cleaned = sentence
-                if "<function=" in cleaned:
-                    cleaned = re.sub(
-                        r"\s*<function=\w+>.*?</function>\s*", "", cleaned,
-                    ).strip()
+                cleaned = self._scrub_tool_leakage(sentence)
                 if not cleaned:
                     continue
                 full_text += cleaned + " "
@@ -872,6 +942,17 @@ class PoobBrain:
         # titles from passive conversation context. See technical_notes.md.
         if tool_args and tool_args.get("action") == "play":
             query = (tool_args.get("query") or "").strip()
+            # Empty / one-token queries can't possibly be a real song
+            # request (STT cut off mid-sentence: "Hey, Poob. Play"
+            # → action=play, query=""). Don't fan out to ytdl, don't
+            # speak a confused "couldn't find it" recovery line —
+            # ask once, cleanly.
+            if len(query) < 2:
+                log.info(
+                    "music.play empty query — prompting user",
+                    query=query, user=user_id,
+                )
+                return "" if voice else "Play what?"
             if query:
                 _STOPWORDS = {
                     "the", "a", "an", "by", "and", "or", "of", "to", "for",
@@ -1119,6 +1200,15 @@ class PoobBrain:
         # query has zero lexical overlap with the current user message.
         if tool_args and tool_args.get("action") == "play":
             query = (tool_args.get("query") or "").strip()
+            # Empty / one-token queries — STT cut off the request.
+            # Ask once, don't fan out a doomed search.
+            if len(query) < 2:
+                log.info(
+                    "music.play empty query — prompting user",
+                    query=query, user=user_id,
+                )
+                yield "play what?"
+                return
             if query:
                 _STOPWORDS = {
                     "the", "a", "an", "by", "and", "or", "of", "to", "for",
