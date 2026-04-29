@@ -471,6 +471,19 @@ def apply_voice_compat_patches() -> None:
     if _PATCH_APPLIED:
         return
 
+    # Opt-in DEBUG-level voice_compat logging via env var. Off by
+    # default to keep production log volume manageable. When
+    # investigating DAVE handshake failures, set VOICE_COMPAT_DEBUG=1
+    # to surface the binary-frame opcode trace and gateway-message
+    # details — needed to distinguish empty-channel-first-join,
+    # protocol drift, and stale MLS state.
+    # See docs/research/dave-handshake-failure-april2026.md.
+    if os.getenv("VOICE_COMPAT_DEBUG", "").strip().lower() in {"1", "true", "yes"}:
+        logger.setLevel(logging.DEBUG)
+        logger.info(
+            "[VoiceCompat] DEBUG logging enabled via VOICE_COMPAT_DEBUG"
+        )
+
     max_dave_protocol_version = _resolve_max_dave_protocol_version()
 
     # DAVE opcode constants

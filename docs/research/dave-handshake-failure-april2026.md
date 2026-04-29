@@ -88,6 +88,30 @@ The patch was adapted from `GabrielAgrela/Discord-Brain-Rot` per MEMORY's `proje
 
 If A produces "channel requires DAVE" rejection (unlikely but possible if your specific Discord guild has DAVE *required*), fall through to B with DEBUG logs and gather evidence before changing any voice_compat code.
 
+## Update — Option A confirmed dead (2026-04-29)
+
+Tried `VOICE_MAX_DAVE_PROTOCOL_VERSION=0` in Komodo. Discord closed our voice WebSocket with **code 4017, reason "E2EE/DAVE protocol required"** — repeatedly. The handshake loop produced the user-visible "infinitely joining" symptom. Eventually one connect succeeded with `No DAVE negotiated (version=0)` and the bot stayed in the channel, but with the same deaf state (no addressed utterances captured).
+
+This guild **enforces** DAVE. Non-DAVE clients are not welcome. The lowest-risk workaround does not apply here.
+
+Option B (DEBUG logging on `poob.voice.voice_compat`) is now the only path forward. Need:
+
+1. Revert `VOICE_MAX_DAVE_PROTOCOL_VERSION` (delete or restore default) — stops the reconnect loop.
+2. Enable DEBUG logging on `poob.voice.voice_compat` so the binary-frame send/receive lines surface in production logs.
+3. Trigger one clean `/join` with humans present, wait ~30s, pull logs.
+4. Inspect: did we receive ANY MLS binary frames after sending our `MLS_KEY_PACKAGE`? If yes, what opcodes? If no, the gateway never bundled us into the group.
+
+Three plausible mechanisms to distinguish (see earlier section):
+- (1) Empty-channel join → wait for human-trigger MLS_PROPOSALS
+- (2) Discord protocol shift → version > 1 transitions we can't handle
+- (3) Stale MLS state from prior session
+
+DEBUG logs will show which.
+
+## Observability landed alongside this note
+
+Added env-gated DEBUG-level enable for the `poob.voice.voice_compat` logger. Set `VOICE_COMPAT_DEBUG=1` in the Komodo stack env to surface the binary-frame opcode trace and the `Voice websocket frame received` lines. Default off so log volume stays manageable. Apply when investigating, remove when done.
+
 ## Vault discipline note
 
 Per CLAUDE.md's mandatory vault-first rule, I am NOT changing code in this turn. The `bb51d8e` revert restored the prior soft-fail behavior; further changes to voice_compat or the handshake-wait loop must cite this research note (or a follow-up) showing which of mechanisms 1/2/3 is actually firing. Speculative DAVE patches caused the previous regression; we don't repeat that.
