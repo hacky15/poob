@@ -14,6 +14,7 @@ When research leads to a commitment, open a matching decision note and link to i
 
 ### Voice / Brain
 
+- [[dave-handshake-failure-april2026]] — DAVE never completes; bot deaf in voice; Option A workaround (env flag) recommended
 - [[voice-pipeline-optimization-prompt]] — 2026 research prompt: end-to-end latency + accuracy, ready-to-dispatch
 - [[conversation-classifier]] — intelligent address detection for multi-user voice
 - [[wake-word-latency]] — custom wake-word detection + response latency
