@@ -22,6 +22,7 @@ Gotchas differ from incidents: an incident is a specific event in the past, a go
 
 ### Discord / Voice / Music
 
+- [[dave-version-zero-rejected-by-e2ee-required-guilds]] — `VOICE_MAX_DAVE_PROTOCOL_VERSION=0` triggers WS 4017 reject loop on E2EE-required guilds
 - [[dave-ready-flag-is-not-truth]] — `dave_session.ready` can stay False while audio works fine; never use it as a fatal precondition
 - [[pycord-auto-sync-commands-fires-before-cogs]] — auto-sync runs in `on_connect`, before `on_ready` cog loading
 - [[pycord-is-playing-is-a-property]] — `player.is_playing()` crashes; it's a property, not a method

@@ -66,20 +66,47 @@ def _set_attribute(target: Any, name: str, value: Any) -> None:
 
 
 def _resolve_max_dave_protocol_version() -> int:
-    """Resolve max DAVE protocol version from env with safe fallback."""
+    """Resolve max DAVE protocol version.
+
+    Priority:
+      1. `VOICE_MAX_DAVE_PROTOCOL_VERSION` env, but ONLY if it's a
+         positive int. The value `0` is silently overridden when
+         `davey` is available — guilds with E2EE *required* close
+         non-DAVE connections with WS code 4017 ("E2EE/DAVE protocol
+         required") in an unbounded reconnect loop. Forcing 0 is not
+         a valid disable mechanism on those guilds.
+         See docs/research/dave-handshake-failure-april2026.md.
+      2. `davey.DAVE_PROTOCOL_VERSION` if davey is installed.
+      3. 0 only if davey is missing entirely (the `_HAS_DAVEY=False`
+         path is already a degraded state and DAVE isn't possible).
+    """
+    davey_version = (
+        max(0, int(getattr(davey, "DAVE_PROTOCOL_VERSION", 0)))
+        if _HAS_DAVEY
+        else 0
+    )
     raw = os.getenv("VOICE_MAX_DAVE_PROTOCOL_VERSION")
     if raw is not None:
         raw = raw.strip()
         try:
-            return max(0, int(raw))
+            requested = int(raw)
         except ValueError:
             logger.warning(
-                "[VoiceCompat] Invalid VOICE_MAX_DAVE_PROTOCOL_VERSION=%r, using fallback",
-                raw,
+                "[VoiceCompat] Invalid VOICE_MAX_DAVE_PROTOCOL_VERSION=%r, "
+                "using davey default %s",
+                raw, davey_version,
             )
-    if _HAS_DAVEY:
-        return max(0, int(getattr(davey, "DAVE_PROTOCOL_VERSION", 0)))
-    return 0
+            return davey_version
+        if requested <= 0 and davey_version > 0:
+            logger.warning(
+                "[VoiceCompat] VOICE_MAX_DAVE_PROTOCOL_VERSION=%s ignored — "
+                "guilds with E2EE required reject 0 with WS 4017. "
+                "Using davey default %s.",
+                requested, davey_version,
+            )
+            return davey_version
+        return max(0, requested)
+    return davey_version
 
 
 def _ensure_ws_state(ws: DiscordVoiceWebSocket) -> None:
