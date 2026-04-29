@@ -173,21 +173,19 @@ class VoiceCog(commands.Cog, name="Voice"):
             session._last_utterance_time = time.monotonic()
             self._sessions[guild_id] = session
 
-            # Wait for DAVE E2EE handshake. The MLS negotiation can take
-            # 8-12s on slower paths, particularly right after a
-            # disconnect/reconnect cycle (the Voice Channel keys reset).
-            # If the channel is DAVE-enabled (dave_version > 0) and we
-            # haven't received the session keys, every incoming Opus
-            # frame is encrypted noise from the decoder's POV, which
-            # used to spam discord.opus "corrupted stream" forever.
+            # Wait for DAVE E2EE handshake to settle. MLS negotiation
+            # can take 8-12s on slower paths. Empirically on this
+            # deployment, `dave_session.ready` may stay False for the
+            # whole call and the recording still works because the
+            # decoder catches up after the first few frames — so we
+            # WAIT politely (15s, up from the original 5s) and proceed
+            # regardless. Aborting on timeout was a regression: it
+            # turned every /join into an instant disconnect.
             #
-            # Robust handling:
-            #   1. Wait up to 15s (3x the old 5s).
-            #   2. If still not ready, REFUSE to start recording rather
-            #      than feed encrypted bytes to the Opus decoder.
-            #      Surface the failure so the user can /leave + /join
-            #      to retry instead of sitting in a non-functional
-            #      recording loop.
+            # The opus "corrupted stream" warnings during the early
+            # handshake window are harmless noise from frames that
+            # arrived ahead of the keys. Decoding stabilizes once the
+            # keys land.
             dave_ready = False
             dave_version = getattr(vc, "dave_protocol_version", 0) or 0
             DAVE_TIMEOUT_S = 15.0
@@ -207,28 +205,12 @@ class VoiceCog(commands.Cog, name="Voice"):
                         break
                     await asyncio.sleep(DAVE_POLL_S)
                 if not dave_ready:
-                    log.error(
-                        "DAVE handshake did not complete in time — "
-                        "refusing to start recording (decoder would "
-                        "spam corrupted-stream errors). User must "
-                        "/leave and /join again.",
+                    log.warning(
+                        "DAVE not ready within window — starting "
+                        "recording anyway; decoder catches up once "
+                        "keys arrive.",
                         timeout_s=DAVE_TIMEOUT_S, dave_version=dave_version,
                     )
-                    # Tear down the half-initialized session so a
-                    # subsequent /join starts cleanly.
-                    self._sessions.pop(guild_id, None)
-                    try:
-                        await session.cleanup()
-                    except Exception as exc:
-                        log.warning(
-                            "Session cleanup after DAVE failure raised",
-                            error=str(exc)[:120],
-                        )
-                    try:
-                        await vc.disconnect(force=True)
-                    except Exception:
-                        pass
-                    return
             else:
                 log.info("No DAVE negotiated (version=0)")
 
