@@ -548,10 +548,19 @@ class DualPipelineProcessor:
         self._bot_audio_active = bot_audio_active or (lambda: False)
         self._user_pipelines: dict[int, UserPipeline] = {}
         self._silence_counters: dict[int, int] = {}
-        self._SILENCE_THRESHOLD = 50  # 50 frames × 20ms = 1000ms silence → end of speech
-        # 1000ms is the sweet spot: long enough to not split natural pauses
-        # ("Hey Jarvis, [pause] what do you think?") but short enough to feel
-        # responsive. Matches Deepgram's utterance_end_ms=1500 reasonably.
+        # Differential silence thresholds based on whether the wake
+        # word fired. Once the user has addressed Poob, they need
+        # patience to articulate the full request — natural mid-sentence
+        # pauses ("Hey, Poob. ... Play Can't Stop by ... Red Hot Chili
+        # Peppers") run 1000-1800ms in real speech, and emitting at
+        # 1000ms lopped the actual song name off into a passive
+        # continuation. Passive utterances keep the tighter threshold
+        # because they drive the rolling transcript, not a tool call.
+        self._SILENCE_THRESHOLD_PASSIVE = 50   # 1000ms — fast rolling transcript
+        self._SILENCE_THRESHOLD_ADDRESSED = 100  # 2000ms — let speakers finish
+        # Backwards-compat alias used by tests / external callers that
+        # still reference the old single-threshold attribute.
+        self._SILENCE_THRESHOLD = self._SILENCE_THRESHOLD_PASSIVE
         self._loop: asyncio.AbstractEventLoop | None = None
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -715,7 +724,16 @@ class DualPipelineProcessor:
             if pipeline.speech_started:
                 self._silence_counters[user_id] = self._silence_counters.get(user_id, 0) + 1
 
-                if self._silence_counters[user_id] >= self._SILENCE_THRESHOLD:
+                # Patient threshold once the wake word has fired —
+                # otherwise we cut off the addressed utterance halfway
+                # through the request and the actual song / question
+                # arrives 1-2 seconds later as a passive continuation.
+                threshold = (
+                    self._SILENCE_THRESHOLD_ADDRESSED
+                    if pipeline.is_active
+                    else self._SILENCE_THRESHOLD_PASSIVE
+                )
+                if self._silence_counters[user_id] >= threshold:
                     self._emit_utterance(user_id, pipeline)
 
     def _emit_utterance(self, user_id: int, pipeline: UserPipeline) -> None:

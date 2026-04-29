@@ -484,6 +484,53 @@ class PoobBrain:
             rebuilt.insert(0, {"role": "system", "content": no_tools_system})
         return rebuilt
 
+    # Verbs of intent that should NEVER appear in a music search
+    # query — they describe what the user wants to do, not what to
+    # search for. Stripped at the brain→handler boundary so ytdl
+    # gets a clean song/artist/genre string regardless of how the
+    # LLM extracted it.
+    #
+    # Articles (a / an / the) are NOT stripped — they're often part of
+    # song titles ("The Chain", "A Day in the Life") and ytdl is fine
+    # with them. We only remove the user's intent verb and any
+    # canonical prep that follows it.
+    _MUSIC_QUERY_VERB_RE = re.compile(
+        r"^\s*"
+        r"(?:please\s+)?"
+        r"(?:"
+        # canonical multi-word forms first (longest match wins)
+        r"hit\s+me\s+(?:with|up\s+with)|give\s+me|put\s+on|throw\s+on|"
+        r"start\s+up|spin\s+up|pull\s+up|fire\s+up|cue\s+up|stick\s+on|"
+        # bare verbs
+        r"play|queue|throw|start|spin|pull|fire|stick|cue|load|drop|"
+        r"gimme|hit|give|put"
+        r")"
+        # optional trailing prep continuation when the verb was bare
+        r"(?:\s+(?:up|on|me|with))*"
+        r"\s+",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _scrub_music_query(cls, query: str) -> str:
+        """Strip leading user-verbs from a music search query.
+
+        Examples:
+          'play red hot chili peppers' -> 'red hot chili peppers'
+          'queue up some jazz'         -> 'jazz'
+          "Can't Stop"                 -> "Can't Stop" (unchanged)
+
+        The query field of music_assistant tool_args is for ytdl
+        search input, not user intent. Verbs of intent belong in the
+        `action` field. We sanitize at the brain→handler boundary so
+        ytdl never receives `play X` and returns "Play X (Official)"
+        misses.
+        """
+        if not query:
+            return query
+        out = cls._MUSIC_QUERY_VERB_RE.sub("", query, count=1)
+        return out.strip()
+
     @staticmethod
     def _normalize_play_query(query: str) -> str:
         """Lowercase + collapse whitespace for dedup equality."""
@@ -941,7 +988,17 @@ class PoobBrain:
         # current user message — a defense against the LLM pulling song
         # titles from passive conversation context. See technical_notes.md.
         if tool_args and tool_args.get("action") == "play":
-            query = (tool_args.get("query") or "").strip()
+            raw_query = (tool_args.get("query") or "").strip()
+            # Sanitize: strip leading user-verbs ("play", "queue",
+            # "put on", etc.). These are intent words, not search
+            # terms. See _scrub_music_query.
+            query = self._scrub_music_query(raw_query)
+            if query != raw_query:
+                log.info(
+                    "music.play query sanitized",
+                    raw=raw_query[:80], scrubbed=query[:80],
+                )
+                tool_args = {**tool_args, "query": query}
             # Empty / one-token queries can't possibly be a real song
             # request (STT cut off mid-sentence: "Hey, Poob. Play"
             # → action=play, query=""). Don't fan out to ytdl, don't
@@ -1199,7 +1256,14 @@ class PoobBrain:
         # Hallucination guard — matches _handle_music. Drop play calls whose
         # query has zero lexical overlap with the current user message.
         if tool_args and tool_args.get("action") == "play":
-            query = (tool_args.get("query") or "").strip()
+            raw_query = (tool_args.get("query") or "").strip()
+            query = self._scrub_music_query(raw_query)
+            if query != raw_query:
+                log.info(
+                    "music.play query sanitized",
+                    raw=raw_query[:80], scrubbed=query[:80],
+                )
+                tool_args = {**tool_args, "query": query}
             # Empty / one-token queries — STT cut off the request.
             # Ask once, don't fan out a doomed search.
             if len(query) < 2:
