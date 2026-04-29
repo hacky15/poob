@@ -46,6 +46,13 @@ Before any non-trivial work:
 3. Read the relevant `architecture/` note for mental model, and any `decisions/` notes tagged with the subsystem you're touching.
 4. If a past `incidents/` note is adjacent, read it — the symptom might match again.
 
+**MANDATORY: changing a fall-through / safety-valve behavior requires citing a vault note.** When you see code that *looks* wrong (a warning that "should be an error", a fallback that "should fail loud", a default that "should be strict"), default to the assumption it is intentional and load-bearing. Before flipping it:
+
+- Search `docs/` for the relevant subsystem keyword and the symptom keyword.
+- Read the related `architecture/`, `decisions/`, and `incidents/` notes.
+- Cite the note in your decision rationale, OR write a new gotcha / decision documenting *why the existing behavior is wrong* before changing it.
+- **No exceptions for code that "obviously needs robustness."** A hard-fail introduced where a soft-fail was deliberate is a regression, not a fix. See [[dave-timeout-fail-hard-regression]] for the cost of skipping this step.
+
 After any non-trivial work:
 
 1. Pick the right note type (decision, incident, gotcha, runbook, reference, research, architecture).

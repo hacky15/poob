@@ -16,6 +16,7 @@ Resolved incidents stay `status: resolved`. Open ones stay `status: active`. If 
 
 ### 2026-04
 
+- [[dave-timeout-fail-hard-regression]] — agent flipped DAVE-not-ready into a fatal disconnect; auto-leave on every /join until reverted (2026-04-29)
 - [[voice-three-failure-modes-april27]] — `/join` crash + empty-query play + casual leak of tool-name (2026-04-27)
 - [[music-tool-hallucination]] — LLM played "Bad Guy" from 20-minute-old context
 - [[wake-gate-over-rejection-during-music]] — wake gate rejected legit addresses while music was playing

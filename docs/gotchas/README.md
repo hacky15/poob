@@ -22,6 +22,7 @@ Gotchas differ from incidents: an incident is a specific event in the past, a go
 
 ### Discord / Voice / Music
 
+- [[dave-ready-flag-is-not-truth]] — `dave_session.ready` can stay False while audio works fine; never use it as a fatal precondition
 - [[pycord-auto-sync-commands-fires-before-cogs]] — auto-sync runs in `on_connect`, before `on_ready` cog loading
 - [[pycord-is-playing-is-a-property]] — `player.is_playing()` crashes; it's a property, not a method
 - [[voice-music-common-pitfalls]] — asetrate inversion, yield-from-async, grace periods, temp-file cleanup
