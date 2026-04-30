@@ -593,6 +593,29 @@ class PatrolEngine:
         return captures;
     }"""
 
+    async def _anon_dom_sweep(
+        self, result: PatrolCycleResult,
+    ) -> list[Listing]:
+        """Anonymous browser DOM sweep, isolated for per-step timeout.
+
+        Pulls a page from the anonymous BrowserManager, runs a category
+        sweep, logs metrics + canary scan. Caller wraps in
+        ``asyncio.wait_for`` so a hung CDP session doesn't eat the cycle.
+        """
+        anon_page = await self._anonymous_browser.get_page()
+        listings = await self._sweep_categories(anon_page, result)
+        if listings:
+            log.info("Anonymous browser DOM sweep", count=len(listings))
+            log_sweep(
+                measure_sweep(
+                    listings,
+                    days_since_listed=self._config.patrol_days_since_listed,
+                ),
+                source="anonymous_dom",
+            )
+            self._canaries.check_batch(listings, source="anonymous_dom")
+        return listings
+
     async def _sweep_and_intercept(
         self, page: object, result: PatrolCycleResult,
         known_ids: set[str] | None = None,
@@ -628,22 +651,22 @@ class PatrolEngine:
         if self._anonymous_browser and getattr(
             self._config, "patrol_anonymous_browser_enabled", True
         ):
+            # Per-step timeout — when the anonymous browser's CDP session
+            # degrades after a Discord WebSocket reconnect, get_page() and
+            # subsequent navigation calls block indefinitely. The 300s
+            # scheduler timeout catches the runaway, but it eats the whole
+            # cycle and the *next* cycle hangs the same way. Bounding the
+            # browser branch at 60s lets the cycle fail fast and complete
+            # the rest of the pipeline (eval, notify, scheduler progress).
             try:
-                anon_page = await self._anonymous_browser.get_page()
-                anon_dom_listings = await self._sweep_categories(anon_page, result)
-                if anon_dom_listings:
-                    log.info(
-                        "Anonymous browser DOM sweep",
-                        count=len(anon_dom_listings),
-                    )
-                    log_sweep(
-                        measure_sweep(
-                            anon_dom_listings,
-                            days_since_listed=self._config.patrol_days_since_listed,
-                        ),
-                        source="anonymous_dom",
-                    )
-                    self._canaries.check_batch(anon_dom_listings, source="anonymous_dom")
+                anon_dom_listings = await asyncio.wait_for(
+                    self._anon_dom_sweep(result), timeout=60.0,
+                )
+            except asyncio.TimeoutError:
+                log.warning(
+                    "Anonymous browser DOM sweep timed out (60s) — "
+                    "skipping this cycle's DOM tier",
+                )
             except Exception as exc:
                 log.warning("Anonymous browser sweep failed", error=str(exc)[:100])
 
