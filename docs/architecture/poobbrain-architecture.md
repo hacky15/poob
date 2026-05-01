@@ -63,8 +63,13 @@ PoobBrain (tiny ~500-char personality prompt + deal_assistant + music_assistant 
 - **Deal agent has no personality prompt.** Adding one produces double-personality output (weird). Personality lives at the PoobBrain layer.
 - **Data-heavy responses bypass personality wrap.** Tables, lists, deal details lose formatting through an LLM wrap. The >500-char / newline heuristic gates this.
 
+## Multi-guild isolation
+
+Every mutable state container that depends on user identity is keyed `(guild_id, user_id)`; every guild-specific scratchpad is keyed by `guild_id`. There are zero singleton mutable fields on `PoobBrain` that affect response routing. See [[multi-guild-isolation]] for the full contract, the helper methods, the regression-tested invariants, and the test coverage matrix.
+
 ## Related decisions
 
+- [[multi-guild-isolation]] — per-(guild, user) state contract.
 - [[brain-routing-audit]] — why the keyword-intent bandaid is gone.
 - [[one-handler-discord]] — why only one listener per input modality.
 - [[voice-architecture]] — voice session integration.

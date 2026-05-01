@@ -355,26 +355,35 @@ class PoobBrain:
     # Music handler — set by VoiceCog/MusicCog when music system is wired.
     # Async callback: (request, user_id, guild_id) -> response string
     _music_handler: MusicHandler | None = field(default=None, init=False)
-    # Guild ID context for voice sessions (set per-call)
-    _voice_guild_id: int = field(default=0, init=False)
-    # Current playing track info — set by session when music starts/stops.
-    # Provides context for tool-calling so "skip" routes to music_assistant.
-    _music_playing_info: str = field(default="", init=False)
-    # Horniness level (1-10). Rolled on each voice join. Text chat is always 5.
-    _horniness_level: int = field(default=5, init=False)
+    # ---- Per-guild scratchpads ----
+    # Multi-guild isolation: every guild Poob is in gets its own slot.
+    # See docs/plans/poobbrain-multi-guild-isolation.md.
+    # Currently-playing-track info per guild. Provides context for tool-
+    # routing so "skip" routes to music_assistant in the right guild only.
+    _music_playing_info: dict[int, str] = field(
+        default_factory=dict, init=False,
+    )
+    # Horniness levels (1-10) per guild. Rolled on each voice join per
+    # guild. Text chat / unrolled guilds default to 5.
+    _horniness_levels: dict[int, int] = field(
+        default_factory=dict, init=False,
+    )
 
-    _histories: dict[str, list[_Message]] = field(
+    # ---- Per-(guild, user) scratchpads ----
+    # Conversation history is keyed (guild_id, user_id). A user in two
+    # guilds gets two independent histories; DMs use guild_id=0.
+    _histories: dict[tuple[int, str], list[_Message]] = field(
         default_factory=lambda: defaultdict(list), init=False
     )
-    # Tracks active deal sessions for reliable multi-turn routing.
-    # Value is a brief context snippet from the deal agent's last response.
-    _deal_context: dict[str, str] = field(default_factory=dict, init=False)
-
-    # Last `play` tool call per user — (lowercase_query, monotonic_ts).
-    # Used to drop duplicate plays when the user retries the same request
-    # within the dedup window because they didn't hear an immediate
-    # acknowledgement.
-    _last_play: dict[str, tuple[str, float]] = field(
+    # Active deal sessions keyed (guild_id, user_id). Same isolation.
+    _deal_context: dict[tuple[int, str], str] = field(
+        default_factory=dict, init=False,
+    )
+    # Last `play` tool call per (guild, user) — (lowercase_query, ts).
+    # Suppresses duplicate plays when the user retries the same request
+    # within the dedup window. Per-guild so a user with the bot in
+    # multiple servers can play the same song in each.
+    _last_play: dict[tuple[int, str], tuple[str, float]] = field(
         default_factory=dict, init=False,
     )
 
@@ -456,14 +465,14 @@ class PoobBrain:
         return out.strip(" .,;:")
 
     def _rebuild_messages_no_tools(
-        self, messages: list[dict], voice: bool,
+        self, messages: list[dict], voice: bool, guild_id: int = 0,
     ) -> list[dict]:
         """Return a copy of `messages` with the system prompt swapped
-        for the tool-free variant. Leaves user / assistant / context
-        turns intact."""
+        for the tool-free variant. Uses this guild's horniness level.
+        Leaves user / assistant / context turns intact."""
+        level = self._horniness_for(guild_id) if voice else 5
         no_tools_system = _build_system_prompt(
-            self._horniness_level if voice else 5,
-            voice=voice, with_tools=False,
+            level, voice=voice, with_tools=False,
         )
         if voice:
             no_tools_system += (
@@ -536,18 +545,24 @@ class PoobBrain:
         """Lowercase + collapse whitespace for dedup equality."""
         return " ".join(query.lower().split())
 
-    def _is_duplicate_play(self, user_id: str, query: str) -> bool:
-        """Return True if (user_id, normalized query) matches a previous
-        play within the dedup window. Records this call as the new
-        last-play regardless of the outcome — but the record is cleared
-        by `_clear_play_on_failure` if the music handler ultimately
-        reports failure, so a retry-after-failure isn't blocked.
+    def _is_duplicate_play(
+        self, guild_id: int, user_id: str, query: str,
+    ) -> bool:
+        """Return True if (guild_id, user_id, normalized query) matches a
+        previous play within the dedup window. Records this call as the
+        new last-play regardless of the outcome — `_clear_play_on_failure`
+        clears the record if the music handler reports failure so a
+        retry-after-failure isn't blocked.
+
+        Per-(guild, user) so the same user with Poob in multiple servers
+        can play the same song in each independently.
         """
         import time as _t
         now = _t.monotonic()
         norm = self._normalize_play_query(query)
-        prev = self._last_play.get(user_id)
-        self._last_play[user_id] = (norm, now)
+        key = (guild_id, user_id)
+        prev = self._last_play.get(key)
+        self._last_play[key] = (norm, now)
         if not prev:
             return False
         prev_query, prev_ts = prev
@@ -555,24 +570,56 @@ class PoobBrain:
             return False
         return prev_query == norm
 
-    def _clear_play_on_failure(self, user_id: str, query: str) -> None:
-        """Drop this user's dedup record if it still matches `query`.
-
-        Called when the music handler returns a non-success response
-        (e.g. ytdl couldn't find the track). Lets the user retry the
-        same request without hitting the dedup block.
+    def _clear_play_on_failure(
+        self, guild_id: int, user_id: str, query: str,
+    ) -> None:
+        """Drop the (guild, user) dedup record if it still matches
+        `query`. Lets the user retry after a music-handler failure
+        without hitting the dedup block.
         """
         norm = self._normalize_play_query(query)
-        cur = self._last_play.get(user_id)
+        key = (guild_id, user_id)
+        cur = self._last_play.get(key)
         if cur and cur[0] == norm:
-            self._last_play.pop(user_id, None)
+            self._last_play.pop(key, None)
 
-    def roll_horniness(self) -> int:
-        """Roll a new horniness level (1-10) for a voice session."""
-        self._horniness_level = random.randint(1, 10)
-        log.info("Horniness level rolled", level=self._horniness_level,
-                 vibe=_get_vibe(self._horniness_level)[:50])
-        return self._horniness_level
+    # ------------------------------------------------------------------
+    # Per-guild scratchpad helpers — see multi-guild-isolation plan.
+    # All mutable per-guild state on PoobBrain flows through these.
+    # ------------------------------------------------------------------
+
+    def _set_music_playing_info(self, guild_id: int, info: str) -> None:
+        """Set or clear the currently-playing-track info for a guild.
+
+        Empty string clears the slot. Called by VoiceSession when music
+        starts/stops in that guild.
+        """
+        if info:
+            self._music_playing_info[guild_id] = info
+        else:
+            self._music_playing_info.pop(guild_id, None)
+
+    def _get_music_playing_info(self, guild_id: int) -> str:
+        """Return the currently-playing-track info for a guild, or ""."""
+        return self._music_playing_info.get(guild_id, "")
+
+    def _horniness_for(self, guild_id: int) -> int:
+        """Return this guild's rolled horniness level (1-10), or 5 default."""
+        return self._horniness_levels.get(guild_id, 5)
+
+    def roll_horniness(self, guild_id: int) -> int:
+        """Roll a new horniness level (1-10) for a guild's voice session.
+
+        Per-guild so each server's voice session has its own vibe.
+        """
+        level = random.randint(1, 10)
+        self._horniness_levels[guild_id] = level
+        log.info(
+            "Horniness level rolled",
+            guild_id=guild_id, level=level,
+            vibe=_get_vibe(level)[:50],
+        )
+        return level
 
     # ------------------------------------------------------------------
     # Public API
@@ -588,11 +635,6 @@ class PoobBrain:
     ) -> str:
         """Generate a response — casual or deal-routed.
 
-        The ``message`` may contain a ``[Recent conversation ...]`` context
-        block (same format voice sessions use).  If present, the context is
-        injected into the LLM prompt but only the *clean* user text is stored
-        in the per-user history so it doesn't balloon with repeated context.
-
         Args:
             message: User's message text, optionally prefixed with channel
                 context in the ``[Recent conversation ...]\\n\\nName said: X``
@@ -600,42 +642,34 @@ class PoobBrain:
             user_id: Discord user ID (as string).
             channel_id: Discord channel ID (passed to deal agent).
             voice: If True, constrains response length for TTS.
-            guild_id: Discord guild ID — used to route music requests to
-                the correct voice client. Voice sessions set this via
-                ``_voice_guild_id``; text channels pass it explicitly.
-
-        Returns:
-            Poob's response text.
+            guild_id: Discord guild ID — required for multi-guild
+                isolation. Use 0 for DMs. Caller is responsible: voice
+                session passes ``self._guild_id``; AgentMessageHandler
+                passes ``message.guild.id`` (or 0 for DM).
         """
-        # Separate channel context from the user's actual words so we can
-        # store only the clean content in per-user history.
         channel_context, clean_message = _split_context(message)
 
         messages = self._build_messages(
-            user_id, clean_message, voice=voice, channel_context=channel_context,
+            user_id, clean_message, voice=voice,
+            channel_context=channel_context, guild_id=guild_id,
         )
         max_tok = self.max_tokens_voice if voice else self.max_tokens
 
-        # Try Groq with function calling (primary path)
         if self.groq_api_key:
             try:
                 result = await self._groq_with_tools(messages, max_tok)
                 if result is not None:
                     text, tool_name, tool_args = result
 
-                    # Some models output function calls as text instead of
-                    # structured tool_calls. Detect and re-route.
                     if not tool_name and text and "<function=" in text:
                         if "deal_assistant" in text:
                             tool_name = "deal_assistant"
                         elif "music_assistant" in text:
                             tool_name = "music_assistant"
-                        # Strip the raw function call from any text response
                         text = re.sub(
                             r'\s*<function=\w+>.*?</function>\s*', '', text
                         ).strip()
 
-                    # Safety net: catch music intents the LLM missed
                     if not tool_name and self._music_handler is not None:
                         tool_name, tool_args = self._music_safety_net(
                             clean_message, tool_name, tool_args,
@@ -644,43 +678,35 @@ class PoobBrain:
                     if tool_name == "deal_assistant":
                         return await self._handle_deal(
                             clean_message, user_id, channel_id,
-                            messages, voice, max_tok,
+                            messages, voice, max_tok, guild_id=guild_id,
                         )
                     if tool_name == "music_assistant":
                         return await self._handle_music(
                             clean_message, user_id, voice, max_tok,
-                            tool_args=tool_args,
-                            guild_id=guild_id,
+                            tool_args=tool_args, guild_id=guild_id,
                         )
-                    # Clean any stray function-call markup from text responses
                     if text and "<function=" in text:
                         text = re.sub(
                             r'\s*<function=\w+>.*?</function>\s*', '', text
                         ).strip()
                     if text:
-                        self._save_response(user_id, text)
+                        self._save_response(guild_id, user_id, text)
                         return text
             except Exception as exc:
                 log.warning("Groq failed for Poob", error=str(exc)[:100])
 
-        # Groq is down — route through deal agent which has its own
-        # tool-calling LLM cascade (Groq → NVIDIA → Gemini → Ollama).
-        # This replaces the old fragile keyword-matching bandaid.
-        # The deal agent handles ALL tool-calling needs; if the message
-        # is purely casual, the agent returns quickly with no tool calls,
-        # and the personality layer wraps the response.
         if self.deal_agent:
             try:
                 log.info("poob.groq_down_deal_fallback", message=clean_message[:50])
                 return await self._handle_deal(
-                    clean_message, user_id, channel_id, messages, voice, max_tok,
+                    clean_message, user_id, channel_id, messages,
+                    voice, max_tok, guild_id=guild_id,
                 )
             except Exception as exc:
                 log.warning("Deal agent fallback failed", error=str(exc)[:100])
 
-        # Last resort: text-only LLM (no tool calling available)
         response = await self._fallback_generate(messages, max_tok)
-        self._save_response(user_id, response)
+        self._save_response(guild_id, user_id, response)
         return response
 
     async def respond_streaming(
@@ -688,35 +714,35 @@ class PoobBrain:
         message: str,
         user_id: str,
         channel_id: str = "",
+        guild_id: int = 0,
     ) -> AsyncIterator[str]:
         """Streaming response for voice — yields complete sentences.
-
-        Uses Groq 70B function calling to detect tool intents (music, deals).
-        If no tool is needed, streams casual response via fast 8b model.
-        This is the same routing logic as respond() but optimized for voice.
 
         Args:
             message: User's transcribed speech (may include context wrapper).
             user_id: Discord user ID (as string).
             channel_id: Discord channel ID.
+            guild_id: Discord guild ID — required for multi-guild
+                isolation. Voice session passes ``self._guild_id``;
+                must be non-zero for any guild context.
 
         Yields:
             Complete sentences as strings.
         """
         channel_context, clean_message = _split_context(message)
         messages = self._build_messages(
-            user_id, clean_message, voice=True, channel_context=channel_context,
+            user_id, clean_message, voice=True,
+            channel_context=channel_context, guild_id=guild_id,
         )
         max_tok = self.max_tokens_voice
 
         if not self.groq_api_key:
-            response = await self.respond(message, user_id, channel_id, voice=True)
+            response = await self.respond(
+                message, user_id, channel_id, voice=True, guild_id=guild_id,
+            )
             yield response
             return
 
-        # --- Step 1: Tool routing via 70B function calling ---
-        # One LLM round-trip to detect if this needs a tool (music/deals).
-        # If no tool, we fall through to the fast 8b casual path.
         tool_name = None
         tool_args = None
         try:
@@ -726,7 +752,6 @@ class PoobBrain:
         except Exception as exc:
             log.warning("Voice tool detection failed", error=str(exc)[:80])
 
-        # Safety net: catch music intents the LLM missed
         if not tool_name and self._music_handler is not None:
             tool_name, tool_args = self._music_safety_net(
                 clean_message, tool_name, tool_args,
@@ -735,14 +760,12 @@ class PoobBrain:
         # --- Step 2a: Music tool detected → Toob responds ---
         if tool_name == "music_assistant":
             action = (tool_args or {}).get("action")
-            # Speculative-wrap path: action=play streams a query-based
-            # Toob reaction while ytdl search runs in the background.
-            # Hides the 2-3s search latency behind TTS playback.
             if action == "play":
                 try:
                     yield VOICE_TOOB
                     async for sentence in self._handle_music_voice_streaming(
                         clean_message, user_id, max_tok, tool_args,
+                        guild_id=guild_id,
                     ):
                         yield sentence
                     return
@@ -751,17 +774,14 @@ class PoobBrain:
                                 error=str(exc)[:80])
                     yield "something went wrong with the music"
                     return
-            # Non-play actions (skip/pause/stop/volume/etc.) use the
-            # blocking path — they return [SILENT]... fast and don't
-            # benefit from speculative wrap.
             try:
                 response = await self._handle_music(
                     clean_message, user_id, voice=True, max_tok=max_tok,
-                    tool_args=tool_args,
+                    tool_args=tool_args, guild_id=guild_id,
                 )
                 if response:
                     yield VOICE_TOOB
-                    self._save_response(user_id, response)
+                    self._save_response(guild_id, user_id, response)
                     for _s in _yield_sentences(response):
                         yield _s
                 return
@@ -776,8 +796,9 @@ class PoobBrain:
                 response = await self._handle_deal(
                     clean_message, user_id, channel_id,
                     messages, voice=True, max_tok=max_tok,
+                    guild_id=guild_id,
                 )
-                self._save_response(user_id, response)
+                self._save_response(guild_id, user_id, response)
                 for _s in _yield_sentences(response):
                     yield _s
                 return
@@ -797,7 +818,7 @@ class PoobBrain:
         # leaving tool descriptions in the prompt causes leakage like
         # the model emitting 'music_assistant' as plain text.
         casual_messages = self._rebuild_messages_no_tools(
-            messages, voice=True,
+            messages, voice=True, guild_id=guild_id,
         )
         try:
             from groq import AsyncGroq
@@ -830,16 +851,32 @@ class PoobBrain:
                 yield "got nothing to say right now"
                 return
 
-            self._save_response(user_id, full_text.strip())
+            self._save_response(guild_id, user_id, full_text.strip())
 
         except Exception as exc:
             log.warning("Voice streaming failed", error=str(exc)[:100])
             yield "brain glitched, say that again"
 
-    def clear_history(self, user_id: str) -> None:
-        """Clear conversation history for a user."""
-        self._histories.pop(user_id, None)
-        self._deal_context.pop(user_id, None)
+    def clear_history(
+        self, user_id: str, guild_id: int | None = None,
+    ) -> None:
+        """Clear conversation history for a user.
+
+        Multi-guild semantics:
+          - ``guild_id=None`` clears every ``(*, user_id)`` history and
+            deal context across every guild plus DM. Used when a user
+            globally resets the bot.
+          - ``guild_id=<int>`` clears only the specific ``(guild_id, user_id)``
+            pair. Used when scoped to one guild.
+        """
+        if guild_id is None:
+            for key in [k for k in self._histories if k[1] == user_id]:
+                self._histories.pop(key, None)
+            for key in [k for k in self._deal_context if k[1] == user_id]:
+                self._deal_context.pop(key, None)
+            return
+        self._histories.pop((guild_id, user_id), None)
+        self._deal_context.pop((guild_id, user_id), None)
 
     # ------------------------------------------------------------------
     # Message building
@@ -851,6 +888,7 @@ class PoobBrain:
         user_text: str,
         voice: bool = False,
         channel_context: str = "",
+        guild_id: int = 0,
     ) -> list[dict[str, str]]:
         """Build message list for Poob's LLM.
 
@@ -859,35 +897,36 @@ class PoobBrain:
             user_text: The user's clean message (no context wrapper).
             voice: Whether this is a voice-mode call.
             channel_context: Optional channel transcript to inject into the
-                current turn. This is ephemeral — it is NOT stored in the
-                per-user history so it doesn't bloat over multiple turns.
+                current turn. Ephemeral — never stored in history.
+            guild_id: Discord guild ID. Histories, deal context, and
+                music-playing info are all keyed off this for
+                multi-guild isolation. Use 0 for DMs.
         """
-        history = self._histories[user_id]
-        # Store only the clean user text in history
+        key = (guild_id, user_id)
+        history = self._histories[key]
         history.append(_Message(role="user", content=user_text))
 
         if len(history) > self.max_history:
             history[:] = history[-self.max_history :]
 
-        # Horniness level — voice rolls 1-10 on join, text is always 5.
-        level = self._horniness_level if voice else 5
+        # Horniness level — voice uses the guild's rolled level, text 5.
+        level = self._horniness_for(guild_id) if voice else 5
         prompt = _build_system_prompt(level, voice=voice)
 
-        # If in active deal session, hint the LLM to route follow-ups
-        if user_id in self._deal_context:
-            ctx = self._deal_context[user_id]
+        # Active deal session for this (guild, user) — hint follow-up routing.
+        deal_ctx = self._deal_context.get(key)
+        if deal_ctx:
             prompt += (
-                f"\n\n[ACTIVE DEAL SESSION: {ctx[:120]}. "
+                f"\n\n[ACTIVE DEAL SESSION: {deal_ctx[:120]}. "
                 "If the user is answering questions about this, "
                 "call deal_assistant with their full response.]"
             )
 
-        # If music is playing, tell the LLM so it can route commands correctly.
-        # "Skip" in a music context means skip the song. Without this context,
-        # the LLM has no way to know music is active.
-        if self._music_playing_info:
+        # Currently-playing track info for THIS guild only — never another's.
+        music_info = self._get_music_playing_info(guild_id)
+        if music_info:
             prompt += (
-                f"\n\n[MUSIC IS CURRENTLY PLAYING: {self._music_playing_info}. "
+                f"\n\n[MUSIC IS CURRENTLY PLAYING: {music_info}. "
                 "CRITICAL: When music is playing and the user says anything about "
                 "stop, skip, pause, resume, volume, turn down, turn up, "
                 "next, shuffle, loop, or what's playing — you MUST call "
@@ -898,11 +937,9 @@ class PoobBrain:
 
         messages: list[dict[str, str]] = [{"role": "system", "content": prompt}]
 
-        # Replay history — all turns except the last (which we'll enrich)
         for msg in history[:-1]:
             messages.append({"role": msg.role, "content": msg.content})
 
-        # Final user turn: inject channel context if available
         last_content = history[-1].content
         if channel_context:
             last_content = (
@@ -914,9 +951,11 @@ class PoobBrain:
 
         return messages
 
-    def _save_response(self, user_id: str, response: str) -> None:
-        """Save Poob's response to in-memory history."""
-        self._histories[user_id].append(
+    def _save_response(
+        self, guild_id: int, user_id: str, response: str,
+    ) -> None:
+        """Save Poob's response to in-memory history for (guild, user)."""
+        self._histories[(guild_id, user_id)].append(
             _Message(role="assistant", content=response)
         )
 
@@ -932,6 +971,7 @@ class PoobBrain:
         messages: list[dict],
         voice: bool,
         max_tok: int,
+        guild_id: int = 0,
     ) -> str:
         """Route to deal agent, wrap result in Poob personality."""
         deal_response = await self.deal_agent.run(
@@ -943,29 +983,28 @@ class PoobBrain:
             response_len=len(deal_response),
         )
 
-        self._update_deal_context(user_id, deal_response)
+        self._update_deal_context(guild_id, user_id, deal_response)
 
-        # Data-heavy text responses (tables, lists) — pass through in text mode.
-        # The deal agent's split-channel architecture already formats these.
         if not voice and (len(deal_response) > 500 or "\n" in deal_response):
-            self._save_response(user_id, deal_response)
+            self._save_response(guild_id, user_id, deal_response)
             return deal_response
 
-        # Personality wrap via fast LLM
         wrapped = await self._wrap_in_personality(
             original_message, deal_response, voice, max_tok,
+            guild_id=guild_id,
         )
-        self._save_response(user_id, wrapped)
+        self._save_response(guild_id, user_id, wrapped)
         return wrapped
 
-    def _update_deal_context(self, user_id: str, deal_response: str) -> None:
-        """Track deal session state for multi-turn routing."""
+    def _update_deal_context(
+        self, guild_id: int, user_id: str, deal_response: str,
+    ) -> None:
+        """Track deal session state for (guild, user) multi-turn routing."""
+        key = (guild_id, user_id)
         if "?" in deal_response:
-            # Deal agent is asking follow-up questions — keep session active
-            self._deal_context[user_id] = deal_response[:150]
+            self._deal_context[key] = deal_response[:150]
         else:
-            # Action completed — clear session
-            self._deal_context.pop(user_id, None)
+            self._deal_context.pop(key, None)
 
     # ------------------------------------------------------------------
     # Music routing
@@ -1034,22 +1073,15 @@ class PoobBrain:
                     )
                     return "" if voice else "I didn't catch a music request there."
 
-            # Duplicate-play suppression. Users frequently retry the
-            # same request when they don't hear immediate audio
-            # acknowledgement (Toob duck-fades the music while
-            # speaking, which can read as silence). Drop a play call
-            # whose normalized query matches the previous play from
-            # the same user within DEDUP_WINDOW_S.
-            if self._is_duplicate_play(user_id, query):
+            # Duplicate-play suppression — per (guild, user). The same
+            # user with Poob in multiple servers can play the same song
+            # in each independently.
+            if self._is_duplicate_play(guild_id, user_id, query):
                 log.warning(
                     "music.play duplicate suppressed",
-                    query=query[:80], user=user_id,
+                    query=query[:80], user=user_id, guild=guild_id,
                 )
                 return "" if voice else "Already queued that one."
-
-        # Use explicitly passed guild_id (text channels), fall back to
-        # voice session's guild_id (voice path sets _voice_guild_id).
-        resolved_guild_id = guild_id or self._voice_guild_id
 
         play_query_for_dedup = (
             (tool_args or {}).get("query", "")
@@ -1059,19 +1091,19 @@ class PoobBrain:
 
         try:
             music_response = await self._music_handler(
-                original_message, int(user_id), resolved_guild_id,
+                original_message, int(user_id), guild_id,
                 voice=voice, tool_args=tool_args,
             )
         except Exception as exc:
             log.error("Music handler failed", error=str(exc)[:120])
             if play_query_for_dedup:
-                self._clear_play_on_failure(user_id, play_query_for_dedup)
+                self._clear_play_on_failure(
+                    guild_id, user_id, play_query_for_dedup,
+                )
             return "Something broke trying to do the music thing."
 
         log.info("music.response", user=user_id, response=music_response[:80])
 
-        # Clear the dedup record if the play attempt failed (no audio
-        # produced) so the user can retry the same query immediately.
         if play_query_for_dedup:
             success_marker = (
                 music_response.startswith("Playing")
@@ -1079,35 +1111,33 @@ class PoobBrain:
                 or music_response.startswith("[SILENT]")
             )
             if not success_marker:
-                self._clear_play_on_failure(user_id, play_query_for_dedup)
+                self._clear_play_on_failure(
+                    guild_id, user_id, play_query_for_dedup,
+                )
 
-        # [SILENT] prefix = control command (skip, pause, volume, etc.)
-        # Voice: execute silently — no personality wrap, no TTS.
-        # Text: return the status message so the user sees feedback.
         if music_response.startswith("[SILENT]"):
             clean = music_response[8:].strip()
             log.info("music.silent_control", action=clean[:60])
             if voice:
-                return ""  # Empty response = no TTS generated
-            return clean  # Text channels see the status message
+                return ""
+            return clean
 
-        # For voice, use the music-specific personality wrapper
         if voice:
             wrapped = await self._wrap_music_response(
                 original_message, music_response, max_tok,
             )
-            self._save_response(user_id, wrapped)
+            self._save_response(guild_id, user_id, wrapped)
             return wrapped
 
-        # For text, pass through if it's data-heavy (queue display)
         if len(music_response) > 300 or "\n" in music_response:
-            self._save_response(user_id, music_response)
+            self._save_response(guild_id, user_id, music_response)
             return music_response
 
         wrapped = await self._wrap_in_personality(
             original_message, music_response, voice=False, max_tokens=max_tok,
+            guild_id=guild_id,
         )
-        self._save_response(user_id, wrapped)
+        self._save_response(guild_id, user_id, wrapped)
         return wrapped
 
     async def _wrap_music_response(
@@ -1238,16 +1268,19 @@ class PoobBrain:
         user_id: str,
         max_tok: int,
         tool_args: dict | None,
+        guild_id: int = 0,
     ) -> AsyncIterator[str]:
-        """Speculative-wrap variant of _handle_music for voice + play action.
+        """Speculative-wrap variant of _handle_music for voice + play.
 
         Runs the music handler (ytdl search + deferred queue) in the
-        background while streaming a query-based Toob reaction. The user
-        hears Toob within ~500ms instead of waiting 2-3s for search. The
-        deferred-playback logic in the session starts music after TTS.
+        background while streaming a query-based Toob reaction. The
+        user hears Toob within ~500ms instead of waiting 2-3s for
+        search. The deferred-playback logic in the session starts
+        music after TTS.
 
-        Yields sentences. Yields nothing if the play query looks like a
-        hallucination from passive context (see music-tool-hallucination).
+        `guild_id` is required for multi-guild isolation: the music
+        handler dispatches to the correct guild's player; dedup is
+        per-(guild, user); failure recovery is keyed the same way.
         """
         if self._music_handler is None:
             yield "music isn't set up right now"
@@ -1264,8 +1297,6 @@ class PoobBrain:
                     raw=raw_query[:80], scrubbed=query[:80],
                 )
                 tool_args = {**tool_args, "query": query}
-            # Empty / one-token queries — STT cut off the request.
-            # Ask once, don't fan out a doomed search.
             if len(query) < 2:
                 log.info(
                     "music.play empty query — prompting user",
@@ -1296,32 +1327,21 @@ class PoobBrain:
                     )
                     return
 
-            # Duplicate-play suppression. See _handle_music for the
-            # full rationale — same dedup window applies to the
-            # speculative-wrap streaming path.
-            if self._is_duplicate_play(user_id, query):
+            if self._is_duplicate_play(guild_id, user_id, query):
                 log.warning(
                     "music.play duplicate suppressed",
-                    query=query[:80], user=user_id,
+                    query=query[:80], user=user_id, guild=guild_id,
                 )
                 return
 
-        resolved_guild_id = self._voice_guild_id
-
-        # Fan out music handler as a background task — queues with
-        # deferred=True so playback waits for TTS to finish.
+        # Fan out music handler as a background task using THIS guild's id.
         music_task = asyncio.create_task(
             self._music_handler(
-                original_message, int(user_id), resolved_guild_id,
+                original_message, int(user_id), guild_id,
                 voice=True, tool_args=tool_args,
             )
         )
 
-        # Observability for the background task. We don't await it here
-        # because blocking would defeat speculative wrap — session needs
-        # the wrap sentences to start synth'ing immediately. The
-        # callback also clears the dedup record on failure so the user
-        # can retry the same query without being blocked.
         play_query_for_dedup = (tool_args or {}).get("query") or ""
 
         def _on_music_task_done(t: asyncio.Task) -> None:
@@ -1333,7 +1353,9 @@ class PoobBrain:
                     error=str(exc)[:120],
                 )
                 if play_query_for_dedup:
-                    self._clear_play_on_failure(user_id, play_query_for_dedup)
+                    self._clear_play_on_failure(
+                        guild_id, user_id, play_query_for_dedup,
+                    )
                 return
             log.info(
                 "music.response", user=user_id,
@@ -1346,7 +1368,9 @@ class PoobBrain:
                     or resp.startswith("[SILENT]")
                 )
                 if not success_marker:
-                    self._clear_play_on_failure(user_id, play_query_for_dedup)
+                    self._clear_play_on_failure(
+                        guild_id, user_id, play_query_for_dedup,
+                    )
 
         music_task.add_done_callback(_on_music_task_done)
 
@@ -1385,7 +1409,7 @@ class PoobBrain:
                     return
 
         if wrap_text_parts:
-            self._save_response(user_id, " ".join(wrap_text_parts))
+            self._save_response(guild_id, user_id, " ".join(wrap_text_parts))
 
     async def _wrap_in_personality(
         self,
@@ -1393,12 +1417,18 @@ class PoobBrain:
         deal_response: str,
         voice: bool,
         max_tokens: int,
+        guild_id: int = 0,
     ) -> str:
-        """Wrap a deal agent response in Poob's personality."""
+        """Wrap a deal agent response in Poob's personality.
+
+        Uses this guild's horniness level so the personality wrap
+        respects multi-guild isolation.
+        """
+        level = self._horniness_for(guild_id) if voice else 5
         wrap_messages = [
             {
                 "role": "system",
-                "content": _build_system_prompt(self._horniness_level if voice else 5, voice=voice),
+                "content": _build_system_prompt(level, voice=voice),
             },
             {"role": "user", "content": user_message},
             {
@@ -1439,12 +1469,15 @@ class PoobBrain:
         user_message: str,
         deal_response: str,
         max_tokens: int,
+        guild_id: int = 0,
     ) -> AsyncIterator[str]:
         """Stream a personality-wrapped deal response sentence by sentence."""
         wrap_messages = [
             {
                 "role": "system",
-                "content": _build_system_prompt(self._horniness_level, voice=True),
+                "content": _build_system_prompt(
+                    self._horniness_for(guild_id), voice=True,
+                ),
             },
             {"role": "user", "content": user_message},
             {

@@ -172,16 +172,19 @@ class MusicCog(commands.Cog, name="Music"):
             tool_args: Structured args from LLM tool call:
                        {action: str, query?: str, value?: int}
         """
-        # Keep brain's music-playing context fresh
-        if self._poob_brain:
-            player = self._get_player(guild_id) if guild_id else None
+        # Keep brain's music-playing context fresh for THIS guild.
+        # Goes through the per-guild helper so other guilds' info
+        # stays in their own slots (multi-guild isolation).
+        if self._poob_brain and guild_id:
+            player = self._get_player(guild_id)
             if player and player.current_track:
-                self._poob_brain._music_playing_info = (
-                    f"{player.current_track.title} "
-                    f"[{player.current_track.duration_str}]"
+                track = player.current_track
+                self._poob_brain._set_music_playing_info(
+                    guild_id,
+                    f"{track.title} [{track.duration_str}]",
                 )
             else:
-                self._poob_brain._music_playing_info = ""
+                self._poob_brain._set_music_playing_info(guild_id, "")
 
         # Resolve guild — prefer explicit guild_id (text channels pass this),
         # fall back to finding the user in a voice channel (legacy path).

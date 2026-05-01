@@ -247,8 +247,9 @@ class VoiceCog(commands.Cog, name="Voice"):
                 dave_version=dave_version,
             )
 
-            # Roll horniness level for this voice session (1-10)
-            level = session.brain.roll_horniness()
+            # Roll horniness level for THIS guild's voice session (1-10).
+            # Per-guild so each server's vibe is independent.
+            level = session.brain.roll_horniness(guild_id)
 
             await ctx.followup.send(
                 f"Joined **{channel.name}** and listening!\n"

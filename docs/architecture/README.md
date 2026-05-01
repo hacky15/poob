@@ -15,6 +15,7 @@ Update in place when the architecture changes. Link to decision notes that drove
 ### Voice / Brain / Music
 
 - [[poobbrain-architecture]] — unified personality + deal sub-agent, tool routing
+- [[multi-guild-isolation]] — per-(guild, user) state contract; zero singletons that affect routing
 - [[voice-architecture]] — dual pipeline, Toob, deferred playback, cascade
 - [[music-player-architecture]] — yt-dlp + FFmpeg + audioop PCM mixer, four-layer anti-stutter
 

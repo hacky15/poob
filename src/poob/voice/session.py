@@ -160,6 +160,12 @@ class VoiceSession:
         self.brain = brain
         self.vad_config = vad_config or VADConfig()
         self._loop = loop or asyncio.get_event_loop()
+        # Per-guild isolation: every brain call we make passes this id
+        # so PoobBrain can keep histories, dedup state, and music-info
+        # scoped to this guild only. Captured once on session init —
+        # voice_client.guild is stable for the session lifetime.
+        guild = getattr(voice_client, "guild", None)
+        self._guild_id = int(getattr(guild, "id", 0) or 0)
 
         # --- Dual Pipeline (Porcupine + Deepgram streaming) ---
         # When configured, replaces the old batch STT pipeline with:
@@ -435,15 +441,17 @@ class VoiceSession:
             else:
                 prompt = f"{user_name} said to you: {transcript}"
 
-            # Update brain's music context so the LLM knows if music is playing.
-            # This lets "skip" route to music_assistant instead of casual chat.
+            # Update brain's music context for THIS guild only so the
+            # LLM knows if music is playing here (other guilds' music
+            # state stays in their own slots).
             if self.music_player and self.music_player.current_track:
-                self.brain._music_playing_info = (
-                    f"{self.music_player.current_track.title} "
-                    f"[{self.music_player.current_track.duration_str}]"
+                track = self.music_player.current_track
+                self.brain._set_music_playing_info(
+                    self._guild_id,
+                    f"{track.title} [{track.duration_str}]",
                 )
             else:
-                self.brain._music_playing_info = ""
+                self.brain._set_music_playing_info(self._guild_id, "")
 
             # Generate response
             full_response = ""
@@ -460,7 +468,7 @@ class VoiceSession:
                 from poob.brain.poob import VOICE_TOOB
                 use_toob_voice = False
                 async for item in self.brain.respond_streaming(
-                    prompt, str(user_id),
+                    prompt, str(user_id), guild_id=self._guild_id,
                 ):
                     # Voice signal — not text, just routing control
                     if item == VOICE_TOOB:
@@ -734,18 +742,14 @@ class VoiceSession:
                 else:
                     prompt = f"{speaker_name}: {text}"
 
-                # 5. Set guild context for music routing
-                channel = self.voice_client.channel
-                if channel and hasattr(channel, "guild"):
-                    self.brain._voice_guild_id = channel.guild.id
-
-                # 6. Generate response with sentence streaming
+                # 5. Generate response with sentence streaming.
+                # guild_id from session init isolates per-guild state.
                 full_response = ""
                 first_sentence = True
                 self._is_speaking = True
 
                 async for sentence in self.brain.respond_streaming(
-                    prompt, str(user_id),
+                    prompt, str(user_id), guild_id=self._guild_id,
                 ):
                     full_response += sentence + " "
 
@@ -860,7 +864,7 @@ class VoiceSession:
         first_sentence = True
 
         async for sentence in self.brain.respond_streaming(
-            combined_text, str(last_user_id),
+            combined_text, str(last_user_id), guild_id=self._guild_id,
         ):
             full_response += sentence + " "
 
