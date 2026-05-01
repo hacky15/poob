@@ -195,19 +195,68 @@ class AsyncYTDL:
     ) -> Track | None:
         """Search YouTube and return the top result as a Track.
 
-        Handles both direct URLs and text search queries (via default_search: auto).
+        Handles both direct URLs and text search queries (via
+        default_search: auto). Two-pass fallback for typos / misheard
+        STT: if the first pass returns no result (yt-dlp returned None
+        OR the search came back with empty entries — common when the
+        ytsearch1 didn't have a tight match), retry with `ytsearch5`
+        and take the first viable entry. Lets users hear a best-guess
+        for a slightly-mangled query rather than dead-end on
+        "Couldn't find anything."
+
+        Direct URLs skip the fallback — if a URL fails to extract,
+        the URL is the source of truth and a relaxed search would be
+        the wrong song.
         """
         info = await self.extract_info(query)
-        if info is None:
+        track = self._first_track_from_info(info, requester_id, requester_name)
+        if track is not None:
+            return track
+
+        # Don't widen for direct URLs — we know what they wanted.
+        if self._looks_like_url(query):
             return None
 
-        # If it's a playlist result, take the first entry
+        # Best-guess fallback: ytsearch5 picks up near-matches that
+        # ytsearch1's exact-title pass misses.
+        log.info("ytdl.search fallback to ytsearch5", query=query[:80])
+        widened = await self.extract_info(f"ytsearch5:{query}")
+        widened_track = self._first_track_from_info(
+            widened, requester_id, requester_name,
+        )
+        if widened_track is not None:
+            log.info(
+                "ytdl.search recovered via ytsearch5",
+                query=query[:80], picked=widened_track.title[:80],
+            )
+        return widened_track
+
+    @staticmethod
+    def _looks_like_url(query: str) -> bool:
+        """Quick check for direct URL — skips the fallback path."""
+        q = query.strip().lower()
+        return q.startswith(("http://", "https://", "www.")) or "youtube.com" in q or "youtu.be" in q
+
+    def _first_track_from_info(
+        self,
+        info: dict | None,
+        requester_id: int,
+        requester_name: str,
+    ) -> Track | None:
+        """Extract the first viable Track from a yt-dlp info dict.
+
+        Handles both single-result and entries-list shapes. Returns
+        None if no entry is usable.
+        """
+        if info is None:
+            return None
         if "entries" in info:
             entries = list(info["entries"])
-            if not entries:
-                return None
-            info = entries[0]
-
+            for entry in entries:
+                if entry is None:
+                    continue
+                return self._info_to_track(entry, requester_id, requester_name)
+            return None
         return self._info_to_track(info, requester_id, requester_name)
 
     async def search_many(

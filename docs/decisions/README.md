@@ -14,6 +14,7 @@ Write a new note (don't edit in place) when a decision is reversed or materially
 
 ## Entries
 
+- [[ytdl-search-best-guess-fallback]] — two-pass ytsearch1 → ytsearch5 instead of dead-ending misheard queries on "couldn't find" (2026-05-01, active)
 - [[music-tool-call-robustness]] — tool-call token floor + prompt isolation + duplicate-play suppression with failure-recovery (2026-04-27, proposed)
 - [[drop-cerebras-from-cascade]] — Cerebras chronically 429-rate-limited; removed from tool-call cascade (2026-04-23, proposed)
 - [[wake-fp-pcm-capture]] — save 2s PCM windows of wake-word false positives for offline retraining (2026-04-23, proposed)
