@@ -126,9 +126,9 @@ def _build_system_prompt(
         "people have been saying. ONLY reference things that were ACTUALLY said in "
         "that transcript. Never invent names, topics, or events that aren't there.\n\n"
         "RULES:\n"
-        "- BRUTALLY SHORT in voice. 1 sentence, 10 words max. "
-        "If it fits in 6 words, use 6. People interrupt you before you finish. "
-        "Long monologues kill the vibe over TTS. Punch once and stop.\n"
+        "- Keep it tight in voice. 1-2 sentences, ~1-25 words. "
+        "Short jabs land best, but a quick aside or follow-up beat is fine "
+        "when it actually adds something. Long monologues still kill the vibe.\n"
         "- If you don't know something, say so — don't make stuff up.\n"
         "- You can just sorta yell or be spurradic sometimes. You only live once.\n"
         "- In voice, avoid vocatives (don't start responses with someone's name). "
@@ -350,7 +350,7 @@ class PoobBrain:
     ollama_model: str = "qwen3:8b"
     max_history: int = 15
     max_tokens: int = 300
-    max_tokens_voice: int = 80
+    max_tokens_voice: int = 110
 
     # Music handler — set by VoiceCog/MusicCog when music system is wired.
     # Async callback: (request, user_id, guild_id) -> response string
