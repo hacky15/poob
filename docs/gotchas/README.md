@@ -16,6 +16,7 @@ Gotchas differ from incidents: an incident is a specific event in the past, a go
 
 ### Brain / LLM
 
+- [[empty-routing-response-is-not-failure]] — RLHF models (gpt-oss family) silently refuse by returning empty content + no tool; treat as soft refusal, route to a non-RLHF content model
 - [[tool-hallucination-from-passive-context]] — LLM tool calls whose arguments come from history, not the current turn
 - [[google-vlm-ipm-undocumented-limit]] — Google VLM has an undocumented Images-Per-Minute limit
 - [[new-provider-integration-quirks]] — Google CSE 403, Together 402, Mistral Pixtral `extra_forbidden`
