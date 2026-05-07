@@ -18,7 +18,7 @@
 #   scripts/logs.sh --list                       # list running containers
 #   scripts/logs.sh --help                       # this help
 #
-# Containers (April 2026): poob, ollama, poob-searxng, komodo-core,
+# Containers: poob, poob-ollama, poob-searxng, komodo-core,
 # komodo-mongo, komodo-periphery.
 #
 # Retention: Docker keeps 5 x 50MB rolling files per container (~250MB).

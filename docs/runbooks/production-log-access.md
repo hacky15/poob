@@ -21,8 +21,8 @@ scripts/logs.sh -f poob
 # Last 10 minutes
 scripts/logs.sh --since 10m poob
 
-# Specific container (ollama, poob-searxng)
-scripts/logs.sh --since 1h ollama
+# Specific container (poob-ollama, poob-searxng)
+scripts/logs.sh --since 1h poob-ollama
 
 # Filter for a pattern
 scripts/logs.sh --since 30m poob | grep "Response complete"
@@ -44,7 +44,8 @@ Also used heavily via the [`poob-logs`](../../.claude/skills/poob-logs/SKILL.md)
 Global rotation in `/etc/docker/daemon.json` on homelab: `max-size: 50m`, `max-file: 5` — ~250 MB of rolling logs per container.
 
 - High-volume containers (poob during active patrol) may rotate within hours.
-- Quiet containers (poob-searxng, ollama between requests) keep weeks.
+- Quiet containers (poob-searxng, poob-ollama between requests) keep weeks.
+
 - `--since` queries beyond the rotation horizon return nothing without warning. If an agent gets an empty response, widening the window won't help — that data is gone.
 
 For deploy-event history beyond rotation (when an image landed, who triggered the deploy, env-var change history), use the **Komodo Updates panel** at `http://homelab:9120` → Stacks → poob → Updates. MongoDB-backed, persists indefinitely.
@@ -68,7 +69,7 @@ If `ssh homelab` itself fails, the issue is upstream (Tailscale not running, SSH
 ```bash
 ssh homelab "docker ps"                                                 # what's running
 ssh homelab "docker stats --no-stream"                                  # current resource usage
-ssh homelab "docker exec ollama ollama list"                            # what models are loaded
+ssh homelab "docker exec poob-ollama ollama list"                       # what models are loaded
 ssh homelab "docker compose -f ~/apps/komodo/docker-compose.yml ps"     # komodo health
 ```
 

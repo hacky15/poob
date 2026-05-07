@@ -39,3 +39,4 @@ Gotchas differ from incidents: an incident is a specific event in the past, a go
 ### Deploy / Infra
 
 - [[docker-volume-shadows-baked-files]] — named-volume mount shadows files baked into the image
+- [[compose-container-name-collisions]] — `container_name:` overrides without a project prefix collide with other stacks; namespace them as `poob-*`

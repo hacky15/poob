@@ -43,6 +43,24 @@ ssh ben@homelab "docker ps --format '{{.Names}}: {{.Status}}' | grep poob"
 
 If container uptime is longer than "minutes since GHA finished," the deploy didn't land — first check GHA, then the Komodo Updates panel for webhook events.
 
+## When the deploy fails at "Compose Up" with a name conflict
+
+Symptom in the Komodo poob → Updates → Deploy Stack entry:
+
+```
+Container <name>  Error response from daemon: Conflict.
+The container name "/<name>" is already in use by container "<id>".
+```
+
+Root cause and fix: see [[compose-container-name-collisions]]. The short version:
+
+- All `container_name:` overrides in `deploy/compose.yml` must be prefixed with `poob-` to prevent collisions with other stacks on the same host.
+- If you hit a collision while we still have an un-prefixed name in the compose, remove the orphan once and patch the compose immediately:
+  ```bash
+  ssh homelab "docker rm -f <colliding-name>"
+  ```
+  Then click Deploy in Komodo, and ship a compose-rename PR right after to make the patch durable.
+
 ## Rollback
 
 - **Same-PR rollback**: push the revert commit. The deploy flow treats a revert like any other commit — GHA builds, Komodo redeploys.

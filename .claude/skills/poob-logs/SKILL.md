@@ -1,6 +1,6 @@
 ---
 name: poob-logs
-description: Reads live Docker container logs from poob's homelab production over SSH+Tailscale. Pulls logs from poob, ollama, poob-searxng, or any other container. Supports tail size, since/until time bounds, ISO8601 timestamps, live follow, and grep filtering. Use when investigating runtime behavior, verifying a deploy landed, debugging a shipped exception, confirming the bot is online, or auditing what happened in a specific time window. Logs are read-only — no permission needed to query freely.
+description: Reads live Docker container logs from poob's homelab production over SSH+Tailscale. Pulls logs from poob, poob-ollama, poob-searxng, or any other container. Supports tail size, since/until time bounds, ISO8601 timestamps, live follow, and grep filtering. Use when investigating runtime behavior, verifying a deploy landed, debugging a shipped exception, confirming the bot is online, or auditing what happened in a specific time window. Logs are read-only — no permission needed to query freely.
 ---
 
 # Querying Production Logs on Homelab
@@ -26,7 +26,7 @@ scripts/logs.sh
 
 # Specific container
 scripts/logs.sh poob
-scripts/logs.sh ollama
+scripts/logs.sh poob-ollama
 scripts/logs.sh poob-searxng
 scripts/logs.sh komodo-core              # rarely needed; for orchestrator debugging
 
@@ -73,7 +73,7 @@ Docker logs are **UTC** (Z suffix). User is in **CDT (UTC−5)** April–Novembe
 | Container | What's in it |
 |---|---|
 | `poob` | Main bot — Discord, scanner, voice, music, agent. **This is the one you usually want.** |
-| `ollama` | Local LLM runtime. Logs show model load/unload + inference requests. |
+| `poob-ollama` | Local LLM runtime. Logs show model load/unload + inference requests. |
 | `poob-searxng` | Self-hosted search (3rd in cascade). Mostly quiet. |
 | `komodo-core` | Orchestrator's own logs. Check when deploys behave weirdly. |
 | `komodo-mongo` | Komodo's database. Almost never needed. |
@@ -84,7 +84,7 @@ Docker logs are **UTC** (Z suffix). User is in **CDT (UTC−5)** April–Novembe
 Docker keeps **5 × 50MB rolling files per container** (~250MB) per `/etc/docker/daemon.json` on homelab.
 
 - High-volume container (poob during voice session): may rotate within hours
-- Quiet container (searxng, idle ollama): keeps weeks
+- Quiet container (poob-searxng, idle poob-ollama): keeps weeks
 - `--since` queries past rotation return nothing silently — that data is gone
 
 For deploy event history beyond log rotation, use the **Komodo Updates panel** at `http://homelab:9120` → Stacks → poob → Updates list. That metadata persists in MongoDB indefinitely.
@@ -96,7 +96,7 @@ For state checks that aren't log queries, SSH directly:
 ```bash
 ssh homelab "docker ps"
 ssh homelab "docker stats --no-stream"
-ssh homelab "docker exec ollama ollama list"               # what models are loaded
+ssh homelab "docker exec poob-ollama ollama list"          # what models are loaded
 ```
 
 For mutations (restart, redeploy, env-var change), use the Komodo UI — it tracks those as Update events for audit history. Don't `docker restart` from CLI; you lose the audit trail.
