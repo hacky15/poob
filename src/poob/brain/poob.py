@@ -49,7 +49,13 @@ _TOOL_DETECTION_MAX_TOKENS = 256
 # These are NOT text — they're structural control signals.
 # ---------------------------------------------------------------------------
 VOICE_POOB = "__VOICE_POOB__"  # Default: Poob's normal voice (Fenrir)
-VOICE_TOOB = "__VOICE_TOOB__"  # Evil music spirit (Charon, deep, slow)
+VOICE_TOOB = "__VOICE_TOOB__"  # Evil music spirit (Enceladus, deep, slow)
+VOICE_BOOB = "__VOICE_BOOB__"  # Toob's side piece — sweet, complimentary, rare
+
+# ~1 in 20 music plays surface Boob instead of Toob. See
+# decisions/boob-music-wrap-variant for the rarity rationale: too common
+# kills the surprise; too rare and nobody ever hears the variant.
+BOOB_PROBABILITY = 0.05
 
 # ---------------------------------------------------------------------------
 # Poob's personality — tiny, fast, universal
@@ -784,21 +790,27 @@ class PoobBrain:
                 clean_message, tool_name, tool_args,
             )
 
-        # --- Step 2a: Music tool detected → Toob responds ---
+        # --- Step 2a: Music tool detected → Toob responds (rarely Boob) ---
         if tool_name == "music_assistant":
             action = (tool_args or {}).get("action")
             if action == "play":
+                # Roll for Boob — Toob's side piece. ~1 in 20 plays surface
+                # the friendly, complimentary, three-sentence variant
+                # instead of Toob's venomous one-liner. See
+                # decisions/boob-music-wrap-variant.
+                is_boob = random.random() < BOOB_PROBABILITY
+                persona = "boob" if is_boob else "toob"
                 try:
-                    yield VOICE_TOOB
+                    yield VOICE_BOOB if is_boob else VOICE_TOOB
                     async for sentence in self._handle_music_voice_streaming(
                         clean_message, user_id, max_tok, tool_args,
-                        guild_id=guild_id,
+                        guild_id=guild_id, persona=persona,
                     ):
                         yield sentence
                     return
                 except Exception as exc:
                     log.warning("Voice music route (streaming) failed",
-                                error=str(exc)[:80])
+                                error=str(exc)[:80], persona=persona)
                     yield "something went wrong with the music"
                     return
             try:
@@ -1328,6 +1340,80 @@ class PoobBrain:
         async for sentence in _stream_sentences_from_chunks(_chunks()):
             yield sentence
 
+    async def _stream_boob_wrap_from_query(
+        self, user_message: str, max_tokens: int,
+    ) -> AsyncIterator[str]:
+        """Stream Boob's reaction — Toob's sweet, complimentary side piece.
+
+        Yields complete sentences as they form. Three-sentence delivery:
+        opens by introducing as "Toob's side piece", compliments the
+        user's music taste, sends them off warmly. Higher token budget
+        than Toob (one-liner) because the structure demands the intro
+        + compliment + send-off.
+
+        See decisions/boob-music-wrap-variant for design rationale.
+        """
+        if not self.groq_api_key:
+            return
+
+        wrap_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Boob — Toob's side piece. Where Toob is dark, venomous, "
+                    "and despises every song, you are sweet, warm, and obsessively "
+                    "complimentary about people's music taste. You're the soft, kind "
+                    "opposite of Toob, but cut from the same fabric.\n"
+                    "RULES:\n"
+                    "- ALWAYS introduce yourself in the FIRST sentence as Toob's "
+                    "side piece. Vary the phrasing each time — "
+                    "\"Hey, Boob here, Toob's side piece\" / "
+                    "\"Boob speaking, Toob's side piece\" / "
+                    "\"It's Boob — Toob's better half, the side piece\" — "
+                    "but the relationship to Toob MUST land in sentence one.\n"
+                    "- THREE sentences total. Roughly 30-50 words. Don't go shorter; "
+                    "this is a feature, the user wants the full bit.\n"
+                    "- React to the USER'S REQUEST. Compliment their music taste "
+                    "warmly and specifically (genre, mood, vibe). No sarcasm, "
+                    "no irony, no Toob darkness — pure positive valence.\n"
+                    "- Spoken aloud through TTS. No markdown, no caps, no emojis."
+                ),
+            },
+            {"role": "user", "content": user_message},
+            {
+                "role": "user",
+                "content": (
+                    "React as Boob in THREE sentences. Sentence one introduces "
+                    "you as Toob's side piece. Compliment the user's taste warmly. "
+                    "End on a friendly send-off."
+                ),
+            },
+        ]
+
+        # Token budget tuned for 3 sentences ~30-50 words. Capped at 200
+        # so a runaway model doesn't monologue past a reasonable
+        # voice-mode upper bound.
+        boob_max_tokens = min(max(max_tokens, 200), 200)
+
+        from groq import AsyncGroq
+
+        client = AsyncGroq(api_key=self.groq_api_key)
+        stream = await client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=wrap_messages,  # type: ignore[arg-type]
+            max_tokens=boob_max_tokens,
+            temperature=0.85,
+            stream=True,
+        )
+
+        async def _chunks() -> AsyncIterator[str]:
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+
+        async for sentence in _stream_sentences_from_chunks(_chunks()):
+            yield sentence
+
     async def _handle_music_voice_streaming(
         self,
         original_message: str,
@@ -1335,6 +1421,7 @@ class PoobBrain:
         max_tok: int,
         tool_args: dict | None,
         guild_id: int = 0,
+        persona: str = "toob",
     ) -> AsyncIterator[str]:
         """Speculative-wrap variant of _handle_music for voice + play.
 
@@ -1440,16 +1527,22 @@ class PoobBrain:
 
         music_task.add_done_callback(_on_music_task_done)
 
-        # Concurrently stream the speculative wrap.
+        # Concurrently stream the speculative wrap. Persona selects
+        # which voice-mode wrap streams: Toob's one-line venom (default)
+        # or Boob's three-sentence side-piece compliment (rare, ~5%).
+        # See decisions/boob-music-wrap-variant.
+        wrap_stream = (
+            self._stream_boob_wrap_from_query(original_message, max_tok)
+            if persona == "boob"
+            else self._stream_toob_wrap_from_query(original_message, max_tok)
+        )
         wrap_text_parts: list[str] = []
         try:
-            async for sentence in self._stream_toob_wrap_from_query(
-                original_message, max_tok,
-            ):
+            async for sentence in wrap_stream:
                 wrap_text_parts.append(sentence)
                 yield sentence
         except Exception as exc:
-            log.warning("Speculative wrap failed", error=str(exc)[:80])
+            log.warning("Speculative wrap failed", error=str(exc)[:80], persona=persona)
 
         # Non-blocking check: if music_task already finished while the
         # wrap streamed, surface a failure message. If it's still

@@ -41,13 +41,15 @@ _play_audio → FFmpegPCMAudio(+speechnorm) → PCMVolumeTransformer(3.0)
     └── Music playing → music_player.inject_tts_overlay(source) → mixer ducks music
 ```
 
-## Toob — evil music spirit
+## Toob — evil music spirit (and Boob, Toob's side piece)
 
-When Poob handles a music `play`/`queue`, Toob responds instead. Separate persona, deeper voice, FFmpeg filter chain. Music *control* commands (skip, pause, stop, volume) execute silently — no TTS, no personality wrap.
+When Poob handles a music `play`/`queue`, **Toob** responds instead — separate persona, deeper voice, FFmpeg filter chain. Music *control* commands (skip, pause, stop, volume) execute silently — no TTS, no personality wrap.
 
-Voice signal routing is structural, not string-based. `VOICE_TOOB = "__VOICE_TOOB__"` is yielded as the first item from `respond_streaming()` when Toob should speak. The session switches synth functions based on the signal. No string prefixes, no regex parsing.
+About 1 play in 20 surfaces **Boob** instead — Toob's sweet side piece. Higher pitch, slightly faster, three sentences, compliments instead of mocks, always self-introduces as Toob's side piece. Same architectural surface as Toob (separate prompt, separate filter chain, separate Google Chirp voice — Leda) but lives on the same one-bit dispatch in `respond_streaming`. See [[boob-music-wrap-variant]].
 
-See [[toob-voice-filter-chain]] for the FFmpeg stages.
+Voice signal routing is structural, not string-based. `VOICE_TOOB` and `VOICE_BOOB` are sentinels yielded as the first item from `respond_streaming()`. The session loop's synth dispatch is keyed on a `voice_persona` string (`"poob" | "toob" | "boob"`) so adding a fourth persona is a one-line addition to the table. No string prefixes, no regex parsing.
+
+See [[toob-voice-filter-chain]] for Toob's FFmpeg stages and [[boob-music-wrap-variant]] for Boob's.
 
 ## Silent music controls
 

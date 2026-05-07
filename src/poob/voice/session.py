@@ -61,6 +61,20 @@ _TOOB_FILTER_CHAIN = (
     "volume=1.35"
 )
 
+# Boob — Toob's side piece. Inverse of the warlord chain: pitch UP a touch,
+# slightly faster, no echo, no bass boost. The result is a friendly, slightly
+# squeaky, intimate voice that reads as the warm opposite of Toob's cavernous
+# menace. See decisions/boob-music-wrap-variant for stage rationale.
+#   asetrate=28000 on a 24kHz source → +2.7 semitones, ~17% faster duration
+#   aresample=24000 — restore the playable rate after the pitch shift
+#   vibrato f=6.5,d=0.10 — slightly brighter wobble than Toob, half the depth
+#   volume=1.1 — light pre-gain; speechnorm absorbs the rest downstream
+_BOOB_FILTER_CHAIN = (
+    "asetrate=28000,aresample=24000,"
+    "vibrato=f=6.5:d=0.10,"
+    "volume=1.1"
+)
+
 
 def _prewarm_ffmpeg() -> None:
     """Prime FFmpeg's binary + filter-graph init caches at import.
@@ -92,6 +106,22 @@ def _prewarm_ffmpeg() -> None:
                 "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
                 "-t", "0.3",
                 "-af", _TOOB_FILTER_CHAIN,
+                "-f", "null", "-",
+            ],
+            capture_output=True, timeout=3.0,
+        )
+    except (subprocess.SubprocessError, OSError):
+        pass
+    # Boob filter graph — different shape from Toob's, needs its own warm-up
+    # so the rare ~1-in-20 hit doesn't pay a 700ms cold start the one time
+    # someone actually triggers it.
+    try:
+        subprocess.run(
+            [
+                FFMPEG_PATH, "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+                "-t", "0.3",
+                "-af", _BOOB_FILTER_CHAIN,
                 "-f", "null", "-",
             ],
             capture_output=True, timeout=3.0,
@@ -465,14 +495,24 @@ class VoiceSession:
                 # yields a wrap sentence early while ytdl search is still
                 # running; synth must start on that first yield, not wait
                 # for the rest of the generator to finish.
-                from poob.brain.poob import VOICE_TOOB
-                use_toob_voice = False
+                from poob.brain.poob import VOICE_BOOB, VOICE_TOOB
+                voice_persona = "poob"
+                synth_dispatch = {
+                    "poob": self._synthesize,
+                    "toob": self._synthesize_toob,
+                    "boob": self._synthesize_boob,
+                }
                 async for item in self.brain.respond_streaming(
                     prompt, str(user_id), guild_id=self._guild_id,
                 ):
-                    # Voice signal — not text, just routing control
+                    # Voice signals — not text, just routing control. The
+                    # brain yields exactly one of these as its first item
+                    # when a non-default persona should speak.
                     if item == VOICE_TOOB:
-                        use_toob_voice = True
+                        voice_persona = "toob"
+                        continue
+                    if item == VOICE_BOOB:
+                        voice_persona = "boob"
                         continue
 
                     full_response += item + " "
@@ -483,15 +523,11 @@ class VoiceSession:
                             "First sentence ready",
                             llm_ms=int((t_llm - t0) * 1000),
                             sentence=item[:60],
-                            voice="toob" if use_toob_voice else "poob",
+                            voice=voice_persona,
                         )
                         first_sentence = False
 
-                    synth = (
-                        self._synthesize_toob
-                        if use_toob_voice
-                        else self._synthesize
-                    )
+                    synth = synth_dispatch[voice_persona]
                     audio = await synth(item)
                     if not audio:
                         continue
@@ -1019,6 +1055,84 @@ class VoiceSession:
             return raw_audio
         except Exception as exc:
             log.warning("Toob FFmpeg processing error", error=str(exc)[:80])
+            return raw_audio
+
+    async def _synthesize_boob(self, text: str) -> bytes:
+        """Synthesize text using Boob's voice — Toob's sweet side piece.
+
+        Same two-stage shape as ``_synthesize_toob``: pull raw audio from
+        a Google Chirp3-HD female voice (Leda), then apply the Boob
+        FFmpeg filter chain (pitch up, faster, no reverb). Filter chain
+        works on any audio, so the persona survives a TTS cascade
+        fallback even when Google is down.
+
+        See decisions/boob-music-wrap-variant for the design rationale.
+        """
+        # --- Stage 1: Get raw audio (Leda preferred, cascade fallback) ---
+        raw_audio = b""
+        source = "unknown"
+
+        try:
+            from poob.voice.tts import GoogleCloudTTS
+            for provider in self.tts_providers:
+                if isinstance(provider, GoogleCloudTTS):
+                    boob_tts = GoogleCloudTTS(
+                        api_key=provider._api_key,
+                        voice="en-US-Chirp3-HD-Leda",
+                        speaking_rate=1.05,
+                    )
+                    raw_audio = await boob_tts.synthesize(text)
+                    if raw_audio:
+                        source = "google_leda"
+                    break
+        except Exception as exc:
+            log.debug("Boob Google TTS failed", error=str(exc)[:60])
+
+        if not raw_audio:
+            raw_audio = await self._synthesize(text)
+            source = "cascade_fallback"
+
+        if not raw_audio:
+            return b""
+
+        # --- Stage 2: Apply Boob filter chain (pitch up, brighter) ---
+        filter_chain = _BOOB_FILTER_CHAIN
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                FFMPEG_PATH,
+                "-hide_banner", "-loglevel", "error",
+                "-analyzeduration", "0", "-probesize", "32",
+                "-f", "mp3", "-i", "pipe:0",
+                "-af", filter_chain,
+                "-f", "mp3", "pipe:1",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(raw_audio), timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                log.warning("Boob FFmpeg timeout")
+                return raw_audio
+
+            if proc.returncode == 0 and stdout:
+                log.info(
+                    "Boob TTS synthesized", bytes=len(stdout), source=source,
+                )
+                return stdout
+
+            stderr_msg = (stderr or b"").decode("utf-8", errors="replace")[:80]
+            log.warning("Boob FFmpeg failed", stderr=stderr_msg)
+            return raw_audio
+        except Exception as exc:
+            log.warning("Boob FFmpeg processing error", error=str(exc)[:80])
             return raw_audio
 
     async def _play_audio(self, audio_data: bytes) -> None:
