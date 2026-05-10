@@ -225,6 +225,27 @@ class ScraperBot(commands.Bot):
             self._owner_notified = True
             await self._notify_owner_alive()
 
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        """Sync slash commands to a guild the bot was added to mid-session.
+
+        ``_sync_slash_commands`` only runs once on ``on_ready``, so a guild
+        that adds the bot AFTER startup gets no commands until the next
+        restart. This handler closes that gap. See
+        [[slash-command-sync-on-ready]] for the original ordering bug and
+        [[pycord-auto-sync-commands-fires-before-cogs]] for the gotcha.
+        """
+        try:
+            await self.sync_commands(guild_ids=[guild.id])
+            log.info(
+                "Synced slash commands to newly-joined guild",
+                guild_id=guild.id, guild_name=guild.name,
+            )
+        except Exception as exc:
+            log.error(
+                "Failed to sync slash commands to new guild",
+                guild_id=guild.id, error=str(exc)[:150],
+            )
+
     async def _notify_owner_alive(self) -> None:
         from poob import __version__
 

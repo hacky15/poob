@@ -34,6 +34,8 @@ Explicit `self.sync_commands()` call at the end of `_load_cogs()` in `on_ready`.
 
 New commands in guilds the bot joins after startup only register on the next restart. Acceptable tradeoff for the iteration-speed gain. If it becomes a pain, add an `on_guild_join` handler that calls `sync_commands(guild_ids=[guild.id])`.
 
+**Update 2026-05-06**: It became a pain. User added Poob to a second server; slash commands were missing because `_sync_slash_commands` only fires once on `on_ready`. Added `ScraperBot.on_guild_join` in [bot.py](../../src/poob/discord_bot/bot.py) — calls `self.sync_commands(guild_ids=[guild.id])` per-guild on every new join, logs the result. Multi-guild story is now hands-off: invite the bot to a new server and `/join` / `/leave` show up immediately.
+
 ## Validation
 
 - Post-deploy log shows `Synced slash commands per-guild guilds=3` after `Registered persistent MusicControlsView`.

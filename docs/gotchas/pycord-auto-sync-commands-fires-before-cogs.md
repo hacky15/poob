@@ -33,7 +33,7 @@ await self._load_cogs()
 await self.sync_commands()  # per-guild by default
 ```
 
-Guilds the bot joins after startup need their own sync — add an `on_guild_join` handler that calls `sync_commands(guild_ids=[guild.id])` if that becomes a pain.
+Guilds the bot joins after startup need their own sync. `ScraperBot.on_guild_join` in [bot.py](../../src/poob/discord_bot/bot.py) calls `self.sync_commands(guild_ids=[guild.id])` per-guild on every mid-session invite. Without this handler, a freshly-invited guild sees zero slash commands until the next bot restart.
 
 ## Reference
 
