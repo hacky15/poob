@@ -108,11 +108,24 @@ class ScraperBot(commands.Bot):
                     return voice_cog._get_session(guild_id)
                 return None
 
+            # Helper to set up a full voice session (STT + wake word) on
+            # an already-connected VC. Used by music_cog's auto-join so
+            # text-channel music requests get the same listening pipeline
+            # /join would have wired up. See docs/incidents/auto-join-
+            # missed-listening-setup for why this hand-off exists.
+            async def _setup_voice_session(vc, channel, is_stage=False):
+                if voice_cog:
+                    return await voice_cog.setup_session_for_vc(
+                        vc, channel, is_stage=is_stage, play_entrance=False,
+                    )
+                return None
+
             music_cog = MusicCog(
                 bot=self,
                 config=self.config,
                 poob_brain=self.poob_brain,
                 get_voice_session=_get_voice_session,
+                setup_voice_session=_setup_voice_session,
             )
             self.add_cog(music_cog)
 

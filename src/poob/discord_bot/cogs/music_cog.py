@@ -50,11 +50,15 @@ class MusicCog(commands.Cog, name="Music"):
         config: AppConfig,
         poob_brain: PoobBrain | None = None,
         get_voice_session=None,  # Callable[[int], VoiceSession | None]
+        setup_voice_session=None,  # async (vc, channel, is_stage=False) -> VoiceSession | None
     ) -> None:
         self.bot = bot
         self.config = config
         self._poob_brain = poob_brain
         self._get_voice_session = get_voice_session  # guild_id → VoiceSession
+        # Wire-up callback to set up STT + wake word + dual pipeline on a
+        # VC the music cog connected itself. See _auto_join_requester_vc.
+        self._setup_voice_session = setup_voice_session
 
         self._ytdl = AsyncYTDL(cookie_file=config.music_ytdl_cookie_file)
         self._players: dict[int, GuildMusicPlayer] = {}  # guild_id → player
@@ -116,16 +120,17 @@ class MusicCog(commands.Cog, name="Music"):
     async def _auto_join_requester_vc(
         self, guild: discord.Guild, user_id: int,
     ) -> discord.VoiceClient | None:
-        """Join the requester's voice channel — and only the requester's.
+        """Join the requester's voice channel and set up full listening.
 
         Used when a text-channel @mention music request arrives but the bot
         isn't in any VC yet. The invariant is: Poob plays music where the
         requester is, never where they aren't. If the requester isn't in a
         VC, we return None and the caller text-replies to join first.
 
-        Lightweight join — no VoiceSession (STT/recording). For full voice
-        interaction the user invokes ``/join``. The music player only needs
-        a connected VoiceClient to stream audio.
+        Once connected, hands off to VoiceCog's session setup so STT, wake
+        word, and the dual pipeline come up — same as ``/join`` would have.
+        Without that hand-off, the bot can play music but can't hear "Hey
+        Poob, max volume" (the original auto-join skipped session setup).
         """
         member = guild.get_member(user_id)
         if not member or not member.voice or not member.voice.channel:
@@ -140,10 +145,30 @@ class MusicCog(commands.Cog, name="Music"):
                 channel=channel.name,
                 requester=user_id,
             )
-            return vc
         except Exception as exc:
             log.error("Auto-join failed", guild=guild.id, error=str(exc)[:100])
             return None
+
+        # Wire up listening on the freshly-connected VC. No-op if voice
+        # cog is unavailable; the bot still streams music either way.
+        if self._setup_voice_session is not None:
+            try:
+                is_stage = isinstance(channel, discord.StageChannel)
+                session = await self._setup_voice_session(
+                    vc, channel, is_stage=is_stage,
+                )
+                if session is not None:
+                    log.info(
+                        "Auto-join wired listening pipeline",
+                        guild=guild.id, channel=channel.name,
+                    )
+            except Exception as exc:
+                log.warning(
+                    "Auto-join listening setup failed — music will "
+                    "still play, but bot won't hear voice commands",
+                    guild=guild.id, error=str(exc)[:120],
+                )
+        return vc
 
     # ------------------------------------------------------------------
     # Agentic handler (called by PoobBrain)

@@ -14,6 +14,10 @@ Resolved incidents stay `status: resolved`. Open ones stay `status: active`. If 
 
 ## Entries
 
+### 2026-05
+
+- [[auto-join-missed-listening-setup]] — text-channel music auto-join skipped STT + wake-word setup; bot played music but couldn't hear voice commands (2026-05-09)
+
 ### 2026-04
 
 - [[dave-timeout-fail-hard-regression]] — agent flipped DAVE-not-ready into a fatal disconnect; auto-leave on every /join until reverted (2026-04-29)

@@ -115,6 +115,121 @@ class VoiceCog(commands.Cog, name="Voice"):
         """Check if a channel is a stage channel."""
         return isinstance(channel, discord.StageChannel)
 
+    async def setup_session_for_vc(
+        self,
+        vc: discord.VoiceClient,
+        channel: discord.abc.Connectable,
+        is_stage: bool = False,
+        play_entrance: bool = True,
+    ) -> VoiceSession | None:
+        """Wire up listening + STT + wake-word for an already-connected VC.
+
+        Used by both ``/join`` (after its own ``channel.connect()``) and
+        ``MusicCog._auto_join_requester_vc`` (after auto-connecting for a
+        text-channel music request). The ``channel.connect()`` step is
+        the caller's responsibility — this helper handles everything
+        that comes after: stage promotion, VoiceSession creation,
+        DAVE handshake wait, recording sink + start_recording, horniness
+        roll. Returns the new session or ``None`` if setup failed.
+
+        ``play_entrance`` is True for ``/join`` (the user expects an
+        intro) and False for auto-join from music (the user just wants
+        music — an unsolicited "what's up" feels intrusive).
+        """
+        guild = channel.guild  # type: ignore[union-attr]
+        guild_id = guild.id
+        try:
+            if is_stage:
+                stage_instance = getattr(channel, "instance", None)
+                if stage_instance is None:
+                    try:
+                        await channel.create_instance(topic="Poob Voice Chat")  # type: ignore[union-attr]
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
+                await asyncio.sleep(0.5)
+                await self._promote_to_speaker(guild)
+
+            session = self._session_factory(vc)
+            session.is_stage = is_stage
+            session._last_utterance_time = time.monotonic()
+            self._sessions[guild_id] = session
+
+            # Wait for DAVE E2EE handshake to settle. See
+            # incidents/dave-timeout-fail-hard-regression for why we
+            # proceed regardless of timeout — `dave_session.ready` can
+            # stay False while the decoder catches up after first frames.
+            dave_ready = False
+            dave_version = getattr(vc, "dave_protocol_version", 0) or 0
+            DAVE_TIMEOUT_S = 15.0
+            DAVE_POLL_S = 0.1
+            if dave_version > 0:
+                _t_start = time.monotonic()
+                while time.monotonic() - _t_start < DAVE_TIMEOUT_S:
+                    dave_session = getattr(vc, "dave_session", None)
+                    if dave_session and getattr(dave_session, "ready", False):
+                        elapsed_ms = int((time.monotonic() - _t_start) * 1000)
+                        log.info(
+                            "DAVE ready, starting audio receive",
+                            elapsed_ms=elapsed_ms,
+                        )
+                        dave_ready = True
+                        break
+                    await asyncio.sleep(DAVE_POLL_S)
+                if not dave_ready:
+                    log.warning(
+                        "DAVE not ready within window — starting "
+                        "recording anyway; decoder catches up once "
+                        "keys arrive.",
+                        timeout_s=DAVE_TIMEOUT_S, dave_version=dave_version,
+                    )
+            else:
+                log.info("No DAVE negotiated (version=0)")
+
+            def on_audio_frame(user_id: int, pcm_data: bytes) -> None:
+                """Called from Pycord's recording thread for each decoded frame."""
+                if not session.is_listening:
+                    return
+                session.process_audio_frame(user_id, pcm_data)
+
+            if session.uses_dual_pipeline:
+                sink = RealtimeAudioSink(
+                    on_audio_frame=on_audio_frame,
+                    on_stale_check=lambda: session._dual_pipeline.check_stale_buffers(),
+                )
+            else:
+                sink = RealtimeAudioSink(
+                    on_audio_frame=on_audio_frame,
+                    get_buffers=lambda: session._user_buffers,
+                )
+
+            async def on_recording_stop(sink_obj: discord.sinks.Sink, *args) -> None:
+                log.debug("Recording stopped")
+
+            vc.start_recording(sink, on_recording_stop)
+            log.info(
+                "Recording started with RealtimeAudioSink",
+                dave=dave_ready,
+                dave_version=dave_version,
+                guild=guild_id,
+            )
+
+            # Roll horniness for THIS guild. Per-guild keeps each server's
+            # vibe independent under the multi-guild isolation contract.
+            session.brain.roll_horniness(guild_id)
+
+            if play_entrance:
+                await session.play_entrance()
+
+            return session
+
+        except Exception as exc:
+            log.error(
+                "Failed to set up voice session for VC",
+                guild=guild_id, error=str(exc)[:120],
+            )
+            self._sessions.pop(guild_id, None)
+            return None
+
     @discord.slash_command(name="join", description="Join your voice channel so Poob can listen and speak.")
     async def join_voice(self, ctx: discord.ApplicationContext) -> None:
         """Join the caller's voice channel.
@@ -150,114 +265,29 @@ class VoiceCog(commands.Cog, name="Voice"):
         await asyncio.sleep(0.5)
 
         try:
-            # Connect to voice channel
             vc = await channel.connect(timeout=15.0)
             log.info("Connected to voice channel", stage=is_stage)
 
-            if is_stage:
-                # Stage channel setup
-                stage_instance = getattr(channel, "instance", None)
-                if stage_instance is None:
-                    try:
-                        await channel.create_instance(topic="Poob Voice Chat")
-                    except (discord.Forbidden, discord.HTTPException):
-                        pass
-                await asyncio.sleep(0.5)
-                await self._promote_to_speaker(guild)
-                if hasattr(ctx.author, "edit"):
-                    await self._promote_member(ctx.author)  # type: ignore[arg-type]
+            # Stage channels need the inviter promoted to speaker too —
+            # only ``/join`` knows the inviting member, so this stays here.
+            if is_stage and hasattr(ctx.author, "edit"):
+                await self._promote_member(ctx.author)  # type: ignore[arg-type]
 
-            # Create voice session
-            session = self._session_factory(vc)
-            session.is_stage = is_stage
-            session._last_utterance_time = time.monotonic()
-            self._sessions[guild_id] = session
-
-            # Wait for DAVE E2EE handshake to settle. MLS negotiation
-            # can take 8-12s on slower paths. Empirically on this
-            # deployment, `dave_session.ready` may stay False for the
-            # whole call and the recording still works because the
-            # decoder catches up after the first few frames — so we
-            # WAIT politely (15s, up from the original 5s) and proceed
-            # regardless. Aborting on timeout was a regression: it
-            # turned every /join into an instant disconnect.
-            #
-            # The opus "corrupted stream" warnings during the early
-            # handshake window are harmless noise from frames that
-            # arrived ahead of the keys. Decoding stabilizes once the
-            # keys land.
-            dave_ready = False
-            dave_version = getattr(vc, "dave_protocol_version", 0) or 0
-            DAVE_TIMEOUT_S = 15.0
-            DAVE_POLL_S = 0.1
-            if dave_version > 0:
-                import time as _time
-                _t_start = _time.monotonic()
-                while _time.monotonic() - _t_start < DAVE_TIMEOUT_S:
-                    dave_session = getattr(vc, "dave_session", None)
-                    if dave_session and getattr(dave_session, "ready", False):
-                        elapsed_ms = int((_time.monotonic() - _t_start) * 1000)
-                        log.info(
-                            "DAVE ready, starting audio receive",
-                            elapsed_ms=elapsed_ms,
-                        )
-                        dave_ready = True
-                        break
-                    await asyncio.sleep(DAVE_POLL_S)
-                if not dave_ready:
-                    log.warning(
-                        "DAVE not ready within window — starting "
-                        "recording anyway; decoder catches up once "
-                        "keys arrive.",
-                        timeout_s=DAVE_TIMEOUT_S, dave_version=dave_version,
-                    )
-            else:
-                log.info("No DAVE negotiated (version=0)")
-
-            # Start recording with our real-time sink
-            def on_audio_frame(user_id: int, pcm_data: bytes) -> None:
-                """Called from Pycord's recording thread for each decoded frame."""
-                if not session.is_listening:
-                    return
-                # Route through session's unified audio processor.
-                # If dual pipeline is active, feeds Porcupine + Deepgram.
-                # Otherwise falls back to energy-based VAD + batch STT.
-                session.process_audio_frame(user_id, pcm_data)
-
-            # Build sink with appropriate stale-buffer detection
-            if session.uses_dual_pipeline:
-                sink = RealtimeAudioSink(
-                    on_audio_frame=on_audio_frame,
-                    on_stale_check=lambda: session._dual_pipeline.check_stale_buffers(),
-                )
-            else:
-                sink = RealtimeAudioSink(
-                    on_audio_frame=on_audio_frame,
-                    get_buffers=lambda: session._user_buffers,
-                )
-
-            async def on_recording_stop(sink_obj: discord.sinks.Sink, *args) -> None:
-                """Called when recording stops."""
-                log.debug("Recording stopped")
-
-            vc.start_recording(sink, on_recording_stop)
-            log.info(
-                "Recording started with RealtimeAudioSink",
-                dave=dave_ready,
-                dave_version=dave_version,
+            session = await self.setup_session_for_vc(
+                vc, channel, is_stage=is_stage, play_entrance=False,
             )
-
-            # Roll horniness level for THIS guild's voice session (1-10).
-            # Per-guild so each server's vibe is independent.
-            level = session.brain.roll_horniness(guild_id)
+            if session is None:
+                await self._force_disconnect(guild)
+                await ctx.followup.send(
+                    "Failed to set up voice session — try again."
+                )
+                return
 
             await ctx.followup.send(
                 f"Joined **{channel.name}** and listening!\n"
                 f"I hear you — talk, @mention, or tap buttons. "
                 f"Use `/leave` to disconnect."
             )
-
-            # Play entrance catchphrase
             await session.play_entrance()
 
             log.info(

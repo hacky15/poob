@@ -239,9 +239,10 @@ MUSIC_TOOL = {
                     ],
                     "description": (
                         "The music action to perform. 'play' for playing/queueing "
-                        "a song or playlist. 'volume' when a specific percentage is "
-                        "given (e.g. 'set volume to 50'). 'volume_up'/'volume_down' "
-                        "for relative changes (e.g. 'turn it down', 'louder')."
+                        "a song or playlist. 'volume' for any absolute volume target "
+                        "— a percentage ('set volume to 50') OR a named extreme "
+                        "('max', 'mute', 'half'). 'volume_up'/'volume_down' for "
+                        "relative changes ('turn it down', 'louder')."
                     ),
                 },
                 "query": {
@@ -255,8 +256,12 @@ MUSIC_TOOL = {
                 "value": {
                     "type": "integer",
                     "description": (
-                        "Numeric value for 'volume' action (0-200). "
-                        "Only required when the user specifies a number."
+                        "Numeric volume target for 'volume' action (0-200). "
+                        "Required for 'volume'. Map named extremes when present: "
+                        "'max'/'crank'/'loudest'/'all the way up' → 200; "
+                        "'mute'/'silence'/'min'/'off' → 0; "
+                        "'half' → 100; 'low'/'quiet' → 50; 'high'/'loud' → 150. "
+                        "Use the explicit number when the user gives one."
                     ),
                 },
             },
