@@ -1,0 +1,88 @@
+# GitHub Actions self-hosted runners — Komodo stack for hacky15/poob.
+#
+# Two containerized replicas registered against `[self-hosted, linux,
+# x64, poob]`. The workflow YAML's `runs-on:` targets the label set;
+# jobs distribute across whichever replica is free.
+#
+# Migrated from GitHub-hosted runners (ubuntu-latest) to self-hosted
+# 2026-05-13 after the monthly $2 hosted-runner budget was exhausted
+# by a permitscope CI burst. See:
+#   - docs/decisions/self-hosted-runners-migration.md (this repo)
+#   - hacky15/permitscope:vault/10-Decisions/2026-05-11-containerized
+#     -runners-komodo-stack.md (the original infra decision)
+#
+# Image: reuses the permitscope-built runner image. The `permitscope-`
+# prefix in the image name is a historical naming artifact; the image
+# is fully repo-agnostic at runtime via the env vars below. Don't
+# rebuild — just reuse.
+#
+# Komodo Stack configuration:
+#   Source:           Repo: hacky15/poob
+#   Branch:           main
+#   Run directory:    (empty — paths below are absolute against repo root)
+#   File path:        deploy/gha-runner.compose.yml
+#   Auto-update:      ENABLED (Komodo polls + redeploys on new image)
+#   Environment:      managed via Komodo's per-stack Environment panel —
+#                     MUST contain GH_PAT set to a user-level PAT with
+#                     repo + workflow scopes covering hacky15/poob.
+#                     The permitscope-side PAT works because it's a
+#                     `gho_` user token covering the whole hacky15
+#                     account. Never commit it.
+#
+# Bootstrap (one-time, performed via Komodo API):
+#   1. This compose file lands on main.
+#   2. Create stack `poob-gha-runners` via Komodo CreateStack op,
+#      pointing at this file path.
+#   3. Set GH_PAT in the stack's Environment panel (same value
+#      permitscope uses).
+#   4. Deploy. Entrypoint mints fresh registration tokens per
+#      replica + each appears at
+#      github.com/hacky15/poob/settings/actions/runners.
+#   5. Flip `.github/workflows/build.yml` `runs-on:` to the
+#      self-hosted label set. The next push uses the homelab.
+#
+# Scaling: bump `deploy.replicas` and redeploy. The runner image
+# carries no replica-specific state; the entrypoint derives the
+# runner name from `hostname` which Compose makes unique per replica.
+
+services:
+
+  gha-runner:
+    image: ghcr.io/hacky15/permitscope-gha-runner:latest
+    restart: unless-stopped
+    # Host docker socket so `docker buildx` inside the runner talks
+    # to the host daemon (= the same buildkitd + registry cache the
+    # permitscope runners use). Runner user inside the container is
+    # in a `docker` group with GID 988 to match host socket ownership;
+    # if `getent group docker` on the homelab ever reports a different
+    # GID, rebuild with `--build-arg DOCKER_GID=<new>` on the image
+    # in permitscope (out of scope for poob).
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      GH_PAT: ${GH_PAT}
+      RUNNER_REPO: ${RUNNER_REPO:-hacky15/poob}
+      RUNNER_LABELS: ${RUNNER_LABELS:-self-hosted,linux,x64,poob}
+      RUNNER_NAME_PREFIX: ${RUNNER_NAME_PREFIX:-poob-runner}
+    deploy:
+      replicas: 2
+      resources:
+        # Per-replica caps. Poob's CI builds are slightly heavier than
+        # permitscope's (full playwright install + onnxruntime wheel
+        # compile) so 2 GB is the same defensive ceiling. 2 replicas
+        # × 2 GB = 4 GB worst-case, easily within the 23 GB host
+        # budget after subtracting permitscope (8 GB cap), the app
+        # stacks, and ollama.
+        limits:
+          memory: 2G
+    healthcheck:
+      # `.runner` is written by config.sh on successful registration
+      # and persists across restarts. pgrep confirms the
+      # Runner.Listener process is alive (catches a crashed listener
+      # where `.runner` still exists from a prior config).
+      test: ["CMD-SHELL", "test -f /home/runner/actions-runner/.runner && pgrep -f Runner.Listener > /dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # config.sh + first listener handshake take ~10 sec cold.
+      start_period: 45s
