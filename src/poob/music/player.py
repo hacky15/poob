@@ -37,6 +37,11 @@ from typing import TYPE_CHECKING
 import audioop
 import discord
 
+from poob.music.effects import (
+    EFFECT_NONE,
+    EffectNotFoundError,
+    resolve_effect_chain,
+)
 from poob.music.queue import MusicQueue, Track, LoopMode
 from poob.music.ytdl import AsyncYTDL, FFMPEG_BEFORE_OPTS, FFMPEG_OPTS
 from poob.utils.logging import get_logger
@@ -359,6 +364,34 @@ class GuildMusicPlayer:
         # Pre-fetch state
         self._prefetch_task: asyncio.Task | None = None
 
+        # ---- Position tracking (wall-clock, pause-aware) ----
+        # Set when ``voice_client.play`` is called for the live source.
+        # ``_paused_at`` is non-None only while paused. ``_total_pause_seconds``
+        # accumulates closed pause intervals. See ``position_seconds`` for
+        # the formula. Cleared at each respawn (a respawn defines a new t=0
+        # at the seek offset, so wall-clock resets to the seek point).
+        self._track_started_at: float | None = None
+        self._paused_at: float | None = None
+        self._total_pause_seconds: float = 0.0
+        # Offset baked into the current FFmpeg invocation via ``-ss``.
+        # Added to wall-clock delta so ``position_seconds`` reports the
+        # listener-perceived track position, not the source-process uptime.
+        self._track_seek_offset: float = 0.0
+
+        # ---- Effect state ----
+        # ``_active_effect`` is the user-facing name (``"none"``,
+        # ``"nightcore"``, ...). ``_active_effect_chain`` is the resolved
+        # FFmpeg ``-af`` string or ``None`` for the no-filter path. They
+        # are kept in sync via ``set_effect``.
+        self._active_effect: str = EFFECT_NONE
+        self._active_effect_chain: str | None = None
+
+        # ---- Respawn request ----
+        # When set, ``_player_loop`` rebuilds the audio source instead of
+        # advancing the queue. Tuple of (track, seek_position, effect_chain).
+        # See ``set_effect`` / ``replay`` / ``previous`` for the producers.
+        self._respawn_request: tuple[Track, float, str | None] | None = None
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -388,6 +421,35 @@ class GuildMusicPlayer:
         self._volume = max(0.0, min(2.0, val))
         if self._mixer:
             self._mixer.volume = self._volume
+
+    @property
+    def active_effect(self) -> str:
+        """The currently-active effect name (``"none"`` or a preset name)."""
+        return self._active_effect
+
+    @property
+    def position_seconds(self) -> float:
+        """Listener-perceived position of the current track, in seconds.
+
+        Returns 0.0 when nothing is playing. Otherwise: wall-clock since
+        the FFmpeg process started, minus total paused intervals, plus
+        any ``-ss`` seek offset baked into the current invocation.
+        Includes the in-flight pause interval if currently paused, so the
+        position freezes during a pause instead of drifting forward.
+
+        Used by ``set_effect`` to seek the respawned source to the same
+        spot the listener was at — the cost is a ~200-400 ms gap, not a
+        forward jump in the music.
+        """
+        import time as _t
+        if self._track_started_at is None:
+            return 0.0
+        now = _t.monotonic()
+        wall = now - self._track_started_at
+        paused = self._total_pause_seconds
+        if self._paused_at is not None:
+            paused += now - self._paused_at
+        return max(0.0, wall - paused + self._track_seek_offset)
 
     # ------------------------------------------------------------------
     # Playback control
@@ -451,19 +513,117 @@ class GuildMusicPlayer:
             self.voice_client.stop()  # Triggers after callback → event.set()
         return self.queue.current
 
+    async def replay(self) -> Track | None:
+        """Restart the current track from the beginning.
+
+        Implemented via the respawn mechanism: keeps current set, asks
+        the loop to rebuild the audio source at position 0 with the
+        same active effect chain. Audible cost is a ~200-400 ms gap
+        while FFmpeg respawns — see
+        ``docs/gotchas/ffmpeg-effect-toggle-creates-audio-gap.md``.
+        Returns the track being replayed, or ``None`` if nothing is
+        currently playing.
+        """
+        cur = self.queue.current
+        if cur is None:
+            return None
+        self._respawn_request = (cur, 0.0, self._active_effect_chain)
+        if self.voice_client.is_playing() or self._paused:
+            self.voice_client.stop()  # Triggers after callback → respawn
+        return cur
+
+    async def previous(self) -> Track | None:
+        """Play the most-recently finished track again.
+
+        Swaps the queue state so the previous track plays now and the
+        currently-playing one is inserted at the queue front (it will
+        play after the previous finishes). The previous track itself is
+        popped from history. Returns the previous track, or ``None`` if
+        history is empty.
+
+        Pops + swap happen atomically here (under the asyncio single-
+        threaded model) so a rapid double-press walks back two steps,
+        not zero or one.
+        """
+        prev = self.queue.previous()
+        if prev is None:
+            return None
+        if self.queue.current is not None:
+            self.queue.add_next(self.queue.current)
+        self.queue.current = prev
+        self._respawn_request = (prev, 0.0, self._active_effect_chain)
+        if self.voice_client.is_playing() or self._paused:
+            self.voice_client.stop()
+        return prev
+
+    async def set_effect(self, effect: str) -> str | None:
+        """Apply (or clear) an audio effect on the current track.
+
+        ``effect`` is one of the names in ``poob.music.effects.
+        AVAILABLE_EFFECTS`` (``"none"`` to clear). The effect is also
+        remembered as the default for subsequent tracks until changed —
+        so applying ``"nightcore"`` mid-song and then skipping forward
+        keeps the nightcore on the next track too.
+
+        Returns the applied effect name on success, or ``None`` if
+        there's no current track to apply it to (the effect is still
+        stored as the default for the next track in that case). Raises
+        ``EffectNotFoundError`` for unknown effect names — caller's
+        responsibility to validate before invoking from a user-facing
+        path.
+
+        Implementation: respawns the FFmpeg subprocess with the new
+        ``-af`` chain and an ``-ss`` seek to the current listener
+        position. ~200-400 ms audible gap during the respawn.
+        """
+        # resolve_effect_chain raises EffectNotFoundError on unknown
+        # names — propagate; the caller wraps for the user.
+        chain = resolve_effect_chain(effect)
+        # Normalize the stored effect name to lowercase (matches the
+        # registry's canonical form).
+        self._active_effect = effect.strip().lower()
+        self._active_effect_chain = chain
+
+        cur = self.queue.current
+        if cur is None:
+            # No current track — effect stored for the next play.
+            return None
+
+        pos = self.position_seconds
+        self._respawn_request = (cur, pos, chain)
+        if self.voice_client.is_playing() or self._paused:
+            self.voice_client.stop()
+        return self._active_effect
+
     def pause(self) -> bool:
-        """Pause playback. Returns True if paused."""
+        """Pause playback. Returns True if paused.
+
+        Records the start of the pause interval so ``position_seconds``
+        can subtract it when computing seek offsets for respawns.
+        """
+        import time as _t
         if self.voice_client.is_playing():
             self.voice_client.pause()
             self._paused = True
+            self._paused_at = _t.monotonic()
             return True
         return False
 
     def resume(self) -> bool:
-        """Resume playback. Returns True if resumed."""
+        """Resume playback. Returns True if resumed.
+
+        Closes the in-flight pause interval and rolls it into the
+        accumulator. ``position_seconds`` reads from both, so a track
+        paused for an hour then resumed reports the same position it
+        had at pause time.
+        """
+        import time as _t
         if self._paused:
             self.voice_client.resume()
             self._paused = False
+            if self._paused_at is not None:
+                self._total_pause_seconds += _t.monotonic() - self._paused_at
+                self._paused_at = None
             return True
         return False
 
@@ -522,7 +682,13 @@ class GuildMusicPlayer:
     # Player loop (event-driven, no polling)
     # ------------------------------------------------------------------
 
-    def _make_audio_source(self, track: Track) -> discord.AudioSource:
+    def _make_audio_source(
+        self,
+        track: Track,
+        *,
+        seek_seconds: float = 0.0,
+        effect_chain: str | None = None,
+    ) -> discord.AudioSource:
         """Create the audio source chain for a track.
 
         For local files (pre-downloaded): FFmpeg reads from disk — minimal
@@ -533,25 +699,41 @@ class GuildMusicPlayer:
 
         Both paths wrap FFmpegPCMAudio in BufferedAudioSource to decouple
         FFmpeg's pipe I/O from Pycord's 20ms audio thread timing.
+
+        ``seek_seconds`` adds ``-ss <pos>`` to ``before_options`` for
+        respawn-resume. ``effect_chain`` adds ``-af <chain>`` to
+        ``options`` for filter presets. Both are no-op when their
+        argument is the default — no extra flag emitted.
         """
+        # -ss before input is the fast seek path (keyframe-aligned).
+        # Append to the existing before_options string when non-zero.
+        seek_flag = f" -ss {seek_seconds:.3f}" if seek_seconds > 0 else ""
+        # -af after input adds the filter chain. Append to options.
+        af_flag = f" -af \"{effect_chain}\"" if effect_chain else ""
+
         if track.local_file and os.path.isfile(track.local_file):
-            # Local file — no network, minimal FFmpeg config
             ffmpeg_source = discord.FFmpegPCMAudio(
                 track.local_file,
                 executable=FFMPEG_PATH,
-                before_options="-nostdin",
-                options=FFMPEG_OPTS,
+                before_options=f"-nostdin{seek_flag}",
+                options=f"{FFMPEG_OPTS}{af_flag}",
             )
-            log.debug("Audio source: local file", file=track.local_file[-40:])
+            log.debug(
+                "Audio source: local file",
+                file=track.local_file[-40:],
+                seek=seek_seconds, effect=bool(effect_chain),
+            )
         else:
-            # Network stream — full reconnect + buffer config
             ffmpeg_source = discord.FFmpegPCMAudio(
                 track.stream_url,
                 executable=FFMPEG_PATH,
-                before_options=FFMPEG_BEFORE_OPTS,
-                options=FFMPEG_OPTS,
+                before_options=f"{FFMPEG_BEFORE_OPTS}{seek_flag}",
+                options=f"{FFMPEG_OPTS}{af_flag}",
             )
-            log.debug("Audio source: network stream")
+            log.debug(
+                "Audio source: network stream",
+                seek=seek_seconds, effect=bool(effect_chain),
+            )
 
         return BufferedAudioSource(ffmpeg_source)
 
@@ -601,39 +783,80 @@ class GuildMusicPlayer:
                     local=bool(track.local_file),
                 )
 
-                # Create audio source chain: FFmpeg → Buffer → Mixer
-                try:
-                    buffered = self._make_audio_source(track)
-                except Exception as exc:
-                    log.error("Audio source creation failed", error=str(exc)[:120])
-                    AsyncYTDL.cleanup_track_file(track)
-                    self.queue.current = None
-                    continue
-
-                self._mixer = MixingAudioSource(buffered, volume=self._volume)
-                self._paused = False
-
-                # Play with after callback that signals event
-                def _after_play(error: Exception | None) -> None:
-                    if error:
-                        log.warning("Playback error", error=str(error)[:100])
-                    self._loop.call_soon_threadsafe(self._next_event.set)
-
-                self.voice_client.play(self._mixer, after=_after_play)
-
-                # Pre-download next track while this one plays
-                self._start_prefetch()
-
-                # Wait for track to finish (or skip)
-                await self._next_event.wait()
-
-                # Cleanup current mixer and temp file
-                if self._mixer:
+                # Inner loop: rebuild the audio source in place when a
+                # respawn is requested (set_effect / replay / previous).
+                # Without this, those operations would have to advance
+                # the queue via get_next, which double-pushes history
+                # and breaks history-walker semantics.
+                seek_seconds = 0.0
+                effect_chain = self._active_effect_chain
+                respawning = False  # True after at least one respawn this track
+                while not self._destroyed:
                     try:
-                        self._mixer.cleanup()
-                    except Exception:
-                        pass
-                    self._mixer = None
+                        buffered = self._make_audio_source(
+                            track,
+                            seek_seconds=seek_seconds,
+                            effect_chain=effect_chain,
+                        )
+                    except Exception as exc:
+                        log.error(
+                            "Audio source creation failed",
+                            error=str(exc)[:120], respawn=respawning,
+                        )
+                        if not respawning:
+                            # Initial source failed — abandon track, advance
+                            AsyncYTDL.cleanup_track_file(track)
+                            self.queue.current = None
+                        break
+
+                    self._mixer = MixingAudioSource(buffered, volume=self._volume)
+                    self._paused = False
+                    self._paused_at = None
+                    self._total_pause_seconds = 0.0
+                    self._track_seek_offset = seek_seconds
+
+                    def _after_play(error: Exception | None) -> None:
+                        if error:
+                            log.warning("Playback error", error=str(error)[:100])
+                        self._loop.call_soon_threadsafe(self._next_event.set)
+
+                    self._next_event.clear()
+                    self.voice_client.play(self._mixer, after=_after_play)
+                    import time as _t
+                    self._track_started_at = _t.monotonic()
+
+                    # Only prefetch on the FIRST source for this track —
+                    # respawns are mid-track and shouldn't re-trigger the
+                    # next-track download.
+                    if not respawning:
+                        self._start_prefetch()
+
+                    await self._next_event.wait()
+
+                    # Cleanup the just-stopped mixer; the FFmpeg subprocess
+                    # tied to it dies with cleanup().
+                    if self._mixer:
+                        try:
+                            self._mixer.cleanup()
+                        except Exception:
+                            pass
+                        self._mixer = None
+
+                    # Respawn requested? Pull the new (track, position,
+                    # effect) and loop back to rebuild without advancing.
+                    if self._respawn_request is not None:
+                        new_track, seek_seconds, effect_chain = self._respawn_request
+                        self._respawn_request = None
+                        # set_effect / replay / previous already updated
+                        # queue.current to the right track; sync the loop
+                        # variable so cleanup at the end of this iteration
+                        # targets the correct track.
+                        track = new_track
+                        respawning = True
+                        continue
+
+                    break  # Natural end or skip — fall through to advance
+
                 AsyncYTDL.cleanup_track_file(track)
 
                 # Advance queue
@@ -642,6 +865,12 @@ class GuildMusicPlayer:
                     self._skip_requested = False
                 else:
                     self.queue.current = None
+
+                # Reset position-tracking state at the boundary between tracks.
+                self._track_started_at = None
+                self._track_seek_offset = 0.0
+                self._total_pause_seconds = 0.0
+                self._paused_at = None
 
         except asyncio.CancelledError:
             log.info("Player loop cancelled")

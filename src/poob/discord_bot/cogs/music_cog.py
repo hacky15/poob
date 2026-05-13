@@ -267,6 +267,11 @@ class MusicCog(commands.Cog, name="Music"):
         action = (tool_args or {}).get("action", "")
         query = (tool_args or {}).get("query", "")
         value = (tool_args or {}).get("value")
+        tracks_arg = (tool_args or {}).get("tracks")
+        from_position = (tool_args or {}).get("from_position")
+        to_position = (tool_args or {}).get("to_position")
+        position = (tool_args or {}).get("position")
+        effect = (tool_args or {}).get("effect")
 
         log.info("music.action", action=action, query=query[:60] if query else "",
                  value=value, user=user_id)
@@ -279,6 +284,63 @@ class MusicCog(commands.Cog, name="Music"):
                 await player.skip()
                 return f"[SILENT]Skipped {skipped}."
             return "[SILENT]Nothing is playing to skip."
+
+        if action == "previous":
+            prev = await player.previous()
+            if prev is None:
+                return "[SILENT]Nothing in the history to go back to."
+            return f"[SILENT]Back to {prev.title}."
+
+        if action == "replay":
+            cur = await player.replay()
+            if cur is None:
+                return "[SILENT]Nothing is playing to replay."
+            return f"[SILENT]Restarting {cur.title} from the top."
+
+        if action == "move":
+            # Tool schema is 1-based for user-facing parity with the
+            # queue display. Convert to 0-based for queue.move().
+            if from_position is None or to_position is None:
+                return "[SILENT]Move needs from_position and to_position."
+            try:
+                from_idx = int(from_position) - 1
+                to_idx = int(to_position) - 1
+            except (TypeError, ValueError):
+                return "[SILENT]Move positions must be numbers."
+            moved = player.queue.move(from_idx, to_idx)
+            if moved is None:
+                return f"[SILENT]Position out of range (queue has {player.queue.size})."
+            return f"[SILENT]Moved {moved.title} to position {to_position}."
+
+        if action == "remove":
+            if position is None:
+                return "[SILENT]Remove needs a position."
+            try:
+                idx = int(position) - 1
+            except (TypeError, ValueError):
+                return "[SILENT]Position must be a number."
+            removed = player.queue.remove(idx)
+            if removed is None:
+                return f"[SILENT]Position out of range (queue has {player.queue.size})."
+            return f"[SILENT]Removed {removed.title} from the queue."
+
+        if action == "clear":
+            count = player.queue.clear()
+            return f"[SILENT]Cleared {count} track{'s' if count != 1 else ''} from the queue."
+
+        if action == "apply_effect":
+            if not effect:
+                return "[SILENT]Which effect? (none, nightcore, slowed, slowed_reverb, bassboost, 8d, vaporwave, karaoke, chipmunk, deep, super_slowed)"
+            try:
+                from poob.music.effects import EffectNotFoundError
+                applied = await player.set_effect(effect)
+            except EffectNotFoundError as exc:
+                return f"[SILENT]{exc}"
+            if applied is None:
+                return f"[SILENT]Effect '{player.active_effect}' set — applies on the next track."
+            if player.active_effect == "none":
+                return "[SILENT]Audio effect cleared."
+            return f"[SILENT]Applied {player.active_effect}."
 
         if action == "pause":
             if player.pause():
@@ -334,6 +396,41 @@ class MusicCog(commands.Cog, name="Music"):
                 return f"[SILENT]Music volume set to {value}%."
             player.volume = min(2.0, player.volume + 0.2)
             return f"[SILENT]Volume raised to {int(player.volume * 100)}%."
+
+        if action == "queue_many":
+            # Multi-track in a single utterance — search each, queue the
+            # resolved ones, report per-track status. See
+            # docs/decisions/music-queue-many-tool.md.
+            if not isinstance(tracks_arg, list) or not tracks_arg:
+                return "[SILENT]queue_many needs a non-empty 'tracks' list."
+            resolved: list[str] = []
+            not_found: list[str] = []
+            already_playing = player.is_playing
+            for raw in tracks_arg:
+                title = str(raw).strip()
+                if len(title) < 2:
+                    not_found.append(title or "(empty)")
+                    continue
+                track = await self._ytdl.search(
+                    title, requester_id=user_id, requester_name=requester_name,
+                )
+                if not track:
+                    not_found.append(title)
+                    continue
+                await player.play(track, deferred=voice)
+                resolved.append(track.title)
+            if not resolved:
+                return f"Couldn't find any of: {', '.join(not_found[:5])}."
+            head = (
+                f"Queued {len(resolved)} tracks"
+                if already_playing
+                else f"Playing {resolved[0]}, queued {len(resolved) - 1} more"
+            )
+            if not_found:
+                head += f". Couldn't find: {', '.join(not_found[:3])}"
+                if len(not_found) > 3:
+                    head += f" (+{len(not_found) - 3} more)"
+            return f"{head}."
 
         # Default: "play" action (or unrecognized action treated as play)
         if not query or len(query) < 2:

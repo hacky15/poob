@@ -21,6 +21,10 @@ Gotchas differ from incidents: an incident is a specific event in the past, a go
 - [[google-vlm-ipm-undocumented-limit]] — Google VLM has an undocumented Images-Per-Minute limit
 - [[new-provider-integration-quirks]] — Google CSE 403, Together 402, Mistral Pixtral `extra_forbidden`
 
+### Music
+
+- [[ffmpeg-effect-toggle-creates-audio-gap]] — ~200-400ms silence on effect change / replay / previous is intentional; don't "fix" it without migrating to Lavalink
+
 ### Discord / Voice / Music
 
 - [[dave-version-zero-rejected-by-e2ee-required-guilds]] — `VOICE_MAX_DAVE_PROTOCOL_VERSION=0` triggers WS 4017 reject loop on E2EE-required guilds

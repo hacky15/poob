@@ -75,12 +75,33 @@ Shuffle: Fisher-Yates with saved original order. Unshuffle restores only the rem
 
 Transitions: event-driven via `asyncio.Event`. The `after` callback in `vc.play()` fires in FFmpeg's reader thread and calls `loop.call_soon_threadsafe(event.set)` to unblock the async player loop. No polling.
 
+## Audio-effect pipeline (on-the-fly filter toggle)
+
+Filter presets (nightcore / slowed / slowed_reverb / bassboost / 8d / etc.) are validated FFmpeg ``-af`` chains stored in [music/effects.py](../../src/poob/music/effects.py). The player can apply / clear an effect on the live track via ``GuildMusicPlayer.set_effect(name)``. Live toggling is implemented by respawning the FFmpeg subprocess with ``-ss <position>`` and the new ``-af`` chain — see [[music-on-the-fly-filter-respawn]]. The same respawn mechanism powers ``replay()`` and ``previous()``; all three callers set ``_respawn_request`` and let the player loop's inner respawn loop rebuild the audio source without advancing the queue.
+
+A ~200-400 ms audio gap on respawn is intentional, documented in [[ffmpeg-effect-toggle-creates-audio-gap]]. The position tracker (``GuildMusicPlayer.position_seconds``) is wall-clock since play minus paused intervals plus the active ``-ss`` offset — listener-perceived position, not subprocess uptime.
+
+## Tool-action surface (music_assistant)
+
+19 actions total, dispatched by ``MusicCog.handle_music_request`` against structured tool args from the brain:
+
+| Group | Actions |
+|---|---|
+| Playback | ``play``, ``queue_many``, ``skip``, ``previous``, ``replay``, ``pause``, ``resume``, ``stop`` |
+| Queue manip | ``move``, ``remove``, ``clear``, ``shuffle``, ``loop`` |
+| Volume | ``volume``, ``volume_up``, ``volume_down`` |
+| Display | ``now_playing``, ``queue`` |
+| Effects | ``apply_effect`` (preset name via ``effect`` arg) |
+
+``queue_many`` takes a ``tracks: list[str]`` for multi-song requests in one utterance; see [[music-queue-many-tool]]. ``apply_effect`` takes an ``effect`` name from the registry; see [[music-filter-presets]]. Move / remove / clear take 1-based positions to match the user-facing ``format_queue()`` display; see [[music-queue-primitives]].
+
 ## Key files
 
-- [music/queue.py](../../src/poob/music/queue.py) — Track dataclass, MusicQueue with loop/shuffle
+- [music/queue.py](../../src/poob/music/queue.py) — Track dataclass, MusicQueue with loop / shuffle / move / previous
+- [music/effects.py](../../src/poob/music/effects.py) — Effect preset registry + ``resolve_effect_chain``
 - [music/ytdl.py](../../src/poob/music/ytdl.py) — AsyncYTDL wrapper + pre-download
-- [music/player.py](../../src/poob/music/player.py) — MixingAudioSource + BufferedAudioSource + GuildMusicPlayer
-- [discord_bot/cogs/music_cog.py](../../src/poob/discord_bot/cogs/music_cog.py) — handler entrypoint
+- [music/player.py](../../src/poob/music/player.py) — MixingAudioSource + BufferedAudioSource + GuildMusicPlayer (position tracker + respawn loop + replay / previous / set_effect)
+- [discord_bot/cogs/music_cog.py](../../src/poob/discord_bot/cogs/music_cog.py) — handler entrypoint (action dispatch)
 
 ## Invariants
 

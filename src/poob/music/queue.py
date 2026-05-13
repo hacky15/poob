@@ -215,6 +215,50 @@ class MusicQueue:
             return track
         return None
 
+    def move(self, from_idx: int, to_idx: int) -> Track | None:
+        """Reorder a track within the upcoming queue.
+
+        Both indices are 0-based against ``upcoming`` (not history, not
+        ``current``). Returns the moved track on success, ``None`` for
+        out-of-range indices. ``move(i, i)`` is a no-op that still
+        returns the track at ``i``.
+
+        If the queue is shuffled, the saved original-order is kept in
+        sync so a later ``unshuffle()`` reflects the manual move.
+        """
+        size = len(self._queue)
+        if not (0 <= from_idx < size) or not (0 <= to_idx < size):
+            return None
+        track = self._queue.pop(from_idx)
+        self._queue.insert(to_idx, track)
+        if self._original_order is not None:
+            try:
+                self._original_order.remove(track)
+                # Clamp to current shuffled-order length to keep the
+                # restore stable; exact position on unshuffle isn't
+                # required to be perfect (unshuffle is best-effort by
+                # design) but the saved-order must contain the track.
+                self._original_order.append(track)
+            except ValueError:
+                pass
+        return track
+
+    def previous(self) -> Track | None:
+        """Pop the most-recent finished track from history.
+
+        Returns the popped track, or ``None`` if history is empty. The
+        caller (``GuildMusicPlayer.previous``) is responsible for
+        plumbing the returned track into playback — this method does
+        NOT touch ``current`` or the upcoming queue.
+
+        Keeping this pure-pop avoids double-advancing through the
+        player-loop's ``get_next`` path. See
+        ``docs/decisions/music-queue-primitives.md``.
+        """
+        if not self._history:
+            return None
+        return self._history.pop()
+
     # ------------------------------------------------------------------
     # Loop & shuffle
     # ------------------------------------------------------------------

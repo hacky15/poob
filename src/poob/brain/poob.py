@@ -223,9 +223,12 @@ MUSIC_TOOL = {
         "name": "music_assistant",
         "description": (
             "Handle ANY music or audio playback request. You MUST classify the "
-            "action type. Use 'play' for song/playlist requests, 'volume' for "
-            "any volume change (include the target number), and the appropriate "
-            "action for skip/pause/resume/stop/shuffle/loop/now_playing/queue."
+            "action type. Use 'play' for one song, 'queue_many' for two-or-more "
+            "songs in one utterance, 'volume' for any volume change (include the "
+            "target number), 'apply_effect' for audio effects "
+            "(nightcore/slowed/reverb/bassboost/etc.), and the appropriate "
+            "action for skip/previous/replay/pause/resume/stop/shuffle/loop/"
+            "move/remove/clear/now_playing/queue."
         ),
         "parameters": {
             "type": "object",
@@ -233,16 +236,28 @@ MUSIC_TOOL = {
                 "action": {
                     "type": "string",
                     "enum": [
-                        "play", "skip", "pause", "resume", "stop",
+                        "play", "queue_many",
+                        "skip", "previous", "replay",
+                        "pause", "resume", "stop",
                         "volume", "volume_up", "volume_down",
                         "shuffle", "loop", "now_playing", "queue",
+                        "move", "remove", "clear",
+                        "apply_effect",
                     ],
                     "description": (
-                        "The music action to perform. 'play' for playing/queueing "
-                        "a song or playlist. 'volume' for any absolute volume target "
-                        "— a percentage ('set volume to 50') OR a named extreme "
-                        "('max', 'mute', 'half'). 'volume_up'/'volume_down' for "
-                        "relative changes ('turn it down', 'louder')."
+                        "The music action to perform. 'play' for ONE song or "
+                        "playlist. 'queue_many' for TWO-OR-MORE songs in one "
+                        "utterance — pass each title as a separate string in "
+                        "the 'tracks' array. 'previous' walks back to the most "
+                        "recent finished track; 'replay' restarts the current "
+                        "track from 0. 'move' reorders the queue (use "
+                        "from_position and to_position). 'remove' deletes a "
+                        "track at 'position'. 'clear' empties the upcoming "
+                        "queue. 'volume' for absolute volume target — number "
+                        "OR named extreme ('max', 'mute', 'half'). "
+                        "'volume_up'/'volume_down' for relative bumps. "
+                        "'apply_effect' applies a named audio filter; pass "
+                        "'effect' with the preset name."
                     ),
                 },
                 "query": {
@@ -251,6 +266,17 @@ MUSIC_TOOL = {
                         "The song name, artist, or search query. Only required "
                         "for 'play' action. Extract JUST the song/artist name, "
                         "not the full user message."
+                    ),
+                },
+                "tracks": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Multiple song titles for 'queue_many'. Each entry is "
+                        "a separate search query — one song per entry, no "
+                        "commas or 'and' chaining within a string. Example: "
+                        "['Bohemian Rhapsody', \"Don't Stop Believin'\", "
+                        "'Africa by Toto']."
                     ),
                 },
                 "value": {
@@ -262,6 +288,43 @@ MUSIC_TOOL = {
                         "'mute'/'silence'/'min'/'off' → 0; "
                         "'half' → 100; 'low'/'quiet' → 50; 'high'/'loud' → 150. "
                         "Use the explicit number when the user gives one."
+                    ),
+                },
+                "from_position": {
+                    "type": "integer",
+                    "description": (
+                        "1-based queue position to move FROM, for the 'move' "
+                        "action. The user-facing queue display is 1-based."
+                    ),
+                },
+                "to_position": {
+                    "type": "integer",
+                    "description": (
+                        "1-based queue position to move TO, for the 'move' "
+                        "action."
+                    ),
+                },
+                "position": {
+                    "type": "integer",
+                    "description": (
+                        "1-based queue position for 'remove' action — the "
+                        "track at this position will be removed from the "
+                        "upcoming queue (current playback unaffected)."
+                    ),
+                },
+                "effect": {
+                    "type": "string",
+                    "description": (
+                        "Audio effect preset name for 'apply_effect'. Valid: "
+                        "'none' (clear active effect), 'nightcore' (sped up + "
+                        "pitch up), 'slowed' (slowed-genre standard), "
+                        "'slowed_reverb' (slowed + reverb), 'super_slowed' "
+                        "(even slower), 'bassboost', '8d' (rotating pan), "
+                        "'vaporwave', 'karaoke' (vocal-cancel), 'chipmunk', "
+                        "'deep'. Map user phrasings: 'nightcore it' → "
+                        "'nightcore', 'slow it down' → 'slowed', 'add reverb' "
+                        "→ 'slowed_reverb' (the chain users mean by 'reverb'), "
+                        "'turn off the effect' → 'none'."
                     ),
                 },
             },
