@@ -385,7 +385,7 @@ def test_music_tool_schema_advertises_all_new_actions() -> None:
     enum = MUSIC_TOOL["function"]["parameters"]["properties"]["action"]["enum"]
     for action in (
         "previous", "replay", "move", "remove", "clear",
-        "queue_many", "apply_effect",
+        "queue_many", "apply_effect", "seek",
     ):
         assert action in enum, f"MUSIC_TOOL missing {action!r}"
 
@@ -394,7 +394,9 @@ def test_music_tool_schema_declares_new_parameters() -> None:
     from poob.brain.poob import MUSIC_TOOL
 
     props = MUSIC_TOOL["function"]["parameters"]["properties"]
-    for param in ("tracks", "from_position", "to_position", "position", "effect"):
+    for param in (
+        "tracks", "from_position", "to_position", "position", "effect", "time",
+    ):
         assert param in props, f"MUSIC_TOOL missing {param!r} parameter"
 
     # ``tracks`` must be an array of strings — pattern (a) from the
@@ -402,3 +404,104 @@ def test_music_tool_schema_declares_new_parameters() -> None:
     # force server-side parsing.
     assert props["tracks"]["type"] == "array"
     assert props["tracks"]["items"]["type"] == "string"
+
+
+# ---------------------------------------------------------------------------
+# seek
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_seek_dispatches_to_player_with_parsed_input() -> None:
+    cog, player = _make_cog_and_player()
+    track = _t("Now Playing")
+    player.seek = AsyncMock(return_value=(track, 150.0))
+
+    resp = await cog.handle_music_request(
+        "seek to two thirty", user_id=1, guild_id=10,
+        tool_args={"action": "seek", "time": "2:30"},
+    )
+
+    # The handler passes a ParsedSeek to player.seek.
+    assert player.seek.await_count == 1
+    parsed_arg = player.seek.await_args.args[0]
+    from poob.music.seek import ParsedSeek
+    assert isinstance(parsed_arg, ParsedSeek)
+    assert parsed_arg.seconds == 150.0
+    assert parsed_arg.relative is False
+
+    assert resp.startswith("[SILENT]")
+    assert "2:30" in resp or "Now Playing" in resp
+
+
+@pytest.mark.asyncio
+async def test_seek_relative_format_dispatches_with_relative_flag() -> None:
+    cog, player = _make_cog_and_player()
+    track = _t("Track")
+    player.seek = AsyncMock(return_value=(track, 60.0))
+
+    await cog.handle_music_request(
+        "skip ahead", user_id=1, guild_id=10,
+        tool_args={"action": "seek", "time": "+10s"},
+    )
+
+    parsed_arg = player.seek.await_args.args[0]
+    assert parsed_arg.seconds == 10.0
+    assert parsed_arg.relative is True
+
+
+@pytest.mark.asyncio
+async def test_seek_missing_time_arg_returns_silent_prompt() -> None:
+    cog, player = _make_cog_and_player()
+
+    resp = await cog.handle_music_request(
+        "seek", user_id=1, guild_id=10,
+        tool_args={"action": "seek"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "2:30" in resp or "+10" in resp  # format hint in the prompt
+
+
+@pytest.mark.asyncio
+async def test_seek_invalid_format_returns_silent_parse_error() -> None:
+    cog, player = _make_cog_and_player()
+
+    resp = await cog.handle_music_request(
+        "seek to the future", user_id=1, guild_id=10,
+        tool_args={"action": "seek", "time": "the future"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "future" in resp
+
+
+@pytest.mark.asyncio
+async def test_seek_with_no_current_track_returns_silent_error() -> None:
+    cog, player = _make_cog_and_player()
+    player.seek = AsyncMock(return_value=None)
+    player.current_track = None
+
+    resp = await cog.handle_music_request(
+        "seek", user_id=1, guild_id=10,
+        tool_args={"action": "seek", "time": "1:00"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "nothing" in resp.lower() or "playing" in resp.lower()
+
+
+@pytest.mark.asyncio
+async def test_seek_on_livestream_returns_silent_error_with_stream_message() -> None:
+    cog, player = _make_cog_and_player()
+    player.seek = AsyncMock(return_value=None)
+    stream_track = Track(title="LiveStream", url="x", duration=None, is_stream=True)
+    player.current_track = stream_track
+
+    resp = await cog.handle_music_request(
+        "seek", user_id=1, guild_id=10,
+        tool_args={"action": "seek", "time": "1:00"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    # Surfaces the stream-specific message so user knows why it failed.
+    assert "stream" in resp.lower() or "live" in resp.lower()

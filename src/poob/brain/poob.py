@@ -243,6 +243,7 @@ MUSIC_TOOL = {
                         "shuffle", "loop", "now_playing", "queue",
                         "move", "remove", "clear",
                         "apply_effect",
+                        "seek",
                     ],
                     "description": (
                         "The music action to perform. 'play' for ONE song or "
@@ -250,14 +251,16 @@ MUSIC_TOOL = {
                         "utterance — pass each title as a separate string in "
                         "the 'tracks' array. 'previous' walks back to the most "
                         "recent finished track; 'replay' restarts the current "
-                        "track from 0. 'move' reorders the queue (use "
-                        "from_position and to_position). 'remove' deletes a "
-                        "track at 'position'. 'clear' empties the upcoming "
-                        "queue. 'volume' for absolute volume target — number "
-                        "OR named extreme ('max', 'mute', 'half'). "
-                        "'volume_up'/'volume_down' for relative bumps. "
-                        "'apply_effect' applies a named audio filter; pass "
-                        "'effect' with the preset name."
+                        "track from 0. 'seek' jumps to a position in the "
+                        "current track — pass 'time' with formats like '2:30', "
+                        "'2m30s', '150' (absolute) or '+10', '-1m' (relative). "
+                        "'move' reorders the queue (use from_position and "
+                        "to_position). 'remove' deletes a track at 'position'. "
+                        "'clear' empties the upcoming queue. 'volume' for "
+                        "absolute volume target — number OR named extreme "
+                        "('max', 'mute', 'half'). 'volume_up'/'volume_down' "
+                        "for relative bumps. 'apply_effect' applies a named "
+                        "audio filter; pass 'effect' with the preset name."
                     ),
                 },
                 "query": {
@@ -325,6 +328,19 @@ MUSIC_TOOL = {
                         "'nightcore', 'slow it down' → 'slowed', 'add reverb' "
                         "→ 'slowed_reverb' (the chain users mean by 'reverb'), "
                         "'turn off the effect' → 'none'."
+                    ),
+                },
+                "time": {
+                    "type": "string",
+                    "description": (
+                        "Seek target for the 'seek' action. Accepted formats: "
+                        "absolute clock '2:30' or '1:02:03'; absolute "
+                        "suffixed '2m30s' / '1h5m' / '45s'; absolute bare "
+                        "seconds '150'; relative '+10' or '-1m' (offset from "
+                        "current position). Map user phrasings: 'skip ahead "
+                        "10 seconds' → '+10'; 'go to two minutes' → '2:00'; "
+                        "'start over' → use 'replay' instead. Pass the "
+                        "literal time string; the bot parses it."
                     ),
                 },
             },

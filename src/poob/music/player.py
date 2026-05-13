@@ -556,6 +556,54 @@ class GuildMusicPlayer:
             self.voice_client.stop()
         return prev
 
+    async def seek(self, parsed) -> tuple[Track, float] | None:  # type: ignore[no-untyped-def]
+        """Seek to an absolute or relative position within the current track.
+
+        ``parsed`` is a ``poob.music.seek.ParsedSeek`` instance — the
+        caller has already normalized the user input. Relative offsets
+        add to ``position_seconds``; absolute offsets become the new
+        listener position. Negative results clamp to 0; values past the
+        track duration clamp to ``duration - 1.0`` so the seek doesn't
+        immediately end-of-stream.
+
+        Returns ``(track, target_seconds)`` on success, or ``None`` if
+        there's no current track to seek within. Reuses the respawn
+        mechanism (see [[music-on-the-fly-filter-respawn]]) — so the
+        same ~200-400 ms audible gap applies.
+
+        Live streams have no duration to clamp against; seek attempts
+        on a stream return ``None`` and the caller surfaces an error
+        rather than trying to spawn ``-ss`` on something that doesn't
+        support it.
+        """
+        cur = self.queue.current
+        if cur is None:
+            return None
+        if cur.is_stream:
+            return None
+
+        if parsed.relative:
+            target = self.position_seconds + parsed.seconds
+        else:
+            target = parsed.seconds
+
+        # Clamp below 0 and above duration. Duration may be None for
+        # rare edge cases (yt-dlp returning no duration on a non-stream);
+        # in that case skip the upper clamp.
+        target = max(0.0, target)
+        if cur.duration is not None:
+            duration_seconds = cur.duration.total_seconds()
+            if duration_seconds > 0:
+                # Leave 1s of headroom — seeking past the end is the
+                # same as "skip", which is a separate action.
+                target = min(target, duration_seconds - 1.0)
+                target = max(0.0, target)
+
+        self._respawn_request = (cur, target, self._active_effect_chain)
+        if self.voice_client.is_playing() or self._paused:
+            self.voice_client.stop()
+        return cur, target
+
     async def set_effect(self, effect: str) -> str | None:
         """Apply (or clear) an audio effect on the current track.
 

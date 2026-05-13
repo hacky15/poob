@@ -272,6 +272,7 @@ class MusicCog(commands.Cog, name="Music"):
         to_position = (tool_args or {}).get("to_position")
         position = (tool_args or {}).get("position")
         effect = (tool_args or {}).get("effect")
+        time_arg = (tool_args or {}).get("time")
 
         log.info("music.action", action=action, query=query[:60] if query else "",
                  value=value, user=user_id)
@@ -341,6 +342,25 @@ class MusicCog(commands.Cog, name="Music"):
             if player.active_effect == "none":
                 return "[SILENT]Audio effect cleared."
             return f"[SILENT]Applied {player.active_effect}."
+
+        if action == "seek":
+            if not time_arg:
+                return "[SILENT]Where to? (e.g. '2:30', '+10', '-30s')"
+            from poob.music.seek import SeekParseError, parse_seek_input
+            try:
+                parsed = parse_seek_input(time_arg)
+            except SeekParseError as exc:
+                return f"[SILENT]{exc}"
+            result = await player.seek(parsed)
+            if result is None:
+                cur = player.current_track
+                if cur and cur.is_stream:
+                    return "[SILENT]Can't seek a live stream."
+                return "[SILENT]Nothing is playing to seek within."
+            track, target = result
+            # Format target back into m:ss for the silent reply.
+            mins, secs = divmod(int(target), 60)
+            return f"[SILENT]Seeked {track.title} to {mins}:{secs:02d}."
 
         if action == "pause":
             if player.pause():

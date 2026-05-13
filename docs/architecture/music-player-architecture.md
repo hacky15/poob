@@ -92,6 +92,7 @@ A ~200-400 ms audio gap on respawn is intentional, documented in [[ffmpeg-effect
 | Volume | ``volume``, ``volume_up``, ``volume_down`` |
 | Display | ``now_playing``, ``queue`` |
 | Effects | ``apply_effect`` (preset name via ``effect`` arg) |
+| Position | ``seek`` (multi-format ``time`` string via [[music-seek]]) |
 
 ``queue_many`` takes a ``tracks: list[str]`` for multi-song requests in one utterance; see [[music-queue-many-tool]]. ``apply_effect`` takes an ``effect`` name from the registry; see [[music-filter-presets]]. Move / remove / clear take 1-based positions to match the user-facing ``format_queue()`` display; see [[music-queue-primitives]].
 
