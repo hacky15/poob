@@ -7,7 +7,12 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Self-hosted containerized runners on the homelab. Migrated from
+    # ubuntu-latest 2026-05-13 after the monthly $2 hosted-runner cap
+    # was exhausted. See docs/decisions/self-hosted-runners-migration.md.
+    # Two replicas register under the `poob` label set so this workflow
+    # does not contend with permitscope's runners (which use `permitscope`).
+    runs-on: [self-hosted, linux, x64, poob]
     permissions:
       contents: read
       packages: write
