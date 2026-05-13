@@ -36,12 +36,22 @@ _EMBED_COLOR = 0x8B4FBE  # muted purple
 MusicHandler = Callable[..., Awaitable[str]]
 
 
-def build_now_playing_embed(track: "Track", queue_size: int = 0) -> discord.Embed:
+def build_now_playing_embed(
+    track: "Track",
+    queue_size: int = 0,
+    *,
+    active_effect: str = "none",
+) -> discord.Embed:
     """Render a Track into the standard now-playing embed.
 
     Args:
         track: The currently playing track.
         queue_size: Number of tracks waiting behind this one.
+        active_effect: Current audio-effect preset name. ``"none"``
+            (default) means no effect; the field is omitted in that
+            case to keep the embed tidy. Anything else surfaces an
+            "Effect: …" field so users can see at a glance that
+            nightcore / slowed / etc. is on.
 
     Returns:
         A Discord embed ready to send.
@@ -63,6 +73,13 @@ def build_now_playing_embed(track: "Track", queue_size: int = 0) -> discord.Embe
         embed.add_field(
             name="Up Next",
             value=f"{queue_size} track{'s' if queue_size != 1 else ''} queued",
+            inline=True,
+        )
+
+    if active_effect and active_effect != "none":
+        embed.add_field(
+            name="Effect",
+            value=active_effect.replace("_", " "),
             inline=True,
         )
 
@@ -221,6 +238,46 @@ class MusicControlsView(discord.ui.View):
     ) -> None:
         await self._dispatch(interaction, "queue")
 
+    # ---- Row 2: history / track-restart / disconnect ----
+    # These map 1:1 to the music_assistant actions added in
+    # decisions/music-queue-primitives.md. The leave button reaches
+    # cross-cog (MusicCog handler -> VoiceCog._force_disconnect); see
+    # decisions/music-now-playing-embed-buttons.md.
+
+    @discord.ui.button(
+        emoji="⏮",
+        style=discord.ButtonStyle.secondary,
+        custom_id="poob:music:previous",
+        row=2,
+    )
+    async def previous_btn(
+        self, button: discord.ui.Button, interaction: discord.Interaction,
+    ) -> None:
+        await self._dispatch(interaction, "previous")
+
+    @discord.ui.button(
+        emoji="🔄",
+        style=discord.ButtonStyle.secondary,
+        custom_id="poob:music:replay",
+        row=2,
+    )
+    async def replay_btn(
+        self, button: discord.ui.Button, interaction: discord.Interaction,
+    ) -> None:
+        await self._dispatch(interaction, "replay")
+
+    @discord.ui.button(
+        emoji="🚪",
+        label="Leave",
+        style=discord.ButtonStyle.danger,
+        custom_id="poob:music:leave",
+        row=2,
+    )
+    async def leave_btn(
+        self, button: discord.ui.Button, interaction: discord.Interaction,
+    ) -> None:
+        await self._dispatch(interaction, "leave")
+
 
 def build_now_playing_message(
     player: "GuildMusicPlayer",
@@ -233,6 +290,10 @@ def build_now_playing_message(
     track = player.current_track
     if track is None:
         return None
-    embed = build_now_playing_embed(track, queue_size=player.queue.size)
+    embed = build_now_playing_embed(
+        track,
+        queue_size=player.queue.size,
+        active_effect=player.active_effect,
+    )
     view = MusicControlsView(music_handler)
     return embed, view

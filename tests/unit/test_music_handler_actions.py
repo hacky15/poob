@@ -490,6 +490,52 @@ async def test_seek_with_no_current_track_returns_silent_error() -> None:
     assert "nothing" in resp.lower() or "playing" in resp.lower()
 
 
+# ---------------------------------------------------------------------------
+# leave
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_leave_stops_player_then_calls_voice_cog_force_disconnect() -> None:
+    """Leave is cross-cog: MusicCog handler reaches for VoiceCog's
+    force-disconnect path. The order must be stop-music-first (so the
+    audio thread exits cleanly), then disconnect the VC."""
+    cog, player = _make_cog_and_player()
+    player.stop = AsyncMock()
+    voice_cog = MagicMock()
+    voice_cog._force_disconnect = AsyncMock()
+    cog.bot = MagicMock()
+    cog.bot.get_cog = MagicMock(return_value=voice_cog)
+
+    resp = await cog.handle_music_request(
+        "leave", user_id=1, guild_id=10,
+        tool_args={"action": "leave"},
+    )
+
+    player.stop.assert_awaited_once()
+    voice_cog._force_disconnect.assert_awaited_once()
+    assert resp.startswith("[SILENT]")
+    assert "left" in resp.lower() or "voice" in resp.lower()
+
+
+@pytest.mark.asyncio
+async def test_leave_handles_missing_voice_cog_gracefully() -> None:
+    """If VoiceCog isn't loaded (music_enabled but voice_enabled=False
+    won't actually happen due to the wiring, but defensive code matters):
+    don't crash, just stop the music and report success."""
+    cog, player = _make_cog_and_player()
+    player.stop = AsyncMock()
+    cog.bot = MagicMock()
+    cog.bot.get_cog = MagicMock(return_value=None)
+
+    resp = await cog.handle_music_request(
+        "leave", user_id=1, guild_id=10,
+        tool_args={"action": "leave"},
+    )
+
+    player.stop.assert_awaited_once()
+    assert resp.startswith("[SILENT]")
+
+
 @pytest.mark.asyncio
 async def test_seek_on_livestream_returns_silent_error_with_stream_message() -> None:
     cog, player = _make_cog_and_player()

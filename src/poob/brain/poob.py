@@ -244,6 +244,7 @@ MUSIC_TOOL = {
                         "move", "remove", "clear",
                         "apply_effect",
                         "seek",
+                        "leave",
                     ],
                     "description": (
                         "The music action to perform. 'play' for ONE song or "
@@ -260,7 +261,9 @@ MUSIC_TOOL = {
                         "absolute volume target — number OR named extreme "
                         "('max', 'mute', 'half'). 'volume_up'/'volume_down' "
                         "for relative bumps. 'apply_effect' applies a named "
-                        "audio filter; pass 'effect' with the preset name."
+                        "audio filter; pass 'effect' with the preset name. "
+                        "'leave' makes the bot disconnect from the voice "
+                        "channel (cleans up music + listening)."
                     ),
                 },
                 "query": {

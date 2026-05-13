@@ -376,6 +376,20 @@ class MusicCog(commands.Cog, name="Music"):
             await player.stop()
             return "[SILENT]Music stopped and queue cleared."
 
+        if action == "leave":
+            # Cross-cog reach: VoiceCog owns the disconnect path (force-
+            # disconnect cleans up the session, recording sink, etc.).
+            # The button on the now-playing embed routes here; voice
+            # @mention "Poob leave" also lands here via the LLM tool call.
+            await player.stop()
+            voice_cog = self.bot.get_cog("Voice")
+            if voice_cog is not None:
+                try:
+                    await voice_cog._force_disconnect(guild)
+                except Exception as exc:
+                    log.warning("Leave: force-disconnect failed", error=str(exc)[:100])
+            return "[SILENT]Left the voice channel."
+
         if action == "now_playing":
             track = player.current_track
             if track:

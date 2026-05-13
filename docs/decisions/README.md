@@ -19,6 +19,7 @@ Write a new note (don't edit in place) when a decision is reversed or materially
 - [[music-filter-presets]] — nightcore / slowed / slowed_reverb / bassboost / 8d / vaporwave / karaoke / chipmunk / deep / super_slowed as named presets, dispatched via ``apply_effect`` (2026-05-12, active)
 - [[music-on-the-fly-filter-respawn]] — change effects mid-track via FFmpeg respawn with ``-ss`` seek; shared mechanism for replay / previous / set_effect (2026-05-12, active)
 - [[music-seek]] — ``seek`` action with multi-format parser (``2:30``, ``2m30s``, ``150``, ``+10``, ``-1m``); reuses respawn machinery (2026-05-12, active)
+- [[music-now-playing-embed-buttons]] — 3 new persistent-view buttons (previous / replay / leave) + active-effect embed indicator; cross-cog leave reaches VoiceCog (2026-05-12, active)
 - [[boob-music-wrap-variant]] — rare ~5% music-wrap variant: Boob, Toob's sweet side piece, three-sentence compliment, higher pitch (2026-05-06, active)
 - [[text-casual-fallback-bypass-deal-agent]] — text-mode mirrors voice: empty router response → llama-3.1-8b-instant casual call, not deal sub-agent (2026-05-06, active)
 - [[ytdl-search-best-guess-fallback]] — two-pass ytsearch1 → ytsearch5 instead of dead-ending misheard queries on "couldn't find" (2026-05-01, active)
