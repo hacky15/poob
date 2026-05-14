@@ -14,3 +14,4 @@ Each runbook is copy-pasteable. If a step has a surprise, link out to a gotcha o
 
 - [[deploy-flow]] — `git push origin main` is the deploy; verification + rollback
 - [[production-log-access]] — reading live container logs on homelab via Tailscale + SSH
+- [[wake-word-retrain-v3]] — end-to-end procedure for generating the v3 wake-word corpus and producing a new ONNX model

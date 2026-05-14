@@ -18,6 +18,7 @@ When research leads to a commitment, open a matching decision note and link to i
 - [[voice-pipeline-optimization-prompt]] — 2026 research prompt: end-to-end latency + accuracy, ready-to-dispatch
 - [[conversation-classifier]] — intelligent address detection for multi-user voice
 - [[wake-word-latency]] — custom wake-word detection + response latency
+- [[wake-word-augmentation-2026]] — 2024-2026 SOTA survey: hard-negative mining, TTS diversity, augmentation sweet spots, top-5 lift recipes for Hey Poob
 - [[music-bot-feature-roadmap]] — 2025-2026 Discord music bot field survey + concrete FFmpeg effect params + autoplay cascade design + top-10 ship order
 
 ### Scanner / Marketplace

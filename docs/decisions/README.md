@@ -21,6 +21,7 @@ Write a new note (don't edit in place) when a decision is reversed or materially
 - [[music-seek]] — ``seek`` action with multi-format parser (``2:30``, ``2m30s``, ``150``, ``+10``, ``-1m``); reuses respawn machinery (2026-05-12, active)
 - [[music-now-playing-embed-buttons]] — 3 new persistent-view buttons (previous / replay / leave) + active-effect embed indicator; cross-cog leave reaches VoiceCog (2026-05-12, active)
 - [[self-hosted-runners-migration]] — CI runs on homelab containerized runners; ``runs-on: [self-hosted, linux, x64, poob]``; eliminates GHA billing (2026-05-13, active)
+- [[wake-word-mass-augmentation-v3]] — recall-biased corpus: 449 phrase variants × 47 voices × 8 rates + phonetic-neighbor positives + clip/pitch augmentation = ~11.85M training samples (2026-05-13, active)
 - [[boob-music-wrap-variant]] — rare ~5% music-wrap variant: Boob, Toob's sweet side piece, three-sentence compliment, higher pitch (2026-05-06, active)
 - [[text-casual-fallback-bypass-deal-agent]] — text-mode mirrors voice: empty router response → llama-3.1-8b-instant casual call, not deal sub-agent (2026-05-06, active)
 - [[ytdl-search-best-guess-fallback]] — two-pass ytsearch1 → ytsearch5 instead of dead-ending misheard queries on "couldn't find" (2026-05-01, active)
