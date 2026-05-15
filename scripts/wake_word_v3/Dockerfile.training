@@ -1,0 +1,87 @@
+# Wake-word v3 training image — Linux Python 3.11 + openWakeWord + CUDA.
+#
+# Built FROM the official pytorch/cuda image so we get cuDNN, the right
+# CUDA runtime libs, and a working torch out of the box. Then we add:
+#   - openWakeWord with its data + training submodules
+#   - ffmpeg for any audio re-encoding the feature extractor needs
+#   - the few small Python deps that openwakeword.data imports
+#     (pronouncing, soundfile, librosa) but doesn't always declare cleanly
+#   - setuptools so pronouncing's legacy ``pkg_resources`` import works
+#     on the modern Python install
+#
+# The image is meant to be invoked as a single-shot training driver via
+# ``docker run`` (see scripts/wake_word_v3/train_in_docker.sh). The
+# corpus lives on the host disk and mounts in at /work; the trained
+# ONNX writes back to the host. No state inside the container survives.
+#
+# Pinned to a known-working torch + CUDA pair to avoid the cascade of
+# wheel-mismatch errors that plague pip-installed CUDA torch.
+
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+# Faster apt + reliable defaults. The pytorch base image is debian-12
+# (bookworm) so apt-get works directly.
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        libsndfile1 \
+        ca-certificates \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# openwakeword (and pronouncing, its transitive dep) needs a few
+# packages declared explicitly because their setup.py is stale:
+#   - setuptools: provides pkg_resources used by pronouncing's __init__
+#   - librosa: feature extractor's MFCC + resample helpers
+#   - soundfile: WAV I/O
+#   - mutagen + audiomentations: openWakeWord's augment_clips() pipeline
+#     (used by the official training notebook, not currently by ours)
+#   - onnx + onnxruntime: ONNX export at the end of training
+RUN pip install --upgrade pip setuptools wheel
+# scipy<1.15 because `acoustics` imports scipy.special.sph_harm,
+# which scipy 1.15 deprecated and 1.16+ removed.
+#
+# onnxruntime-gpu vs onnxruntime: openwakeword's transitive deps pull
+# in the CPU-only `onnxruntime` package; if both are installed they
+# collide under the same `onnxruntime` import name and only the
+# last-installed wins. We install everything first, then forcibly
+# uninstall both ORTs and reinstall onnxruntime-gpu alone so the
+# CUDAExecutionProvider actually registers.
+RUN pip install \
+        "scipy<1.15" \
+        openwakeword \
+        librosa \
+        soundfile \
+        pronouncing \
+        mutagen \
+        audiomentations \
+        torch-audiomentations \
+        speechbrain \
+        acoustics \
+        torchinfo \
+        torchmetrics \
+        pyyaml \
+        onnx \
+        numpy \
+        mmap-ninja \
+ && pip uninstall -y onnxruntime onnxruntime-gpu \
+ && pip install onnxruntime-gpu
+
+# Pre-download the openWakeWord embedding / feature models so the first
+# training step doesn't burn 5-10 minutes pulling them under timer.
+# This is openwakeword.utils.download_models() which fetches the small
+# Whisper-derived embedding model used by compute_features_from_clips.
+RUN python -c "import openwakeword.utils; openwakeword.utils.download_models()" \
+    || echo 'warn: model pre-download failed; runtime will retry'
+
+WORKDIR /work
+
+# Default entrypoint is bash so the operator (or our train_in_docker
+# script) can run arbitrary python -c / python scripts. The training
+# command is passed in at ``docker run`` time, not baked here.
+ENTRYPOINT ["/bin/bash", "-c"]
+CMD ["echo 'Pass a command, e.g. python /work/train.py'"]

@@ -3,7 +3,7 @@ type: runbook
 status: active
 date: 2026-05-13
 tags: [voice, wake-word, training, openwakeword, operations]
-related: [[wake-word-mass-augmentation-v3]] [[wake-word-augmentation-2026]] [[wake-word-dual-gate]] [[wake-fp-pcm-capture]]
+related: [[wake-word-mass-augmentation-v3]] [[wake-word-augmentation-2026]] [[wake-word-dual-gate]] [[wake-fp-pcm-capture]] [[docker-desktop-data-vhd-separate-from-engine]] [[c-drive-docker-data-vhd-trap-2026-05-14]]
 ---
 
 # Retraining the Hey-Poob wake word — v3 pipeline (operator runbook)
@@ -12,7 +12,12 @@ End-to-end procedure for generating the v3 corpus and producing a new `data/hey_
 
 ## Pre-flight
 
-Disk: plan for **200 GB free** on the dev disk. The full corpus at default settings produces ~11.85M WAVs ≈ ~380 GB raw. Tunable down via `--pitch-fraction` and `--augment-fraction`.
+Disk: plan for **400-500 GB free** on a dedicated drive — the dev machine for the 2026-05-13 retrain used `F:\wake_word_v3\` (637 GB free) for the corpus and `F:\Docker\` for the Docker Desktop disk image, leaving C:\ untouched. The full corpus at default settings produces ~11.85M WAVs ≈ ~380 GB raw. Tunable down via `--pitch-fraction` and `--augment-fraction`.
+
+**Critical**: Docker Desktop on Windows uses **two** VHDs and you must relocate **both** before the first `docker build`. See [[docker-desktop-data-vhd-separate-from-engine]] for the full recipe.
+
+1. Engine distro (`docker-desktop` WSL distro, ~160 MB): move via `wsl --export | --unregister | --import --vhd` to `F:\wsl\docker-desktop\`.
+2. Data VHD (`%LOCALAPPDATA%\Docker\wsl\disk\docker_data.vhdx`, grows to many GB): the Docker Desktop GUI's "Disk image location" setting (`Settings → Resources → Advanced`) is supposed to handle this, but **the option is missing on Windows 10 WSL2 backend**. Use the directory-junction trick — `Move-Item` the VHD to `F:\Docker\wsl\disk\` and `mklink /J` the original path. Skipping this step is what caused [[c-drive-docker-data-vhd-trap-2026-05-14]].
 
 Dependencies:
 - `pip install edge-tts` (Windows-side; the orchestrator runs on the dev machine over the network to Edge TTS).
@@ -55,7 +60,7 @@ Phases run in order:
 
 Progress lines print every 250 generated samples. Phase summaries print on completion.
 
-Output lands under `data/wake_word_training_v3/`:
+Output lands under `F:\wake_word_v3\/`:
 
 ```
 pos/             base positive WAVs                ~169k
@@ -70,7 +75,7 @@ pos_augmented/   clip-augmented (base + pitched)   ~11M
 # Robocopy to WSL2 home (much faster than cp for millions of small files).
 $wsl = wsl wslpath -a -u "$($PWD.Path)\data\wake_word_training_v3"
 wsl bash -c "mkdir -p ~/wake_word_training/hey_poob_v3 && \
-  rsync -a /mnt/c/Users/19203/Downloads/AgenticWebScraper/data/wake_word_training_v3/ \
+  rsync -a /mnt/c/Users/19203/Downloads/AgenticWebScraper/F:\wake_word_v3\/ \
   ~/wake_word_training/hey_poob_v3/"
 ```
 
@@ -187,7 +192,7 @@ python -m scripts.wake_word_v3 --count
 If a phase failed mid-way, look for stale 0-byte files (rare; ffmpeg cleanup usually catches them):
 
 ```powershell
-Get-ChildItem data/wake_word_training_v3 -Recurse -Include *.wav |
+Get-ChildItem F:\wake_word_v3\ -Recurse -Include *.wav |
   Where-Object { $_.Length -eq 0 } |
   Remove-Item
 ```

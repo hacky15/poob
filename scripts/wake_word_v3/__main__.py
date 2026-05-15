@@ -40,6 +40,13 @@ import asyncio
 import os
 import sys
 
+# Force UTF-8 on stdout/stderr — Windows PowerShell defaults to cp1252,
+# which crashes on the unicode arrows / multiplication signs / em dashes
+# this script prints in progress and plan lines.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8")
+
 from .audio_utils import list_wavs
 from .orchestrator import GenConfig, run_full_pipeline
 from .phrases import stats as phrase_stats

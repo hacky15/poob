@@ -61,7 +61,7 @@ from .tts_edge import (
 class GenConfig:
     """Tunable run parameters. The CLI sets these from argv."""
 
-    out_root: str = "data/wake_word_training_v3"
+    out_root: str = "data/wake_word_training_v3"  # Override to F:\wake_word_v3 for production runs (CLI: --out-root)
     concurrency: int = 8          # Concurrent edge_tts requests
     progress_every: int = 250     # Log progress every N files generated
     skip_existing: bool = True
@@ -226,7 +226,7 @@ def run_clip_augmentation(
     skipped = 0
 
     print(
-        f"[augment] {len(base_files)} base WAVs → "
+        f"[augment] {len(base_files)} base WAVs -> "
         f"applying clip augmentation (~27 variants each)"
     )
 
