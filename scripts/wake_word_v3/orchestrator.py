@@ -167,29 +167,39 @@ async def generate_tts_phase(
     start = time.monotonic()
     last_log = start
 
-    coros = [_run_one_job(sem, j) for j in jobs]
-    for fut in asyncio.as_completed(coros):
-        ok, _path = await fut
-        if ok:
-            generated += 1
-        else:
-            failed += 1
+    # Chunk job submission so only ``chunk_size`` coroutines/Task
+    # objects exist at once. Pre-materializing all N coroutines via
+    # ``[_run_one_job(...) for j in jobs]`` blew up at 56k+ pending
+    # jobs on a 168k-job phase (Task objects + asyncio.as_completed's
+    # tracking set added up to GB of paged-out heap and stalled the
+    # event loop). Bounded chunks give the same throughput because the
+    # semaphore caps concurrency to ``config.concurrency`` anyway.
+    chunk_size = max(config.concurrency * 16, 256)
+    for chunk_start in range(0, len(jobs), chunk_size):
+        chunk = jobs[chunk_start : chunk_start + chunk_size]
+        chunk_coros = [_run_one_job(sem, j) for j in chunk]
+        for fut in asyncio.as_completed(chunk_coros):
+            ok, _path = await fut
+            if ok:
+                generated += 1
+            else:
+                failed += 1
 
-        # Throttle progress logging to once per progress_every results
-        # (avoid drowning the operator's terminal).
-        if (generated + failed) % config.progress_every == 0:
-            elapsed = time.monotonic() - last_log
-            rate_per_s = config.progress_every / elapsed if elapsed > 0 else 0
-            print(
-                f"[{prefix}] {generated + failed}/{len(jobs)} "
-                f"(ok={generated} fail={failed}, {rate_per_s:.1f}/s)"
-            )
-            last_log = time.monotonic()
+            if (generated + failed) % config.progress_every == 0:
+                elapsed = time.monotonic() - last_log
+                rate_per_s = config.progress_every / elapsed if elapsed > 0 else 0
+                print(
+                    f"[{prefix}] {generated + failed}/{len(jobs)} "
+                    f"(ok={generated} fail={failed}, {rate_per_s:.1f}/s)",
+                    flush=True,
+                )
+                last_log = time.monotonic()
 
     total_elapsed = time.monotonic() - start
     print(
         f"[{prefix}] phase done: gen={generated} fail={failed} "
-        f"in {total_elapsed:.1f}s"
+        f"in {total_elapsed:.1f}s",
+        flush=True,
     )
     skipped = len(list_wavs(out_dir)) - generated
     return (generated, skipped, failed)

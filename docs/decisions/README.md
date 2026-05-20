@@ -20,6 +20,7 @@ Write a new note (don't edit in place) when a decision is reversed or materially
 - [[music-on-the-fly-filter-respawn]] — change effects mid-track via FFmpeg respawn with ``-ss`` seek; shared mechanism for replay / previous / set_effect (2026-05-12, active)
 - [[music-seek]] — ``seek`` action with multi-format parser (``2:30``, ``2m30s``, ``150``, ``+10``, ``-1m``); reuses respawn machinery (2026-05-12, active)
 - [[music-now-playing-embed-buttons]] — 3 new persistent-view buttons (previous / replay / leave) + active-effect embed indicator; cross-cog leave reaches VoiceCog (2026-05-12, active)
+- [[wake-word-v3-shipped]] — ship v3 ONNX (816k WAV corpus, 50k steps, V2's known failures fixed at 0.9997, FP=0/12); known phonetic-neighbor + bare-stem gaps queued for v4 (2026-05-16, active)
 - [[self-hosted-runners-migration]] — CI runs on homelab containerized runners; ``runs-on: [self-hosted, linux, x64, poob]``; eliminates GHA billing (2026-05-13, active)
 - [[wake-word-mass-augmentation-v3]] — recall-biased corpus: 449 phrase variants × 47 voices × 8 rates + phonetic-neighbor positives + clip/pitch augmentation = ~11.85M training samples (2026-05-13, active)
 - [[boob-music-wrap-variant]] — rare ~5% music-wrap variant: Boob, Toob's sweet side piece, three-sentence compliment, higher pitch (2026-05-06, active)

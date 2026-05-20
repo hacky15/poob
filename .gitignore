@@ -10,6 +10,7 @@ venv/
 # show up when poob is run from a subdirectory as cwd.
 data/*
 !data/hey_poob.onnx
+!data/hey_poob_v3.onnx
 src/**/data/
 browser_profiles/
 

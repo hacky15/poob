@@ -14,6 +14,7 @@ Plans are not permanent. Once the feature ships, the plan can be archived — th
 
 ### Active
 
+- [[wake-word-v4-phonetic-neighbor-followup]] — close v3's `Hey Noob/Tube` + bare-stem gaps via phrase-weight reshaping (2026-05-16)
 - [[voice-latency-optimization]] — VAD + STT + TTS improvements; some items shipped, others open
 
 ### Superseded / historical
