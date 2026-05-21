@@ -551,3 +551,69 @@ async def test_seek_on_livestream_returns_silent_error_with_stream_message() -> 
     assert resp.startswith("[SILENT]")
     # Surfaces the stream-specific message so user knows why it failed.
     assert "stream" in resp.lower() or "live" in resp.lower()
+
+
+# ---------------------------------------------------------------------------
+# autoplay action dispatch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_autoplay_on_enables_and_confirms() -> None:
+    cog, player = _make_cog_and_player()
+    player.autoplay_enabled = False
+
+    resp = await cog.handle_music_request(
+        "autoplay on", user_id=1, guild_id=10,
+        tool_args={"action": "autoplay", "mode": "on"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "enabled" in resp.lower()
+    assert player.autoplay_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_autoplay_off_disables_and_confirms() -> None:
+    cog, player = _make_cog_and_player()
+    player.autoplay_enabled = True
+
+    resp = await cog.handle_music_request(
+        "autoplay off", user_id=1, guild_id=10,
+        tool_args={"action": "autoplay", "mode": "off"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "disabled" in resp.lower()
+    assert player.autoplay_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_autoplay_status_reports_current_state() -> None:
+    cog, player = _make_cog_and_player()
+    player.autoplay_enabled = True
+
+    resp = await cog.handle_music_request(
+        "autoplay?", user_id=1, guild_id=10,
+        tool_args={"action": "autoplay", "mode": "status"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert " on" in resp.lower() or "on." in resp.lower()
+    # Status MUST NOT mutate state.
+    assert player.autoplay_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_autoplay_missing_mode_returns_help() -> None:
+    cog, player = _make_cog_and_player()
+    player.autoplay_enabled = False
+
+    resp = await cog.handle_music_request(
+        "autoplay", user_id=1, guild_id=10,
+        tool_args={"action": "autoplay"},  # no mode field
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "mode" in resp.lower() or "on" in resp.lower()
+    assert player.autoplay_enabled is False  # untouched on bad input

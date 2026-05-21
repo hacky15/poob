@@ -226,8 +226,10 @@ MUSIC_TOOL = {
             "action type. Use 'play' for one song, 'queue_many' for two-or-more "
             "songs in one utterance, 'volume' for any volume change (include the "
             "target number), 'apply_effect' for audio effects "
-            "(nightcore/slowed/reverb/bassboost/etc.), and the appropriate "
-            "action for skip/previous/replay/pause/resume/stop/shuffle/loop/"
+            "(nightcore/slowed/reverb/bassboost/etc.), 'autoplay' to toggle "
+            "continuous playback when the queue empties (pass 'mode' as "
+            "'on'/'off'/'status'), and the appropriate action for "
+            "skip/previous/replay/pause/resume/stop/shuffle/loop/"
             "move/remove/clear/now_playing/queue."
         ),
         "parameters": {
@@ -244,6 +246,7 @@ MUSIC_TOOL = {
                         "move", "remove", "clear",
                         "apply_effect",
                         "seek",
+                        "autoplay",
                         "leave",
                     ],
                     "description": (
@@ -344,6 +347,19 @@ MUSIC_TOOL = {
                         "10 seconds' → '+10'; 'go to two minutes' → '2:00'; "
                         "'start over' → use 'replay' instead. Pass the "
                         "literal time string; the bot parses it."
+                    ),
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["on", "off", "status"],
+                    "description": (
+                        "Mode arg for the 'autoplay' action. 'on' enables "
+                        "continuous playback (the bot auto-queues a related "
+                        "track when the queue empties), 'off' disables, "
+                        "'status' reports the current state without changing "
+                        "it. Map user phrasings: 'turn on autoplay' / 'keep "
+                        "playing' → 'on'; 'stop autoplay' / 'no more autoplay' "
+                        "→ 'off'; 'is autoplay on' → 'status'."
                     ),
                 },
             },

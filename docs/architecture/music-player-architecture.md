@@ -3,7 +3,7 @@ type: architecture
 status: active
 date: 2026-04-07
 tags: [music, audio, ytdl, ffmpeg]
-related: [[voice-architecture]] [[one-handler-music-contract]] [[poobbrain-architecture]]
+related: [[voice-architecture]] [[one-handler-music-contract]] [[poobbrain-architecture]] [[music-autoplay-cascade]]
 ---
 
 # Music player — yt-dlp + FFmpeg + audioop PCM mixer
@@ -83,7 +83,7 @@ A ~200-400 ms audio gap on respawn is intentional, documented in [[ffmpeg-effect
 
 ## Tool-action surface (music_assistant)
 
-19 actions total, dispatched by ``MusicCog.handle_music_request`` against structured tool args from the brain:
+20 actions total, dispatched by ``MusicCog.handle_music_request`` against structured tool args from the brain:
 
 | Group | Actions |
 |---|---|
@@ -93,15 +93,29 @@ A ~200-400 ms audio gap on respawn is intentional, documented in [[ffmpeg-effect
 | Display | ``now_playing``, ``queue`` |
 | Effects | ``apply_effect`` (preset name via ``effect`` arg) |
 | Position | ``seek`` (multi-format ``time`` string via [[music-seek]]) |
+| Autoplay | ``autoplay`` (``mode`` arg: ``on`` / ``off`` / ``status``) |
 
-``queue_many`` takes a ``tracks: list[str]`` for multi-song requests in one utterance; see [[music-queue-many-tool]]. ``apply_effect`` takes an ``effect`` name from the registry; see [[music-filter-presets]]. Move / remove / clear take 1-based positions to match the user-facing ``format_queue()`` display; see [[music-queue-primitives]].
+``queue_many`` takes a ``tracks: list[str]`` for multi-song requests in one utterance; see [[music-queue-many-tool]]. ``apply_effect`` takes an ``effect`` name from the registry; see [[music-filter-presets]]. Move / remove / clear take 1-based positions to match the user-facing ``format_queue()`` display; see [[music-queue-primitives]]. ``autoplay`` toggles continuous playback via the cascade in [[music-autoplay-cascade]].
+
+## Autoplay (queue-empty extension)
+
+When the queue drains and ``GuildMusicPlayer.autoplay_enabled`` is ``True``, the player loop calls ``_try_autoplay_inject()`` before breaking. The helper:
+
+1. Reads the last-played track (``_last_played_track``) — captured just before each FFmpeg respawn loop so it survives ``set_effect`` / ``replay`` / ``previous`` without resetting.
+2. Lazily constructs an ``AutoplayEngine`` ([music/autoplay.py](../../src/poob/music/autoplay.py)) bound to the shared ``AsyncYTDL`` and a fresh-read view of ``queue.history``.
+3. Awaits ``engine.get_next(seed)``, which cascades ``ytmusicapi.get_watch_playlist`` → yt-dlp on the ``RD<videoId>`` mix URL → random non-seed history shuffle. Every tier's exception is caught and logged; the engine always returns ``Track | None``.
+4. On a non-None result, ``queue.add(track)`` enqueues it and ``queue.get_next()`` rotates it into ``current``.
+5. On ``None``, the loop breaks with the existing ``"Queue empty, player loop ending"`` log line.
+
+Per-guild state lives on the player instance (no SQLite persistence yet, by design — matches the ``loop_mode`` / ``shuffle`` / ``volume`` pattern). Resets on bot restart. See [[music-autoplay-cascade]] for the cascade design + deferred items (Last.fm tier, LLM-as-DJ "vibe" mode, persistence).
 
 ## Key files
 
 - [music/queue.py](../../src/poob/music/queue.py) — Track dataclass, MusicQueue with loop / shuffle / move / previous
 - [music/effects.py](../../src/poob/music/effects.py) — Effect preset registry + ``resolve_effect_chain``
 - [music/ytdl.py](../../src/poob/music/ytdl.py) — AsyncYTDL wrapper + pre-download
-- [music/player.py](../../src/poob/music/player.py) — MixingAudioSource + BufferedAudioSource + GuildMusicPlayer (position tracker + respawn loop + replay / previous / set_effect)
+- [music/autoplay.py](../../src/poob/music/autoplay.py) — ``AutoplayEngine`` cascade (ytmusicapi → ytdl mix URL → history shuffle)
+- [music/player.py](../../src/poob/music/player.py) — MixingAudioSource + BufferedAudioSource + GuildMusicPlayer (position tracker + respawn loop + replay / previous / set_effect + autoplay queue-empty hook)
 - [discord_bot/cogs/music_cog.py](../../src/poob/discord_bot/cogs/music_cog.py) — handler entrypoint (action dispatch)
 
 ## Invariants

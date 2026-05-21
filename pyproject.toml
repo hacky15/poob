@@ -48,8 +48,9 @@ dependencies = [
     # Neural TTS (Google Cloud Text-to-Speech — flagship quality voices)
     "google-cloud-texttospeech>=2.34.0",
 
-    # Music (YouTube audio streaming)
+    # Music (YouTube audio streaming + YT Music recommender for autoplay)
     "yt-dlp>=2024.12.0",
+    "ytmusicapi>=1.10.0",           # Unofficial YT Music API — autoplay cascade primary tier
 
     # Logging
     "structlog>=23.2.0",

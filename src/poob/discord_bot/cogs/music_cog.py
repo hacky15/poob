@@ -273,6 +273,7 @@ class MusicCog(commands.Cog, name="Music"):
         position = (tool_args or {}).get("position")
         effect = (tool_args or {}).get("effect")
         time_arg = (tool_args or {}).get("time")
+        mode = (tool_args or {}).get("mode")
 
         log.info("music.action", action=action, query=query[:60] if query else "",
                  value=value, user=user_id)
@@ -328,6 +329,20 @@ class MusicCog(commands.Cog, name="Music"):
         if action == "clear":
             count = player.queue.clear()
             return f"[SILENT]Cleared {count} track{'s' if count != 1 else ''} from the queue."
+
+        if action == "autoplay":
+            mode_str = (mode or "").strip().lower()
+            if mode_str not in {"on", "off", "status"}:
+                return "[SILENT]Autoplay mode? (on, off, status)"
+            if mode_str == "status":
+                state = "on" if player.autoplay_enabled else "off"
+                return f"[SILENT]Autoplay is {state}."
+            player.autoplay_enabled = (mode_str == "on")
+            return (
+                "[SILENT]Autoplay enabled."
+                if player.autoplay_enabled
+                else "[SILENT]Autoplay disabled."
+            )
 
         if action == "apply_effect":
             if not effect:

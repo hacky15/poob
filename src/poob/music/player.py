@@ -392,6 +392,16 @@ class GuildMusicPlayer:
         # See ``set_effect`` / ``replay`` / ``previous`` for the producers.
         self._respawn_request: tuple[Track, float, str | None] | None = None
 
+        # ---- Autoplay state ----
+        # When ``autoplay_enabled`` is True and the queue empties, the
+        # player loop consults ``_get_autoplay_engine()`` to generate a
+        # next track from ``_last_played_track``. See
+        # docs/plans/music-autoplay.md for the cascade and rationale.
+        # Per-guild runtime state — resets on bot restart by design.
+        self.autoplay_enabled: bool = False
+        self._last_played_track: Track | None = None
+        self._autoplay_engine: "AutoplayEngine | None" = None
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -407,6 +417,42 @@ class GuildMusicPlayer:
     @property
     def current_track(self) -> Track | None:
         return self.queue.current
+
+    # ------------------------------------------------------------------
+    # Autoplay
+    # ------------------------------------------------------------------
+
+    def _get_autoplay_engine(self) -> "AutoplayEngine":
+        """Lazy-construct the autoplay engine so import / API setup cost
+        only lands the first time autoplay actually fires."""
+        if self._autoplay_engine is None:
+            from poob.music.autoplay import AutoplayEngine
+            self._autoplay_engine = AutoplayEngine(
+                ytdl=self.ytdl,
+                history_accessor=lambda: self.queue.history,
+            )
+        return self._autoplay_engine
+
+    async def _try_autoplay_inject(self) -> Track | None:
+        """When the queue empties and autoplay is on, generate the next
+        track via the cascade and enqueue it. Returns the new
+        ``queue.current`` (or ``None`` if autoplay is off / has nothing
+        to add). Never raises. See docs/plans/music-autoplay.md."""
+        if not self.autoplay_enabled:
+            return None
+        seed = self._last_played_track
+        if seed is None:
+            return None
+        try:
+            generated = await self._get_autoplay_engine().get_next(seed)
+        except Exception as exc:
+            log.warning("autoplay engine raised", error=str(exc)[:120])
+            return None
+        if generated is None:
+            return None
+        log.info("autoplay enqueued", title=generated.title[:60])
+        self.queue.add(generated)
+        return self.queue.get_next()
 
     @property
     def mixer(self) -> MixingAudioSource | None:
@@ -808,8 +854,17 @@ class GuildMusicPlayer:
                 if track is None:
                     track = self.queue.get_next()
                 if track is None:
+                    track = await self._try_autoplay_inject()
+                if track is None:
                     log.info("Queue empty, player loop ending")
                     break
+
+                # Remember the last track that actually reaches the
+                # play stage — the autoplay engine seeds the next round
+                # off this. We update here rather than after the FFmpeg
+                # respawn loop so a respawn (replay / set_effect /
+                # previous) doesn't blank the seed back to None.
+                self._last_played_track = track
 
                 # Acquire audio: pre-download to local file, fall back to stream URL
                 if not track.local_file and not track.stream_url:
