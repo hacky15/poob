@@ -19,6 +19,7 @@ Plans are not permanent. Once the feature ships, the plan can be archived — th
 
 ### Superseded / historical
 
+- [[voice-latency-phase3-kokoro-ship]] — shipped 2026-05-23; landed via [[voice-latency-phase3-kokoro]] decision
 - [[music-synced-lyrics]] — v1 shipped 2026-05-23; landed via [[music-synced-lyrics]] decision (live overlay-tick loop queued as v2 follow-up; see deferred items in the plan)
 - [[music-spotify-playlist-import]] — shipped 2026-05-23; landed via [[music-spotify-playlist-import]] decision
 - [[music-named-playlists]] — shipped 2026-05-23; landed via [[music-named-playlists]] decision

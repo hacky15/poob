@@ -20,6 +20,7 @@ Write a new note (don't edit in place) when a decision is reversed or materially
 - [[music-on-the-fly-filter-respawn]] — change effects mid-track via FFmpeg respawn with ``-ss`` seek; shared mechanism for replay / previous / set_effect (2026-05-12, active)
 - [[music-seek]] — ``seek`` action with multi-format parser (``2:30``, ``2m30s``, ``150``, ``+10``, ``-1m``); reuses respawn machinery (2026-05-12, active)
 - [[music-now-playing-embed-buttons]] — 3 new persistent-view buttons (previous / replay / leave) + active-effect embed indicator; cross-cog leave reaches VoiceCog (2026-05-12, active)
+- [[voice-latency-phase3-kokoro]] — Kokoro-82M as opt-in TTS provider via `VOICE_TTS_PROVIDER=kokoro`; eliminates cloud round-trip when active; cloud cascade is the fallback (2026-05-23, active)
 - [[music-synced-lyrics]] — `lyrics` brain action; LRCLIB synced → plain cascade via `syncedlyrics`; inline `[SILENT]` reply (live overlay-tick loop deferred to v2 — needs channel-ref plumbing) (2026-05-23, active)
 - [[music-spotify-playlist-import]] — `queue_spotify_playlist(url)` brain action; Spotipy `ClientCredentials` for read-only public playlists → YT search resolution → enqueue (2026-05-23, active)
 - [[music-named-playlists]] — per-guild `guild_playlists(guild_id, name, tracks_json)` SQLite store; 4 brain actions (save/load/list/delete) with case-insensitive name uniqueness (2026-05-23, active)

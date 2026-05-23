@@ -90,7 +90,11 @@ Play pre-generated "thinking" sounds immediately when end-of-speech fires, maski
 - `src/poob/voice/session.py` — Add filler playback in `_on_utterance_detected`
 - `src/poob/voice/fillers.py` — New module for filler generation and management
 
-## Phase 3: Local TTS with Kokoro-82M (Eliminate 0.8-1.2s Network Latency)
+## Phase 3: Local TTS with Kokoro-82M (Eliminate 0.8-1.2s Network Latency) — ✅ SHIPPED 2026-05-23
+
+Landed as opt-in via `VOICE_TTS_PROVIDER=kokoro`. Class implementation was already in place ([src/poob/voice/tts.py:173](../../src/poob/voice/tts.py)); the ship added the `kokoro-onnx` dependency, Dockerfile pre-download of the model (~350 MB baked into the image so first invocation doesn't block), 7 unit tests, and the deploy procedure. Default stays `google_tts` until A/B evidence justifies a default flip. Full decision record in [[voice-latency-phase3-kokoro]].
+
+### Original spec (preserved below for context):
 
 ### What
 Replace Edge TTS (network-dependent, 0.8-1.2s TTFB) with Kokoro-82M (local GPU, 50-100ms TTFB).

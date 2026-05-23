@@ -53,6 +53,7 @@ dependencies = [
     "ytmusicapi>=1.10.0",           # Unofficial YT Music API — autoplay cascade primary tier
     "spotipy>=2.23.0",              # Spotify Web API client — public-playlist URL import (ClientCredentials, no OAuth)
     "syncedlyrics>=0.10.0",         # LRC fetcher (LRCLIB free no-auth) — synced lyrics overlay
+    "kokoro-onnx>=0.4.0",           # Local TTS (Kokoro-82M) — eliminates Edge/Google network round-trip when opted in via VOICE_TTS_PROVIDER=kokoro
 
     # Logging
     "structlog>=23.2.0",

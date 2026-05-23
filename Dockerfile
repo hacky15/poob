@@ -50,6 +50,15 @@ RUN playwright install --with-deps chromium
 # the default download, and the layer caches so subsequent builds skip.
 RUN python -c "import openwakeword.utils; openwakeword.utils.download_models([])"
 
+# 4b. Kokoro-82M ONNX (~330 MB model + ~24 MB voices). Pre-download so
+# first runtime invocation doesn't block on a 350 MB fetch. Soft-fails
+# if kokoro_onnx isn't importable (e.g. dep dropped mid-rebuild) — the
+# image still ships; KokoroTTS.is_available() will just return False
+# and the cascade falls through to the cloud providers. See
+# docs/decisions/voice-latency-phase3-kokoro.md.
+RUN python -c "from kokoro_onnx import Kokoro; Kokoro()" \
+    || echo "warn: kokoro_onnx pre-download skipped; cascade will use cloud TTS"
+
 # 5. Local package (volatile — every commit invalidates from here down).
 # setuptools' package-find reads `[tool.setuptools.packages.find] where=["src"]`
 # at install time, so src/ must exist before `pip install -e .`. The
