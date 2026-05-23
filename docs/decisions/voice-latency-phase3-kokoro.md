@@ -45,6 +45,19 @@ Concretely:
 - ⚠️ Kokoro voice catalogue is smaller than Google Cloud TTS (54 voices vs 380+). The default `af_heart` voice is high quality but operator can tune via a future `voice_kokoro_voice` config knob (not part of v1; the class already accepts a `voice` arg, just needs config wiring when someone asks).
 - ⚠️ Quality may be subjectively below Google Chirp3-HD on long-form expressive sentences. The trade is latency for quality; users who care about quality stay on `google_tts`, users who care about responsiveness flip to `kokoro`. Both options work today.
 
+## Cascade ordering (2026-05-23 follow-up)
+
+Operator feedback: Fenrir (Google Chirp3-HD) is the bot's voice identity and should not be displaced by a generic open-source voice unless quality is provably equivalent — it isn't yet. Kokoro stays available but the cascade order was reshaped so Kokoro is positioned as Google's *first* fallback rather than its second.
+
+Old order (with `preferred=google_tts`): `[google_tts → edge_tts → kokoro]`.
+New order: `[google_tts → kokoro → edge_tts]`.
+
+Reasoning: if Google Cloud TTS fails (quota, outage, key rotation issue), the next-best fallback is a *different failure mode* (local inference, no network needed) rather than another cloud TTS that could be having correlated network/regional issues. Edge TTS stays in the cascade as the last-resort cloud option for the case where Kokoro itself isn't available (image stripped of the model, GPU saturated, etc.).
+
+Three new tests pin this ordering in `tests/unit/test_kokoro_tts.py::TestCascadeOrder` so the dict literal in `build_tts_cascade` can't drift back accidentally.
+
+No default-provider change. Fenrir remains the active voice via the unchanged `voice_tts_provider="google_tts"` default. The reorder only matters when Google fails.
+
 ## Rollback
 
 Single env-var flip: set `VOICE_TTS_PROVIDER=google_tts` (or remove the var; default is google_tts) on the poob stack's Environment panel. Save → auto-redeploy. The cascade goes back to cloud TTS without a code change or rebuild.

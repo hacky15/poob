@@ -243,9 +243,12 @@ def build_tts_cascade(
 ) -> list[GoogleCloudTTS | EdgeTTS | KokoroTTS]:
     """Build ordered list of TTS providers.
 
-    Default cascade: Google Cloud TTS → Edge TTS → Kokoro.
-    Google Cloud provides flagship-quality neural voices.
-    Edge TTS is free fallback. Kokoro is local fallback.
+    Default cascade: Google Cloud TTS (Fenrir) → Kokoro local → Edge TTS.
+    Google Cloud is the flagship-quality primary; Kokoro is positioned as
+    the first fallback specifically so a Google outage routes to a
+    different failure mode (local, no network needed) rather than another
+    cloud TTS that may be having correlated issues. Edge TTS is the
+    last-resort cloud option.
 
     Args:
         preferred: Which provider to try first (google_tts, edge_tts, kokoro).
@@ -264,10 +267,14 @@ def build_tts_cascade(
     edge = EdgeTTS(voice=voice, rate=rate)
     kokoro = KokoroTTS()
 
+    # Insertion order is the cascade order for whatever ``preferred``
+    # doesn't take. Kokoro before Edge so the first fallback after a
+    # Google outage is a different failure mode (local) rather than
+    # another cloud service.
     all_providers = {
         "google_tts": google,
-        "edge_tts": edge,
         "kokoro": kokoro,
+        "edge_tts": edge,
     }
 
     providers: list[GoogleCloudTTS | EdgeTTS | KokoroTTS] = []

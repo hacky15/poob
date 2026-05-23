@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-from poob.voice.tts import KokoroTTS
+from poob.voice.tts import KokoroTTS, build_tts_cascade
 
 
 # ---------------------------------------------------------------------------
@@ -120,3 +120,86 @@ class TestSynthesize:
         _args, kwargs = fake_model.create.call_args
         assert kwargs.get("speed") == 1.5
         assert kwargs.get("voice") == "af_heart"
+
+
+# ---------------------------------------------------------------------------
+# build_tts_cascade: pin the cascade order — Fenrir primary, Kokoro is the
+# first fallback so a Google outage routes to a different failure mode
+# (local, no network) rather than another cloud service.
+# ---------------------------------------------------------------------------
+
+class TestCascadeOrder:
+    def test_default_cascade_is_google_kokoro_edge(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Force all three providers to report available so the cascade
+        # surfaces every entry. Without this, network/key checks would
+        # filter them out in a test environment.
+        monkeypatch.setattr(
+            "poob.voice.tts.GoogleCloudTTS.is_available", lambda self: True,
+        )
+        monkeypatch.setattr(
+            "poob.voice.tts.EdgeTTS.is_available", lambda self: True,
+        )
+        monkeypatch.setattr(
+            "poob.voice.tts.KokoroTTS.is_available", lambda self: True,
+        )
+
+        cascade = build_tts_cascade(
+            preferred="google_tts",
+            google_api_key="x",
+            google_voice="en-US-Chirp3-HD-Fenrir",
+        )
+
+        # Class-name order pins the cascade — Fenrir primary, then local
+        # Kokoro, then Edge as last-resort cloud.
+        names = [type(p).__name__ for p in cascade]
+        assert names == ["GoogleCloudTTS", "KokoroTTS", "EdgeTTS"]
+
+    def test_kokoro_preferred_still_keeps_others_as_fallback(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # When operator opts into Kokoro, Google is the first fallback
+        # (highest quality), then Edge as last resort.
+        monkeypatch.setattr(
+            "poob.voice.tts.GoogleCloudTTS.is_available", lambda self: True,
+        )
+        monkeypatch.setattr(
+            "poob.voice.tts.EdgeTTS.is_available", lambda self: True,
+        )
+        monkeypatch.setattr(
+            "poob.voice.tts.KokoroTTS.is_available", lambda self: True,
+        )
+
+        cascade = build_tts_cascade(
+            preferred="kokoro",
+            google_api_key="x",
+        )
+
+        names = [type(p).__name__ for p in cascade]
+        # Kokoro first; remaining order preserves insertion-order
+        # (Google before Edge).
+        assert names[0] == "KokoroTTS"
+        assert names == ["KokoroTTS", "GoogleCloudTTS", "EdgeTTS"]
+
+    def test_unavailable_provider_drops_from_cascade(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Kokoro unavailable (e.g. dep missing on a stripped image) —
+        # cascade should be [Google, Edge] with no gap.
+        monkeypatch.setattr(
+            "poob.voice.tts.GoogleCloudTTS.is_available", lambda self: True,
+        )
+        monkeypatch.setattr(
+            "poob.voice.tts.EdgeTTS.is_available", lambda self: True,
+        )
+        monkeypatch.setattr(
+            "poob.voice.tts.KokoroTTS.is_available", lambda self: False,
+        )
+
+        cascade = build_tts_cascade(
+            preferred="google_tts", google_api_key="x",
+        )
+
+        names = [type(p).__name__ for p in cascade]
+        assert names == ["GoogleCloudTTS", "EdgeTTS"]
