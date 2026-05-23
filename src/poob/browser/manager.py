@@ -156,35 +156,68 @@ class BrowserManager:
         one on ``start()``), materializes a fresh tab via ``new_page()`` so
         callers always get a usable Page instead of ``None``.
 
+        Browser-use's ``bubus`` event bus times out its internal launch
+        handler at 30s and propagates ``asyncio.TimeoutError`` up — main.py
+        catches that and treats startup as failed, but the underlying
+        BrowserSession's CDP client may still be in the middle of connecting.
+        ``new_page()`` raises "CDP client not initialized" until that
+        handshake completes. We retry with backoff so the first patrol cycle
+        (~3 min after startup) almost always finds a ready browser.
+
         Returns:
             A browser-use Page instance.
 
         Raises:
             RuntimeError: If browser has not been started, or if both
-                ``get_current_page()`` and ``new_page()`` fail to produce
-                a usable tab.
+                ``get_current_page()`` and ``new_page()`` fail across all
+                retries.
         """
+        import asyncio as _asyncio
+
         if self._browser is None:
             raise RuntimeError("Browser not started. Call start() first.")
         page = await self._browser.get_current_page()
         if page is not None:
             return page
-        # No active tab — materialize one. This is the post-`start()` state
-        # for a fresh browser-use 0.12+ session; without this, the patrol
-        # engine's `_browser.get_page()` raises "No active page in browser
-        # session" on every cycle and the auth-only paths never run.
-        log.info("No active page in browser session; creating a new tab")
-        try:
-            new_page = await self._browser.new_page()
-        except Exception as exc:
-            raise RuntimeError(
-                f"No active page in browser session and new_page() failed: {exc}",
-            ) from exc
-        if new_page is None:
-            raise RuntimeError(
-                "No active page in browser session and new_page() returned None.",
-            )
-        return new_page
+
+        # No active tab — materialize one. Retry while CDP is still
+        # initializing in the background.
+        max_attempts = 6
+        retry_delay = 5.0  # seconds; total worst case 30s above the bubus race
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                new_page = await self._browser.new_page()
+                if new_page is not None:
+                    if attempt > 1:
+                        log.info(
+                            "Main browser tab materialized after retry",
+                            attempt=attempt,
+                        )
+                    else:
+                        log.info("No active page in browser session; created a new tab")
+                    return new_page
+                last_exc = RuntimeError("new_page() returned None")
+            except Exception as exc:
+                last_exc = exc
+                # Only retry on the known "still connecting" failure mode.
+                # Anything else is a real bug — surface it immediately.
+                if "CDP client not initialized" not in str(exc):
+                    raise RuntimeError(
+                        f"new_page() failed with non-retryable error: {exc}",
+                    ) from exc
+                log.info(
+                    "Browser CDP not ready, waiting for handshake",
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    wait_s=retry_delay,
+                )
+            await _asyncio.sleep(retry_delay)
+
+        raise RuntimeError(
+            f"new_page() failed after {max_attempts} attempts; "
+            f"last error: {last_exc}",
+        )
 
     def get_session(self) -> BrowserSession:
         """Get the underlying BrowserSession for CDP access.

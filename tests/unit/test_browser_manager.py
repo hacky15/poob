@@ -1,7 +1,8 @@
 """Unit tests for BrowserManager.
 
-Focused on the static singleton-lock cleanup — the live browser start path
-cannot be meaningfully tested without a real Chromium process.
+Focused on the static singleton-lock cleanup and get_page retry logic —
+the live browser start path cannot be meaningfully tested without a real
+Chromium process.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -106,3 +108,120 @@ class TestCleanupStaleSingletonLocks:
 
         # Should not raise — the whole point is to keep startup alive.
         BrowserManager._cleanup_stale_singleton_locks(tmp_path)
+
+
+class TestGetPageRetries:
+    """get_page() must materialize a tab and retry through CDP-not-ready."""
+
+    @pytest.fixture
+    def manager(self) -> BrowserManager:
+        return BrowserManager(headless=True)
+
+    @pytest.mark.asyncio
+    async def test_returns_current_page_when_available(
+        self, manager: BrowserManager,
+    ) -> None:
+        existing_page = MagicMock(name="existing_page")
+        manager._browser = MagicMock()
+        manager._browser.get_current_page = AsyncMock(return_value=existing_page)
+        manager._browser.new_page = AsyncMock()
+
+        result = await manager.get_page()
+
+        assert result is existing_page
+        manager._browser.new_page.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_creates_new_page_when_none_active(
+        self, manager: BrowserManager,
+    ) -> None:
+        created_page = MagicMock(name="created_page")
+        manager._browser = MagicMock()
+        manager._browser.get_current_page = AsyncMock(return_value=None)
+        manager._browser.new_page = AsyncMock(return_value=created_page)
+
+        result = await manager.get_page()
+
+        assert result is created_page
+        manager._browser.new_page.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_retries_when_cdp_not_initialized(
+        self, manager: BrowserManager, monkeypatch,
+    ) -> None:
+        """new_page() raising 'CDP client not initialized' triggers retry."""
+        # Patch asyncio.sleep so the test doesn't actually wait 30s.
+        sleeps: list[float] = []
+
+        async def _no_sleep(delay: float) -> None:
+            sleeps.append(delay)
+
+        monkeypatch.setattr("asyncio.sleep", _no_sleep)
+
+        created_page = MagicMock(name="created_page")
+        # First two attempts fail with the retryable error; third succeeds.
+        new_page_mock = AsyncMock(
+            side_effect=[
+                RuntimeError("CDP client not initialized - browser may not be connected yet"),
+                RuntimeError("CDP client not initialized - browser may not be connected yet"),
+                created_page,
+            ],
+        )
+        manager._browser = MagicMock()
+        manager._browser.get_current_page = AsyncMock(return_value=None)
+        manager._browser.new_page = new_page_mock
+
+        result = await manager.get_page()
+
+        assert result is created_page
+        assert new_page_mock.call_count == 3
+        assert len(sleeps) == 2
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_error_raises_immediately(
+        self, manager: BrowserManager, monkeypatch,
+    ) -> None:
+        """A different exception (not CDP-not-initialized) should NOT retry."""
+        sleeps: list[float] = []
+
+        async def _no_sleep(delay: float) -> None:
+            sleeps.append(delay)
+
+        monkeypatch.setattr("asyncio.sleep", _no_sleep)
+
+        new_page_mock = AsyncMock(
+            side_effect=RuntimeError("Some other unrelated failure"),
+        )
+        manager._browser = MagicMock()
+        manager._browser.get_current_page = AsyncMock(return_value=None)
+        manager._browser.new_page = new_page_mock
+
+        with pytest.raises(RuntimeError, match="non-retryable error"):
+            await manager.get_page()
+
+        # Only one call — no retry on non-retryable errors.
+        new_page_mock.assert_called_once()
+        assert sleeps == []
+
+    @pytest.mark.asyncio
+    async def test_exhausts_retries_then_raises(
+        self, manager: BrowserManager, monkeypatch,
+    ) -> None:
+        """If CDP never connects, get_page raises after the retry budget."""
+        async def _no_sleep(delay: float) -> None:
+            pass
+
+        monkeypatch.setattr("asyncio.sleep", _no_sleep)
+
+        new_page_mock = AsyncMock(
+            side_effect=RuntimeError("CDP client not initialized - browser may not be connected yet"),
+        )
+        manager._browser = MagicMock()
+        manager._browser.get_current_page = AsyncMock(return_value=None)
+        manager._browser.new_page = new_page_mock
+
+        with pytest.raises(RuntimeError, match="failed after"):
+            await manager.get_page()
+
+        # 6 attempts total per the implementation.
+        assert new_page_mock.call_count == 6
