@@ -45,3 +45,4 @@ Gotchas differ from incidents: an incident is a specific event in the past, a go
 - [[docker-volume-shadows-baked-files]] — named-volume mount shadows files baked into the image
 - [[compose-container-name-collisions]] — `container_name:` overrides without a project prefix collide with other stacks; namespace them as `poob-*`
 - [[docker-desktop-data-vhd-separate-from-engine]] — moving Docker Desktop's WSL distro does NOT move its image-store VHD; relocate both or C: silently fills (Windows)
+- [[wake-word-model-path-conventions]] — wake-word ONNX files MUST live at `/app/*.onnx`, never under `/app/data/`; env var is `WAKE_WORD_MODEL_PATH` (legacy `PORCUPINE_KEYWORD_PATH` aliased for one rotation)

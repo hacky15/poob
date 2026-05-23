@@ -58,12 +58,15 @@ RUN python -c "import openwakeword.utils; openwakeword.utils.download_models([])
 COPY src ./src
 RUN pip install --no-cache-dir -e . --no-deps
 
-# 6. Scripts + runtime dirs + wake-word model (tiny, fast).
+# 6. Scripts + runtime dirs + wake-word models (tiny, fast).
 COPY scripts ./scripts
 RUN mkdir -p /app/data /app/browser_profiles
-# Onnx lives OUTSIDE /app/data because /app/data is a volume mount at runtime —
-# any file baked into that path would be hidden by the empty volume on first start.
+# Wake-word ONNX models live at /app/<name>.onnx — OUTSIDE /app/data —
+# because /app/data is a volume mount at runtime; any file baked into
+# that path is hidden by the empty volume on first start.
+# See docs/gotchas/wake-word-model-path-conventions.md.
 COPY data/hey_poob.onnx /app/hey_poob.onnx
+COPY data/hey_poob_v3.onnx /app/hey_poob_v3.onnx
 
 ENV PYTHONUNBUFFERED=1
 

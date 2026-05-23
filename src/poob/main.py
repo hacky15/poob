@@ -608,10 +608,11 @@ async def startup() -> None:
         filler_paths = await generate_fillers(voice=config.voice_tts_voice)
         filler_player = FillerPlayer(filler_paths)
 
-        # Dual pipeline config (Porcupine + Deepgram streaming)
+        # Dual pipeline config (OpenWakeWord + Deepgram streaming).
+        # wake_word_model_path is the env-driven path to the .onnx model
+        # (see docs/gotchas/wake-word-model-path-conventions.md).
         dual_pipeline_config = {
-            "picovoice_access_key": config.picovoice_access_key,
-            "porcupine_keyword_path": config.porcupine_keyword_path,
+            "wake_word_model_path": config.wake_word_model_path,
             "deepgram_api_key": config.deepgram_api_key,
             "deepgram_model": config.deepgram_model,
         }

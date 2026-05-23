@@ -148,6 +148,64 @@ class TestAppConfigFromEnv:
         assert config.llm_temperature == 0.7
 
 
+class TestWakeWordModelPath:
+    """The wake-word model path env-var binding.
+
+    Renamed from ``PORCUPINE_KEYWORD_PATH`` to ``WAKE_WORD_MODEL_PATH`` once
+    the bot moved off Porcupine onto OpenWakeWord. The new env-var name is
+    authoritative; the legacy name keeps working via pydantic AliasChoices
+    so existing Komodo stacks don't break on rename. Both can be removed
+    once the .env files in the wild have rotated.
+    """
+
+    def test_field_default_is_empty(self, monkeypatch, tmp_path):
+        # Explicitly clear BOTH env-var names so an OS-level value (e.g.
+        # the project's .env loaded via python-dotenv elsewhere in the
+        # suite) can't shadow the field's empty default.
+        from poob.config import AppConfig
+
+        monkeypatch.delenv("WAKE_WORD_MODEL_PATH", raising=False)
+        monkeypatch.delenv("PORCUPINE_KEYWORD_PATH", raising=False)
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "x")
+        monkeypatch.setenv("DISCORD_DEALS_CHANNEL_ID", "1")
+
+        config = AppConfig(_env_file=None)
+        assert config.wake_word_model_path == ""
+
+    def test_wake_word_model_path_env_sets_field(self, monkeypatch):
+        from poob.config import AppConfig
+
+        monkeypatch.delenv("PORCUPINE_KEYWORD_PATH", raising=False)
+        monkeypatch.setenv("WAKE_WORD_MODEL_PATH", "/app/hey_poob_v3.onnx")
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "x")
+        monkeypatch.setenv("DISCORD_DEALS_CHANNEL_ID", "1")
+
+        config = AppConfig(_env_file=None)
+        assert config.wake_word_model_path == "/app/hey_poob_v3.onnx"
+
+    def test_legacy_porcupine_keyword_path_env_still_works(self, monkeypatch):
+        from poob.config import AppConfig
+
+        monkeypatch.delenv("WAKE_WORD_MODEL_PATH", raising=False)
+        monkeypatch.setenv("PORCUPINE_KEYWORD_PATH", "/app/hey_poob.onnx")
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "x")
+        monkeypatch.setenv("DISCORD_DEALS_CHANNEL_ID", "1")
+
+        config = AppConfig(_env_file=None)
+        assert config.wake_word_model_path == "/app/hey_poob.onnx"
+
+    def test_new_name_takes_precedence_over_legacy(self, monkeypatch):
+        from poob.config import AppConfig
+
+        monkeypatch.setenv("WAKE_WORD_MODEL_PATH", "/app/hey_poob_v3.onnx")
+        monkeypatch.setenv("PORCUPINE_KEYWORD_PATH", "/app/hey_poob.onnx")
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "x")
+        monkeypatch.setenv("DISCORD_DEALS_CHANNEL_ID", "1")
+
+        config = AppConfig(_env_file=None)
+        assert config.wake_word_model_path == "/app/hey_poob_v3.onnx"
+
+
 class TestAppConfigValidation:
     """Verify config validates input types."""
 

@@ -18,7 +18,7 @@ After 8.5 hours of training (816,125 WAV corpus → 778k positive features + 38k
 
 ## Decision
 
-Ship v3. Deploy via Komodo env-var flip (`WAKE_WORD_MODEL_PATH=/app/data/hey_poob_v3.onnx`). Document the known gaps for v4.
+Ship v3. Deploy via Komodo env-var flip (`WAKE_WORD_MODEL_PATH=/app/hey_poob_v3.onnx`). Document the known gaps for v4.
 
 The model is a major improvement over v2 on the failures the user actually reported in production. The phonetic-neighbor stretch goal is partially met but not fully covered — and we shouldn't block ship on the stretch goal.
 
@@ -68,3 +68,7 @@ The model learned the discriminative wedge is the `poob/poop/pub/pube` phoneme c
 - The dual-gate text fallback ([[wake-word-dual-gate]]) still catches `Hey Noob` / `Hey Tube` via STT — the audio gate rejects, but the text gate matches the trailing-context positive pattern when present. So the *user-facing* failure rate on these is mitigated as long as they include trailing context.
 - v4 follow-up is queued at [[wake-word-v4-phonetic-neighbor-followup]] — corpus oversampling + weight reshaping, no architectural change needed.
 - Bare-stem `Poob` (no context) remains a known weak case in both v3 audio and v3 text gates; defer until evidence shows a user actually says just "Poob" alone with intent.
+
+## Deploy post-mortem (2026-05-20)
+
+The initial ship attempt didn't load v3 in production despite the env-flip. Three stacked bugs surfaced: (1) the runbook called the env var `WAKE_WORD_MODEL_PATH` but the bot read `PORCUPINE_KEYWORD_PATH` (legacy Porcupine field name); (2) the path `/app/data/hey_poob_v3.onnx` was inside a volume mount that shadows image-baked content; (3) the v3 ONNX wasn't COPY-baked into the image at all. Full write-up + fix in [[wake-word-v3-deploy-rename-and-rebake]]. After the fix, the env var, model path, and image bake are all aligned per [[wake-word-model-path-conventions]] — `WAKE_WORD_MODEL_PATH=/app/hey_poob_v3.onnx` with v3 (and v1 as the rollback) baked at the image root.

@@ -482,8 +482,7 @@ class DualPipelineProcessor:
 
     def __init__(
         self,
-        porcupine_access_key: str,
-        porcupine_keyword_path: str | None,
+        wake_word_model_path: str | None,
         deepgram_api_key: str,
         on_addressed_utterance: Callable[[int, str, str], None] | None = None,
         on_passive_utterance: Callable[[int, str, str], None] | None = None,
@@ -493,8 +492,11 @@ class DualPipelineProcessor:
         """Initialize the dual pipeline.
 
         Args:
-            porcupine_access_key: Picovoice access key.
-            porcupine_keyword_path: Path to custom .ppn model file.
+            wake_word_model_path: Path to .onnx wake-word model file. ``None``
+                falls back to OpenWakeWord's pre-trained ``hey_jarvis`` for
+                testing. Production paths must live OUTSIDE ``/app/data/``
+                (volume-mounted at runtime — see
+                ``docs/gotchas/wake-word-model-path-conventions.md``).
             deepgram_api_key: Deepgram API key.
             on_addressed_utterance: Callback(user_id, user_name, transcript)
                 when wake word + speech detected.
@@ -513,7 +515,7 @@ class DualPipelineProcessor:
                 Deepgram Flux (Oct 2025, ~450ms P50 faster per benchmarks).
         """
         self._wake_detector = WakeWordDetector(
-            model_path=porcupine_keyword_path or None,  # None = use pre-trained hey_jarvis
+            model_path=wake_word_model_path or None,  # None = use pre-trained hey_jarvis
             threshold=0.7,  # Raised for multi-user — 0.5 causes false positives in group calls
         )
         self._deepgram = DeepgramStreamManager(

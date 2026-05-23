@@ -16,6 +16,7 @@ Resolved incidents stay `status: resolved`. Open ones stay `status: active`. If 
 
 ### 2026-05
 
+- [[wake-word-v3-deploy-rename-and-rebake]] — wake-word v3 didn't actually go live after env-flip; three stacked bugs (wrong env-var name, volume-shadow path, model missing from image) (2026-05-20)
 - [[c-drive-docker-data-vhd-trap-2026-05-14]] — C: filled to 1.69 GB during wake-word v3 builds because Docker's data VHD stayed at default while only the engine distro had been relocated (2026-05-14)
 - [[auto-join-missed-listening-setup]] — text-channel music auto-join skipped STT + wake-word setup; bot played music but couldn't hear voice commands (2026-05-09)
 

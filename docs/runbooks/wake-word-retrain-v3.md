@@ -144,7 +144,7 @@ Output: `~/wake_word_training/hey_poob/output_v2/*.onnx`. Pick the highest-recal
 The bot looks up the wake model via env var. Drop the new onnx in `data/hey_poob_v3.onnx`, commit it, push. Then in the Komodo `poob` stack Environment panel:
 
 ```
-WAKE_WORD_MODEL_PATH=/app/data/hey_poob_v3.onnx
+WAKE_WORD_MODEL_PATH=/app/hey_poob_v3.onnx
 ```
 
 Save → auto-redeploy. The bot reboots with the new model. The startup DM will show the new sha.
@@ -179,7 +179,7 @@ If FP rate looks unhealthy after a session, fork to the two-model ensemble appro
 
 ## Rollback
 
-In Komodo: change `WAKE_WORD_MODEL_PATH` back to `/app/data/hey_poob.onnx`. Save → redeploy. v2 model is back live. No code change needed.
+In Komodo: change `WAKE_WORD_MODEL_PATH` back to `/app/hey_poob.onnx`. Save → redeploy. v2 model is back live. No code change needed. Older models stay baked into the image for exactly this purpose; see [[wake-word-model-path-conventions]] for why all wake-word ONNX files live at the image root rather than `/app/data/`.
 
 ## Resumability
 

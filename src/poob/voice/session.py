@@ -197,20 +197,19 @@ class VoiceSession:
         guild = getattr(voice_client, "guild", None)
         self._guild_id = int(getattr(guild, "id", 0) or 0)
 
-        # --- Dual Pipeline (Porcupine + Deepgram streaming) ---
+        # --- Dual Pipeline (OpenWakeWord + Deepgram streaming) ---
         # When configured, replaces the old batch STT pipeline with:
-        # 1. Porcupine wake word detection (~50ms, from raw audio)
+        # 1. OpenWakeWord local .onnx wake word detection (~50ms, raw audio)
         # 2. Deepgram streaming STT (transcript ready when speech ends)
         self._dual_pipeline = None
         if dual_pipeline_config:
             dg_key = dual_pipeline_config.get("deepgram_api_key", "")
-            model_path = dual_pipeline_config.get("porcupine_keyword_path", "")
+            model_path = dual_pipeline_config.get("wake_word_model_path", "")
             dg_model = dual_pipeline_config.get("deepgram_model", "nova-3")
             if dg_key:
                 from poob.voice.dual_pipeline import DualPipelineProcessor
                 self._dual_pipeline = DualPipelineProcessor(
-                    porcupine_access_key="",  # Not used — OpenWakeWord is local
-                    porcupine_keyword_path=model_path or None,
+                    wake_word_model_path=model_path or None,
                     deepgram_api_key=dg_key,
                     on_addressed_utterance=self._on_dual_addressed,
                     on_passive_utterance=self._on_dual_passive,

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -55,8 +56,20 @@ class AppConfig(BaseSettings):
     # Deepgram streaming model. "nova-3" (stable, default) or
     # "flux-general-en" (Oct 2025, ~450ms P50 faster, same keyterm API).
     deepgram_model: str = "nova-3"
-    picovoice_access_key: str = ""  # Porcupine wake word engine (free tier)
-    porcupine_keyword_path: str = ""  # Path to .ppn wake word model file
+    picovoice_access_key: str = ""  # Vestigial — Porcupine replaced by OpenWakeWord; field kept for back-compat
+    # Path to the .onnx wake-word model loaded by OpenWakeWord at boot.
+    # Authoritative env-var is WAKE_WORD_MODEL_PATH; the legacy
+    # PORCUPINE_KEYWORD_PATH alias keeps older .env files / Komodo
+    # stacks working through one rotation cycle. See
+    # docs/gotchas/wake-word-model-path-conventions.md for why models
+    # live at /app/*.onnx and not /app/data/ (the volume shadows it).
+    wake_word_model_path: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "WAKE_WORD_MODEL_PATH",
+            "PORCUPINE_KEYWORD_PATH",
+        ),
+    )
     groq_model: str = "openai/gpt-oss-20b"
     groq_vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     # Agent brain primary: GPT-OSS 120B — reasoning-capable, 500 T/sec on Groq
