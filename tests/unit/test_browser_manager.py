@@ -109,6 +109,36 @@ class TestCleanupStaleSingletonLocks:
         # Should not raise — the whole point is to keep startup alive.
         BrowserManager._cleanup_stale_singleton_locks(tmp_path)
 
+    def test_removes_per_pid_lock_files(self, tmp_path: Path) -> None:
+        """The .org.chromium.Chromium.XXXXXX per-PID files are deleted."""
+        for suffix in ("1aNYCR", "2nCrvN", "8dqWG7"):
+            (tmp_path / f".org.chromium.Chromium.{suffix}").write_text("pid-lock")
+        # An unrelated dotfile must NOT be deleted.
+        (tmp_path / ".config").write_text("keep")
+
+        BrowserManager._cleanup_stale_singleton_locks(tmp_path)
+
+        assert not list(tmp_path.glob(".org.chromium.Chromium.*"))
+        assert (tmp_path / ".config").exists()
+
+    def test_removes_browser_metrics_telemetry(self, tmp_path: Path) -> None:
+        """BrowserMetrics + DeferredBrowserMetrics directories are deleted."""
+        metrics = tmp_path / "BrowserMetrics"
+        metrics.mkdir()
+        (metrics / "f1.pma").write_text("a" * 1024)
+        (metrics / "f2.pma").write_text("b" * 2048)
+        deferred = tmp_path / "DeferredBrowserMetrics"
+        deferred.mkdir()
+        (deferred / "f3.pma").write_text("c" * 512)
+        # Real profile data must NOT be touched.
+        (tmp_path / "Cookies").write_text("real cookie data")
+
+        BrowserManager._cleanup_stale_singleton_locks(tmp_path)
+
+        assert not metrics.exists()
+        assert not deferred.exists()
+        assert (tmp_path / "Cookies").read_text() == "real cookie data"
+
 
 class TestGetPageRetries:
     """get_page() must materialize a tab and retry through CDP-not-ready."""

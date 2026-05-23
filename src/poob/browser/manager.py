@@ -84,23 +84,38 @@ class BrowserManager:
 
     @staticmethod
     def _cleanup_stale_singleton_locks(profile_path: Path) -> None:
-        """Remove Chromium SingletonLock / SingletonCookie / SingletonSocket
-        entries left behind by a non-graceful previous shutdown.
+        """Remove pre-launch bloat that prevents Chromium from starting in time.
 
-        Chromium's profile locking assumes the owning process will `unlink`
-        these on exit. When the process is SIGKILLed (container stop, OOM,
-        hard kill), the symlinks remain, point at a dead hostname-PID, and
-        the next launch hangs in `LocalBrowserWatchdog.on_BrowserLaunchEvent`
-        for ~30-45s waiting for the "other" instance to release the profile.
+        Three classes of cruft, all safe to remove:
 
-        Removing these before launch is safe: they are pure lock files,
-        no user data is stored in them.
+        1. **Singleton-lock symlinks** (``SingletonLock`` / ``SingletonCookie`` /
+           ``SingletonSocket``) — Chromium's profile-lock fixtures from a
+           previous instance. Should be cleaned on graceful shutdown, but
+           SIGKILL'd containers leak them. When present, the next launch
+           hangs in ``LocalBrowserWatchdog.on_BrowserLaunchEvent`` for
+           30-45s waiting for the dead "owner" to release the profile.
+
+        2. **Per-PID lock files** (``.org.chromium.Chromium.XXXXXX``) — one
+           per Chromium instance that ever used the profile. Each is ~370B
+           but on a container with many restarts, dozens accumulate.
+           Removing them doesn't fix a hang directly but keeps the dir clean
+           and the inode count down.
+
+        3. **Telemetry data** (``BrowserMetrics`` / ``DeferredBrowserMetrics``)
+           — Chromium's UMA / metrics directories. Observed in prod at
+           **310MB combined**, which Chromium tries to compress + (attempted)
+           upload on launch, blowing well past the bubus 30s startup timeout.
+           Safe to delete: pure telemetry, no auth / cookie / history data.
+
+        All deletions are best-effort; failures are logged but don't block
+        startup.
         """
+        import shutil as _shutil
+
+        # 1. Singleton-lock symlinks.
         for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
             lock_path = profile_path / lock_name
             try:
-                # Use lexists() to catch broken symlinks — the symlink
-                # target often lives in /tmp of a container that's gone.
                 if lock_path.is_symlink() or lock_path.exists():
                     lock_path.unlink()
                     log.info("Removed stale Chromium singleton lock", path=str(lock_path))
@@ -108,6 +123,47 @@ class BrowserManager:
                 log.warning(
                     "Could not remove stale singleton lock",
                     path=str(lock_path),
+                    error=str(exc),
+                )
+
+        # 2. Per-PID lock files (.org.chromium.Chromium.XXXXXX).
+        try:
+            pid_locks = list(profile_path.glob(".org.chromium.Chromium.*"))
+            removed = 0
+            for lock in pid_locks:
+                try:
+                    lock.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+            if removed:
+                log.info(
+                    "Removed stale Chromium per-PID lock files",
+                    count=removed,
+                )
+        except OSError as exc:
+            log.debug("Could not enumerate per-PID locks", error=str(exc))
+
+        # 3. UMA / telemetry directories that bloat startup time.
+        for telemetry_dir in ("BrowserMetrics", "DeferredBrowserMetrics"):
+            target = profile_path / telemetry_dir
+            if not target.exists():
+                continue
+            try:
+                # Measure first so the log is informative.
+                size_bytes = sum(
+                    f.stat().st_size for f in target.rglob("*") if f.is_file()
+                )
+                _shutil.rmtree(target, ignore_errors=True)
+                log.info(
+                    "Removed Chromium telemetry bloat",
+                    dir=telemetry_dir,
+                    size_mb=round(size_bytes / 1024 / 1024, 1),
+                )
+            except OSError as exc:
+                log.warning(
+                    "Could not remove telemetry directory",
+                    dir=telemetry_dir,
                     error=str(exc),
                 )
 
