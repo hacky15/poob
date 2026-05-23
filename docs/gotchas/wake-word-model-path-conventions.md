@@ -33,13 +33,24 @@ Two stacked traps:
 
 Three rules:
 
-**1. Bake the model at the image root.** In the `Dockerfile`, alongside the existing v1 line, add:
+**1. Bake the model at the image root.** Two coupled edits:
 
-```dockerfile
-COPY data/hey_poob_<version>.onnx /app/hey_poob_<version>.onnx
-```
+  a. In the `Dockerfile`, alongside the existing v1 line, add:
 
-Path `/app/hey_poob_*.onnx` is outside any volume mount, so the file is present at runtime exactly as baked.
+  ```dockerfile
+  COPY data/hey_poob_<version>.onnx /app/hey_poob_<version>.onnx
+  ```
+
+  b. In `.dockerignore`, add the matching allowlist entry so the build context actually contains the file:
+
+  ```
+  data/*
+  !data/hey_poob.onnx
+  !data/hey_poob_v3.onnx
+  !data/hey_poob_<version>.onnx
+  ```
+
+  Path `/app/hey_poob_*.onnx` is outside any volume mount, so the file is present at runtime exactly as baked. Skipping the `.dockerignore` entry causes `docker/build-push-action` to fail with `"failed to calculate checksum of ref ...: '/data/hey_poob_<version>.onnx': not found"` even though the file is in the repo. The exclusion comes from line 14 of `.dockerignore` (`data/*`); the new model needs a matching `!` line.
 
 **2. Point the env var at the image-root path.** In Komodo's Environment panel for the poob stack:
 
