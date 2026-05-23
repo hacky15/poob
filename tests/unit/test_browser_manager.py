@@ -225,3 +225,60 @@ class TestGetPageRetries:
 
         # 6 attempts total per the implementation.
         assert new_page_mock.call_count == 6
+
+    @pytest.mark.asyncio
+    async def test_short_circuits_after_max_consecutive_failures(
+        self, manager: BrowserManager, monkeypatch,
+    ) -> None:
+        """After N consecutive CDP failures, subsequent calls fail fast."""
+        async def _no_sleep(delay: float) -> None:
+            pass
+
+        monkeypatch.setattr("asyncio.sleep", _no_sleep)
+
+        new_page_mock = AsyncMock(
+            side_effect=RuntimeError("CDP client not initialized - browser may not be connected yet"),
+        )
+        manager._browser = MagicMock()
+        manager._browser.get_current_page = AsyncMock(return_value=None)
+        manager._browser.new_page = new_page_mock
+        manager._max_consecutive_cdp_failures = 2  # Speed up for test
+
+        # First failure: full retry budget consumed (6 attempts).
+        with pytest.raises(RuntimeError, match="failed after"):
+            await manager.get_page()
+        assert new_page_mock.call_count == 6
+        assert not manager._cdp_permanently_broken
+
+        # Second failure: another full retry budget. After this, threshold met.
+        with pytest.raises(RuntimeError, match="failed after"):
+            await manager.get_page()
+        assert new_page_mock.call_count == 12
+        assert manager._cdp_permanently_broken  # Now flipped
+
+        # Third call: short-circuits IMMEDIATELY — no more new_page() calls.
+        with pytest.raises(RuntimeError, match="permanently broken"):
+            await manager.get_page()
+        assert new_page_mock.call_count == 12  # Unchanged
+
+    @pytest.mark.asyncio
+    async def test_success_resets_consecutive_failure_count(
+        self, manager: BrowserManager, monkeypatch,
+    ) -> None:
+        """A successful get_page() clears the consecutive-failure counter."""
+        async def _no_sleep(delay: float) -> None:
+            pass
+
+        monkeypatch.setattr("asyncio.sleep", _no_sleep)
+
+        created_page = MagicMock(name="created_page")
+        manager._browser = MagicMock()
+        manager._browser.get_current_page = AsyncMock(return_value=None)
+        manager._browser.new_page = AsyncMock(return_value=created_page)
+        manager._consecutive_cdp_failures = 2  # Pretend we've failed twice
+
+        result = await manager.get_page()
+
+        assert result is created_page
+        assert manager._consecutive_cdp_failures == 0  # Reset
+        assert not manager._cdp_permanently_broken

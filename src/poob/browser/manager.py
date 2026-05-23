@@ -47,6 +47,14 @@ class BrowserManager:
         self._stealth_min_delay_ms = stealth_min_delay_ms
         self._stealth_max_delay_ms = stealth_max_delay_ms
         self._browser: BrowserSession | None = None
+        # Once CDP has failed to materialize a page enough consecutive
+        # times, treat the main browser as permanently broken for this
+        # container's lifetime — every retry wastes ~30s per patrol cycle
+        # and never succeeds when the bubus launch handler has already
+        # timed out and left the session in a degraded state.
+        self._cdp_permanently_broken: bool = False
+        self._consecutive_cdp_failures: int = 0
+        self._max_consecutive_cdp_failures: int = 3
 
     async def start(self, cookies_file: str | None = None) -> None:
         """Launch the browser with persistent profile config.
@@ -176,8 +184,20 @@ class BrowserManager:
 
         if self._browser is None:
             raise RuntimeError("Browser not started. Call start() first.")
+
+        # Short-circuit: once we've confirmed CDP is permanently broken
+        # for this container's session, every retry just wastes 30s per
+        # patrol cycle. Fail fast so the caller's anon-only fallback
+        # path runs immediately.
+        if self._cdp_permanently_broken:
+            raise RuntimeError(
+                "Main browser CDP marked permanently broken for this "
+                "container session — skipping retry budget",
+            )
+
         page = await self._browser.get_current_page()
         if page is not None:
+            self._consecutive_cdp_failures = 0
             return page
 
         # No active tab — materialize one. Retry while CDP is still
@@ -196,6 +216,7 @@ class BrowserManager:
                         )
                     else:
                         log.info("No active page in browser session; created a new tab")
+                    self._consecutive_cdp_failures = 0
                     return new_page
                 last_exc = RuntimeError("new_page() returned None")
             except Exception as exc:
@@ -213,6 +234,20 @@ class BrowserManager:
                     wait_s=retry_delay,
                 )
             await _asyncio.sleep(retry_delay)
+
+        # All retries exhausted — record the failure. After N consecutive
+        # exhaustions, give up entirely so subsequent cycles don't burn 30s
+        # each on retries that will never succeed.
+        self._consecutive_cdp_failures += 1
+        if (
+            self._consecutive_cdp_failures >= self._max_consecutive_cdp_failures
+            and not self._cdp_permanently_broken
+        ):
+            self._cdp_permanently_broken = True
+            log.warning(
+                "Main browser CDP marked permanently broken for this session",
+                consecutive_failures=self._consecutive_cdp_failures,
+            )
 
         raise RuntimeError(
             f"new_page() failed after {max_attempts} attempts; "
