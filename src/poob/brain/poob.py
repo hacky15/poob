@@ -250,6 +250,7 @@ MUSIC_TOOL = {
                         "save_playlist", "load_playlist",
                         "list_playlists", "delete_playlist",
                         "queue_spotify_playlist",
+                        "lyrics",
                         "leave",
                     ],
                     "description": (

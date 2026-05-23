@@ -133,6 +133,11 @@ async def startup() -> None:
         client_id=config.spotify_client_id,
         client_secret=config.spotify_client_secret,
     )
+    # Synced-lyrics resolver. Auth-free (LRCLIB); the only config knob
+    # would be enable/disable, which the soft-error path covers. See
+    # docs/decisions/music-synced-lyrics.md.
+    from poob.music.lyrics import LyricsResolver
+    lyrics_resolver = LyricsResolver()
 
     # --- Initialize LLM providers ---
     # 1. Browser LLM: browser-use's own ChatOllama (required by browser-use 0.12+)
@@ -666,6 +671,7 @@ async def startup() -> None:
     bot.feedback_repo = feedback_repo
     bot.playlist_repo = playlist_repo
     bot.spotify_resolver = spotify_resolver
+    bot.lyrics_resolver = lyrics_resolver
     bot.voice_session_factory = voice_session_factory
 
     log.info("Startup complete. Launching bot and scheduler.")

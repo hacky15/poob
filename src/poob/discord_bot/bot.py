@@ -58,6 +58,7 @@ class ScraperBot(commands.Bot):
         self.feedback_repo: FeedbackRepository | None = None
         self.playlist_repo: object | None = None  # GuildPlaylistsRepository — wired in main.py
         self.spotify_resolver: object | None = None  # SpotifyPlaylistResolver — wired in main.py
+        self.lyrics_resolver: object | None = None  # LyricsResolver — wired in main.py
         self.voice_session_factory: object | None = None  # Callable[[VoiceClient], VoiceSession]
         self._cogs_loaded = False
         self._owner_notified = False
@@ -130,6 +131,7 @@ class ScraperBot(commands.Bot):
                 setup_voice_session=_setup_voice_session,
                 playlist_repo=self.playlist_repo,
                 spotify_resolver=self.spotify_resolver,
+                lyrics_resolver=self.lyrics_resolver,
             )
             self.add_cog(music_cog)
 

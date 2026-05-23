@@ -954,6 +954,107 @@ async def test_queue_spotify_playlist_partial_resolution_reports_not_found() -> 
     assert player.play.await_count == 2
 
 
+# ---------------------------------------------------------------------------
+# Synced lyrics (lyrics action)
+# ---------------------------------------------------------------------------
+
+def _make_cog_with_lyrics(
+    lyrics_return=None, configured: bool = True,
+) -> tuple[MusicCog, MagicMock, MagicMock]:
+    cog, player = _make_cog_and_player()
+
+    resolver = MagicMock()
+    resolver.fetch = AsyncMock(return_value=lyrics_return)
+    cog._lyrics_resolver = resolver if configured else None  # type: ignore[attr-defined]
+    return cog, player, resolver
+
+
+@pytest.mark.asyncio
+async def test_lyrics_no_current_track_returns_silent_error() -> None:
+    cog, player, resolver = _make_cog_with_lyrics()
+    player.current_track = None
+
+    resp = await cog.handle_music_request(
+        "show lyrics", user_id=1, guild_id=10,
+        tool_args={"action": "lyrics"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "nothing" in resp.lower() or "playing" in resp.lower()
+    resolver.fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_lyrics_resolver_not_configured_returns_soft_error() -> None:
+    cog, player, resolver = _make_cog_with_lyrics(configured=False)
+    player.current_track = _t("Some Song")
+
+    resp = await cog.handle_music_request(
+        "lyrics", user_id=1, guild_id=10,
+        tool_args={"action": "lyrics"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "lyrics" in resp.lower()
+
+
+@pytest.mark.asyncio
+async def test_lyrics_synced_found_replies_with_body() -> None:
+    from poob.music.lyrics import ParsedLyrics
+    lyrics = ParsedLyrics(
+        title="Song", artist="Artist", is_synced=True,
+        lines=[(0.0, "Line A"), (10.0, "Line B"), (20.0, "Line C")],
+    )
+    cog, player, resolver = _make_cog_with_lyrics(lyrics_return=lyrics)
+    player.current_track = _t("Song - Artist")
+
+    resp = await cog.handle_music_request(
+        "show me the lyrics", user_id=1, guild_id=10,
+        tool_args={"action": "lyrics"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "Lyrics" in resp
+    assert "Line A" in resp
+    assert "Line B" in resp
+    assert "(plain" not in resp  # synced — no plain-text qualifier
+    resolver.fetch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_lyrics_only_plain_replies_with_plain_note() -> None:
+    from poob.music.lyrics import ParsedLyrics
+    lyrics = ParsedLyrics(
+        title="Song", artist="Artist", is_synced=False,
+        lines=[(0.0, "Big block of plain text lyrics here.")],
+    )
+    cog, player, resolver = _make_cog_with_lyrics(lyrics_return=lyrics)
+    player.current_track = _t("Some Song")
+
+    resp = await cog.handle_music_request(
+        "lyrics", user_id=1, guild_id=10,
+        tool_args={"action": "lyrics"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "plain" in resp.lower()
+    assert "Big block of plain text lyrics" in resp
+
+
+@pytest.mark.asyncio
+async def test_lyrics_resolver_returns_none_means_not_found() -> None:
+    cog, player, resolver = _make_cog_with_lyrics(lyrics_return=None)
+    player.current_track = _t("Obscure Track")
+
+    resp = await cog.handle_music_request(
+        "lyrics", user_id=1, guild_id=10,
+        tool_args={"action": "lyrics"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "no lyrics" in resp.lower()
+
+
 @pytest.mark.asyncio
 async def test_queue_spotify_playlist_unparseable_url_returns_silent_error() -> None:
     cog, player, resolver = _make_cog_with_spotify(

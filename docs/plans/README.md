@@ -19,6 +19,7 @@ Plans are not permanent. Once the feature ships, the plan can be archived — th
 
 ### Superseded / historical
 
+- [[music-synced-lyrics]] — v1 shipped 2026-05-23; landed via [[music-synced-lyrics]] decision (live overlay-tick loop queued as v2 follow-up; see deferred items in the plan)
 - [[music-spotify-playlist-import]] — shipped 2026-05-23; landed via [[music-spotify-playlist-import]] decision
 - [[music-named-playlists]] — shipped 2026-05-23; landed via [[music-named-playlists]] decision
 - [[music-autoplay]] — shipped 2026-05-20; landed via [[music-autoplay-cascade]] decision

@@ -52,6 +52,7 @@ dependencies = [
     "yt-dlp>=2024.12.0",
     "ytmusicapi>=1.10.0",           # Unofficial YT Music API — autoplay cascade primary tier
     "spotipy>=2.23.0",              # Spotify Web API client — public-playlist URL import (ClientCredentials, no OAuth)
+    "syncedlyrics>=0.10.0",         # LRC fetcher (LRCLIB free no-auth) — synced lyrics overlay
 
     # Logging
     "structlog>=23.2.0",

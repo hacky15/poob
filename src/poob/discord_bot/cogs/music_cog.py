@@ -88,6 +88,27 @@ def _track_from_dict(
     )
 
 
+_LYRICS_MAX_CHARS = 1800  # Discord message hard limit is 2000; leave headroom for the prefix.
+
+
+def _format_lyrics_for_reply(lyrics) -> str:
+    """Project :class:`ParsedLyrics` into a Discord-safe string.
+
+    Truncates at ``_LYRICS_MAX_CHARS`` so the surrounding ``[SILENT]…``
+    wrapper fits inside Discord's 2000-char limit. Appends a
+    ``(truncated)`` footer when cut. Plain lyrics return as-is (single
+    blob); synced lyrics get one line per entry with the timestamp
+    suppressed — the wow comes from the live overlay (v2), not from
+    seeing raw ``[mm:ss]`` markers in chat.
+    """
+    if not lyrics.lines:
+        return "(no lines)"
+    rendered = "\n".join(text for _ts, text in lyrics.lines if text).strip()
+    if len(rendered) <= _LYRICS_MAX_CHARS:
+        return rendered
+    return rendered[:_LYRICS_MAX_CHARS].rsplit("\n", 1)[0] + "\n\n(truncated)"
+
+
 class MusicCog(commands.Cog, name="Music"):
     """YouTube music player with real-time TTS mixing.
 
@@ -105,6 +126,7 @@ class MusicCog(commands.Cog, name="Music"):
         setup_voice_session=None,  # async (vc, channel, is_stage=False) -> VoiceSession | None
         playlist_repo=None,  # GuildPlaylistsRepository | None — named-playlist persistence
         spotify_resolver=None,  # SpotifyPlaylistResolver | None — Spotify URL import
+        lyrics_resolver=None,  # LyricsResolver | None — synced-lyrics fetch
     ) -> None:
         self.bot = bot
         self.config = config
@@ -121,6 +143,11 @@ class MusicCog(commands.Cog, name="Music"):
         # the queue_spotify_playlist action with a friendly soft error.
         # See docs/plans/music-spotify-playlist-import.md.
         self._spotify_resolver = spotify_resolver
+        # Optional synced-lyrics resolver. None disables the lyrics
+        # action. v1 returns lyrics text inline in the [SILENT] reply;
+        # the live-overlay tick loop is queued for v2 (see
+        # docs/plans/music-synced-lyrics.md).
+        self._lyrics_resolver = lyrics_resolver
 
         self._ytdl = AsyncYTDL(cookie_file=config.music_ytdl_cookie_file)
         self._players: dict[int, GuildMusicPlayer] = {}  # guild_id → player
@@ -648,6 +675,33 @@ class MusicCog(commands.Cog, name="Music"):
             if not_found:
                 head += f" ({len(not_found)} not found)"
             return f"{head}."
+
+        # --- Lyrics fetch ---
+        # v1 returns formatted lyrics inline in the [SILENT] reply
+        # (truncated to ~1800 chars). Live-overlay tick loop deferred to
+        # v2 per docs/plans/music-synced-lyrics.md.
+        if action == "lyrics":
+            if self._lyrics_resolver is None:
+                return "[SILENT]Lyrics aren't configured on this stack yet."
+            track = player.current_track
+            if track is None:
+                return "[SILENT]Nothing is playing — can't show lyrics for nothing."
+            # Heuristic title/artist split — YouTube titles often follow
+            # "Song - Artist" or "Artist - Song". We try the first form
+            # and fall back to the bare title if the split looks wrong.
+            parts = [p.strip() for p in track.title.split(" - ", 1)]
+            if len(parts) == 2 and parts[0] and parts[1]:
+                title_clean, artist_clean = parts[0], parts[1]
+            else:
+                title_clean, artist_clean = track.title.strip(), ""
+            lyrics = await self._lyrics_resolver.fetch(
+                title_clean, artist_clean or None,
+            )
+            if lyrics is None:
+                return f"[SILENT]No lyrics found for '{title_clean}'."
+            body = _format_lyrics_for_reply(lyrics)
+            sync_note = "" if lyrics.is_synced else " (plain — no synced version available)"
+            return f"[SILENT]Lyrics for {title_clean}{sync_note}:\n\n{body}"
 
         # Default: "play" action (or unrecognized action treated as play)
         if not query or len(query) < 2:
