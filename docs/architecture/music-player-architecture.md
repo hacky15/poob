@@ -95,6 +95,7 @@ A ~200-400 ms audio gap on respawn is intentional, documented in [[ffmpeg-effect
 | Position | ``seek`` (multi-format ``time`` string via [[music-seek]]) |
 | Autoplay | ``autoplay`` (``mode`` arg: ``on`` / ``off`` / ``status``) |
 | Playlists | ``save_playlist``, ``load_playlist``, ``list_playlists``, ``delete_playlist`` (``name`` arg for save/load/delete) |
+| Spotify import | ``queue_spotify_playlist`` (``url`` arg; ``SpotifyPlaylistResolver`` does the metadata fetch, YT search resolves each track) |
 
 ``queue_many`` takes a ``tracks: list[str]`` for multi-song requests in one utterance; see [[music-queue-many-tool]]. ``apply_effect`` takes an ``effect`` name from the registry; see [[music-filter-presets]]. Move / remove / clear take 1-based positions to match the user-facing ``format_queue()`` display; see [[music-queue-primitives]]. ``autoplay`` toggles continuous playback via the cascade in [[music-autoplay-cascade]].
 
@@ -120,6 +121,7 @@ Separate from runtime player state, the cog persists user-defined named track co
 - [music/effects.py](../../src/poob/music/effects.py) — Effect preset registry + ``resolve_effect_chain``
 - [music/ytdl.py](../../src/poob/music/ytdl.py) — AsyncYTDL wrapper + pre-download
 - [music/autoplay.py](../../src/poob/music/autoplay.py) — ``AutoplayEngine`` cascade (ytmusicapi → ytdl mix URL → history shuffle)
+- [music/spotify.py](../../src/poob/music/spotify.py) — ``SpotifyPlaylistResolver`` (public-playlist URL → ``[{title, artist}]``)
 - [storage/repositories/playlist_repo.py](../../src/poob/storage/repositories/playlist_repo.py) — ``GuildPlaylistsRepository`` (per-guild named-playlist persistence)
 - [music/player.py](../../src/poob/music/player.py) — MixingAudioSource + BufferedAudioSource + GuildMusicPlayer (position tracker + respawn loop + replay / previous / set_effect + autoplay queue-empty hook)
 - [discord_bot/cogs/music_cog.py](../../src/poob/discord_bot/cogs/music_cog.py) — handler entrypoint (action dispatch)

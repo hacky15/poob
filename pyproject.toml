@@ -51,6 +51,7 @@ dependencies = [
     # Music (YouTube audio streaming + YT Music recommender for autoplay)
     "yt-dlp>=2024.12.0",
     "ytmusicapi>=1.10.0",           # Unofficial YT Music API — autoplay cascade primary tier
+    "spotipy>=2.23.0",              # Spotify Web API client — public-playlist URL import (ClientCredentials, no OAuth)
 
     # Logging
     "structlog>=23.2.0",

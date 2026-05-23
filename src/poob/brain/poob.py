@@ -249,6 +249,7 @@ MUSIC_TOOL = {
                         "autoplay",
                         "save_playlist", "load_playlist",
                         "list_playlists", "delete_playlist",
+                        "queue_spotify_playlist",
                         "leave",
                     ],
                     "description": (
@@ -376,6 +377,16 @@ MUSIC_TOOL = {
                         "kebab-case-friendly is best ('chill', 'gym', "
                         "'sunday-morning'). Case-insensitive on lookup; "
                         "preserve the user's spelling on save."
+                    ),
+                },
+                "url": {
+                    "type": "string",
+                    "description": (
+                        "Spotify playlist URL for the 'queue_spotify_playlist' "
+                        "action. Accepts both the web form "
+                        "(https://open.spotify.com/playlist/<id>) and the URI "
+                        "form (spotify:playlist:<id>). Query-string suffix "
+                        "(?si=...) is fine; resolver strips it."
                     ),
                 },
             },

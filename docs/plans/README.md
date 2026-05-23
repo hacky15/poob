@@ -19,7 +19,8 @@ Plans are not permanent. Once the feature ships, the plan can be archived — th
 
 ### Superseded / historical
 
-- [[music-named-playlists]] — shipped 2026-05-23; landed via [[music-named-playlists]] (decision) — same slug, plan archived
+- [[music-spotify-playlist-import]] — shipped 2026-05-23; landed via [[music-spotify-playlist-import]] decision
+- [[music-named-playlists]] — shipped 2026-05-23; landed via [[music-named-playlists]] decision
 - [[music-autoplay]] — shipped 2026-05-20; landed via [[music-autoplay-cascade]] decision
 - [[disnake-voice-receive]] — rejected in favor of Pycord + `voice_compat`; see [[voice-architecture]]
 - [[phase-next-implementation-plan]] — spring 2026 pipeline-robustness plan; landed via [[unified-filter-pipeline]]

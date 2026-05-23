@@ -104,6 +104,7 @@ class MusicCog(commands.Cog, name="Music"):
         get_voice_session=None,  # Callable[[int], VoiceSession | None]
         setup_voice_session=None,  # async (vc, channel, is_stage=False) -> VoiceSession | None
         playlist_repo=None,  # GuildPlaylistsRepository | None — named-playlist persistence
+        spotify_resolver=None,  # SpotifyPlaylistResolver | None — Spotify URL import
     ) -> None:
         self.bot = bot
         self.config = config
@@ -116,6 +117,10 @@ class MusicCog(commands.Cog, name="Music"):
         # save/load/list/delete actions with a friendly soft error. See
         # docs/plans/music-named-playlists.md.
         self._playlist_repo = playlist_repo
+        # Optional Spotify public-playlist URL resolver. None disables
+        # the queue_spotify_playlist action with a friendly soft error.
+        # See docs/plans/music-spotify-playlist-import.md.
+        self._spotify_resolver = spotify_resolver
 
         self._ytdl = AsyncYTDL(cookie_file=config.music_ytdl_cookie_file)
         self._players: dict[int, GuildMusicPlayer] = {}  # guild_id → player
@@ -332,6 +337,7 @@ class MusicCog(commands.Cog, name="Music"):
         time_arg = (tool_args or {}).get("time")
         mode = (tool_args or {}).get("mode")
         playlist_name = (tool_args or {}).get("name")
+        url_arg = (tool_args or {}).get("url")
 
         log.info("music.action", action=action, query=query[:60] if query else "",
                  value=value, user=user_id)
@@ -594,6 +600,54 @@ class MusicCog(commands.Cog, name="Music"):
             if not names:
                 return "[SILENT]No saved playlists yet."
             return f"[SILENT]Playlists: {', '.join(names)}."
+
+        # --- Spotify playlist URL import ---
+        # Resolves a Spotify public-playlist URL to a list of title+artist
+        # dicts, then runs each through AsyncYTDL.search to enqueue. See
+        # docs/plans/music-spotify-playlist-import.md.
+        if action == "queue_spotify_playlist":
+            resolver = self._spotify_resolver
+            if resolver is None or not resolver.is_configured():
+                return (
+                    "[SILENT]Spotify isn't configured. Set "
+                    "SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET to use "
+                    "playlist URLs."
+                )
+            url_clean = (url_arg or "").strip()
+            if not url_clean:
+                return "[SILENT]Spotify playlist URL?"
+            tracks_meta = await resolver.resolve(url_clean)
+            if tracks_meta is None:
+                return "[SILENT]That doesn't look like a Spotify playlist URL."
+            if not tracks_meta:
+                return "[SILENT]Couldn't find any tracks from that playlist."
+            resolved: list[str] = []
+            not_found: list[str] = []
+            already_playing = player.is_playing
+            for meta in tracks_meta:
+                title = meta.get("title", "").strip()
+                artist = meta.get("artist", "").strip()
+                if not title:
+                    continue
+                query = f"{title} {artist}".strip()
+                track = await self._ytdl.search(
+                    query, requester_id=user_id, requester_name=requester_name,
+                )
+                if not track:
+                    not_found.append(title)
+                    continue
+                await player.play(track, deferred=voice)
+                resolved.append(track.title)
+            if not resolved:
+                return "[SILENT]Couldn't find any tracks from that playlist."
+            head = (
+                f"[SILENT]Queued {len(resolved)} from Spotify"
+                if already_playing
+                else f"[SILENT]Playing {resolved[0]}, queued {len(resolved) - 1} more from Spotify"
+            )
+            if not_found:
+                head += f" ({len(not_found)} not found)"
+            return f"{head}."
 
         # Default: "play" action (or unrecognized action treated as play)
         if not query or len(query) < 2:

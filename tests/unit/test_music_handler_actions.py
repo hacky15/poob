@@ -834,3 +834,139 @@ async def test_delete_playlist_missing_name_returns_help() -> None:
 
     assert "name" in resp.lower()
     repo.delete.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Spotify playlist URL import (queue_spotify_playlist)
+# ---------------------------------------------------------------------------
+
+def _make_cog_with_spotify(
+    is_configured: bool = True,
+    resolve_return=None,
+) -> tuple[MusicCog, MagicMock, MagicMock]:
+    """Cog + player + mocked Spotify resolver."""
+    cog, player = _make_cog_and_player()
+
+    resolver = MagicMock()
+    resolver.is_configured = MagicMock(return_value=is_configured)
+    resolver.resolve = AsyncMock(return_value=resolve_return)
+    cog._spotify_resolver = resolver  # type: ignore[attr-defined]
+    return cog, player, resolver
+
+
+@pytest.mark.asyncio
+async def test_queue_spotify_playlist_not_configured_returns_soft_error() -> None:
+    cog, player, resolver = _make_cog_with_spotify(is_configured=False)
+
+    resp = await cog.handle_music_request(
+        "queue this", user_id=1, guild_id=10,
+        tool_args={
+            "action": "queue_spotify_playlist",
+            "url": "https://open.spotify.com/playlist/abc123",
+        },
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "spotify" in resp.lower()
+    resolver.resolve.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_queue_spotify_playlist_missing_url_returns_help() -> None:
+    cog, player, resolver = _make_cog_with_spotify(is_configured=True)
+
+    resp = await cog.handle_music_request(
+        "queue spotify", user_id=1, guild_id=10,
+        tool_args={"action": "queue_spotify_playlist"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "url" in resp.lower() or "playlist" in resp.lower()
+    resolver.resolve.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_queue_spotify_playlist_resolves_and_queues() -> None:
+    resolved_titles = [
+        {"title": "Track A", "artist": "Artist 1"},
+        {"title": "Track B", "artist": "Artist 2"},
+        {"title": "Track C", "artist": "Artist 3"},
+    ]
+    cog, player, resolver = _make_cog_with_spotify(
+        is_configured=True, resolve_return=resolved_titles,
+    )
+    # Music already playing → response uses the "Queued N from Spotify" form
+    player.is_playing = True
+    cog._ytdl = MagicMock()  # type: ignore[attr-defined]
+    cog._ytdl.search = AsyncMock(side_effect=[
+        _t("Track A - Artist 1"),
+        _t("Track B - Artist 2"),
+        _t("Track C - Artist 3"),
+    ])
+    player.play = AsyncMock(return_value=None)
+
+    resp = await cog.handle_music_request(
+        "queue this spotify playlist", user_id=1, guild_id=10,
+        tool_args={
+            "action": "queue_spotify_playlist",
+            "url": "https://open.spotify.com/playlist/abc123",
+        },
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "Queued 3" in resp
+    assert "Spotify" in resp
+    assert cog._ytdl.search.await_count == 3
+    assert player.play.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_queue_spotify_playlist_partial_resolution_reports_not_found() -> None:
+    resolved_titles = [
+        {"title": "Track A", "artist": "Artist 1"},
+        {"title": "Track B", "artist": "Artist 2"},
+        {"title": "Track C", "artist": "Artist 3"},
+    ]
+    cog, player, resolver = _make_cog_with_spotify(
+        is_configured=True, resolve_return=resolved_titles,
+    )
+    # Music already playing → response uses the "Queued N from Spotify (M not found)" form
+    player.is_playing = True
+    cog._ytdl = MagicMock()  # type: ignore[attr-defined]
+    cog._ytdl.search = AsyncMock(side_effect=[
+        _t("Track A - Artist 1"),
+        None,  # second track unresolvable on YouTube
+        _t("Track C - Artist 3"),
+    ])
+    player.play = AsyncMock(return_value=None)
+
+    resp = await cog.handle_music_request(
+        "queue this", user_id=1, guild_id=10,
+        tool_args={
+            "action": "queue_spotify_playlist",
+            "url": "spotify:playlist:abc123",
+        },
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "Queued 2" in resp
+    assert "1 not found" in resp.lower()
+    assert player.play.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_queue_spotify_playlist_unparseable_url_returns_silent_error() -> None:
+    cog, player, resolver = _make_cog_with_spotify(
+        is_configured=True, resolve_return=None,  # resolver.resolve returns None
+    )
+
+    resp = await cog.handle_music_request(
+        "queue", user_id=1, guild_id=10,
+        tool_args={
+            "action": "queue_spotify_playlist",
+            "url": "https://youtube.com/watch?v=foo",
+        },
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "spotify" in resp.lower()

@@ -124,6 +124,15 @@ async def startup() -> None:
     # See docs/decisions/music-named-playlists.md.
     from poob.storage.repositories.playlist_repo import GuildPlaylistsRepository
     playlist_repo = GuildPlaylistsRepository(conn)
+    # Spotify public-playlist URL resolver. Construction is cheap; the
+    # spotipy client is lazy. is_configured() gates the brain action so
+    # an unconfigured stack soft-errors instead of crashing. See
+    # docs/plans/music-spotify-playlist-import.md.
+    from poob.music.spotify import SpotifyPlaylistResolver
+    spotify_resolver = SpotifyPlaylistResolver(
+        client_id=config.spotify_client_id,
+        client_secret=config.spotify_client_secret,
+    )
 
     # --- Initialize LLM providers ---
     # 1. Browser LLM: browser-use's own ChatOllama (required by browser-use 0.12+)
@@ -656,6 +665,7 @@ async def startup() -> None:
     bot.poob_brain = poob_brain
     bot.feedback_repo = feedback_repo
     bot.playlist_repo = playlist_repo
+    bot.spotify_resolver = spotify_resolver
     bot.voice_session_factory = voice_session_factory
 
     log.info("Startup complete. Launching bot and scheduler.")

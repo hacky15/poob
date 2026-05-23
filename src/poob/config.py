@@ -56,6 +56,14 @@ class AppConfig(BaseSettings):
     # Deepgram streaming model. "nova-3" (stable, default) or
     # "flux-general-en" (Oct 2025, ~450ms P50 faster, same keyterm API).
     deepgram_model: str = "nova-3"
+    # Spotify Web API credentials (free; Developer Dashboard). Public
+    # playlist reads only — ClientCredentials flow, no OAuth, no Premium
+    # required. Both empty disables the queue_spotify_playlist action
+    # with a friendly soft error. See
+    # docs/plans/music-spotify-playlist-import.md.
+    spotify_client_id: str = ""
+    spotify_client_secret: str = ""
+
     picovoice_access_key: str = ""  # Vestigial — Porcupine replaced by OpenWakeWord; field kept for back-compat
     # Path to the .onnx wake-word model loaded by OpenWakeWord at boot.
     # Authoritative env-var is WAKE_WORD_MODEL_PATH; the legacy
