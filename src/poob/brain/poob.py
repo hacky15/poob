@@ -247,6 +247,8 @@ MUSIC_TOOL = {
                         "apply_effect",
                         "seek",
                         "autoplay",
+                        "save_playlist", "load_playlist",
+                        "list_playlists", "delete_playlist",
                         "leave",
                     ],
                     "description": (
@@ -265,8 +267,12 @@ MUSIC_TOOL = {
                         "('max', 'mute', 'half'). 'volume_up'/'volume_down' "
                         "for relative bumps. 'apply_effect' applies a named "
                         "audio filter; pass 'effect' with the preset name. "
-                        "'leave' makes the bot disconnect from the voice "
-                        "channel (cleans up music + listening)."
+                        "'save_playlist' / 'load_playlist' / 'delete_playlist' "
+                        "manage per-guild named playlists — pass 'name' with "
+                        "the playlist title (e.g. 'chill', 'gym'). "
+                        "'list_playlists' returns every saved name with no "
+                        "args. 'leave' makes the bot disconnect from the "
+                        "voice channel (cleans up music + listening)."
                     ),
                 },
                 "query": {
@@ -360,6 +366,16 @@ MUSIC_TOOL = {
                         "it. Map user phrasings: 'turn on autoplay' / 'keep "
                         "playing' → 'on'; 'stop autoplay' / 'no more autoplay' "
                         "→ 'off'; 'is autoplay on' → 'status'."
+                    ),
+                },
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Playlist name for the 'save_playlist' / "
+                        "'load_playlist' / 'delete_playlist' actions. Short, "
+                        "kebab-case-friendly is best ('chill', 'gym', "
+                        "'sunday-morning'). Case-insensitive on lookup; "
+                        "preserve the user's spelling on save."
                     ),
                 },
             },

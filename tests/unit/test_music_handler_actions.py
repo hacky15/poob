@@ -617,3 +617,220 @@ async def test_autoplay_missing_mode_returns_help() -> None:
     assert resp.startswith("[SILENT]")
     assert "mode" in resp.lower() or "on" in resp.lower()
     assert player.autoplay_enabled is False  # untouched on bad input
+
+
+# ---------------------------------------------------------------------------
+# Named playlists: save / load / list / delete
+# ---------------------------------------------------------------------------
+
+def _make_cog_with_playlist_repo() -> tuple[MusicCog, MagicMock, MagicMock]:
+    """Build a MusicCog with a stubbed player AND a mocked playlist repo.
+
+    Returns ``(cog, player, repo)`` so tests can drive repo behavior via
+    ``AsyncMock`` returns and assert ``.assert_awaited_with(...)`` after
+    the dispatch lands.
+    """
+    cog, player = _make_cog_and_player()
+
+    repo = MagicMock()
+    repo.save = AsyncMock(return_value=None)
+    repo.load = AsyncMock(return_value=None)
+    repo.list_names = AsyncMock(return_value=[])
+    repo.delete = AsyncMock(return_value=True)
+    cog._playlist_repo = repo  # type: ignore[attr-defined]
+    return cog, player, repo
+
+
+@pytest.mark.asyncio
+async def test_save_playlist_with_queue_persists_and_replies() -> None:
+    cog, player, repo = _make_cog_with_playlist_repo()
+    player.current_track = _t("Current Song")
+    player.queue.upcoming = [_t("Up Next 1"), _t("Up Next 2")]
+    repo.load = AsyncMock(return_value=None)  # name does not exist yet
+
+    resp = await cog.handle_music_request(
+        "save as chill", user_id=1, guild_id=10,
+        tool_args={"action": "save_playlist", "name": "chill"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "Saved" in resp
+    assert "chill" in resp
+    repo.save.assert_awaited_once()
+    args, _ = repo.save.call_args
+    saved_guild, saved_name, saved_tracks = args
+    assert saved_name == "chill"
+    assert len(saved_tracks) == 3  # current + 2 upcoming
+
+
+@pytest.mark.asyncio
+async def test_save_playlist_with_empty_queue_rejects() -> None:
+    cog, player, repo = _make_cog_with_playlist_repo()
+    player.current_track = None
+    player.queue.upcoming = []
+
+    resp = await cog.handle_music_request(
+        "save as chill", user_id=1, guild_id=10,
+        tool_args={"action": "save_playlist", "name": "chill"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "empty" in resp.lower() or "nothing" in resp.lower()
+    repo.save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_save_playlist_existing_name_says_updated() -> None:
+    cog, player, repo = _make_cog_with_playlist_repo()
+    player.current_track = _t("A")
+    player.queue.upcoming = []
+    repo.load = AsyncMock(return_value=[{"title": "old"}])  # name exists
+
+    resp = await cog.handle_music_request(
+        "save", user_id=1, guild_id=10,
+        tool_args={"action": "save_playlist", "name": "chill"},
+    )
+
+    assert "Updated" in resp
+    assert "chill" in resp
+    repo.save.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_save_playlist_missing_name_returns_help() -> None:
+    cog, player, repo = _make_cog_with_playlist_repo()
+
+    resp = await cog.handle_music_request(
+        "save", user_id=1, guild_id=10,
+        tool_args={"action": "save_playlist"},  # no name
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "name" in resp.lower()
+    repo.save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_load_playlist_appends_to_queue() -> None:
+    cog, player, repo = _make_cog_with_playlist_repo()
+    saved_tracks = [
+        {"title": "T1", "url": "u1", "identifier": "i1",
+         "duration_seconds": 60, "source": "youtube", "is_stream": False},
+        {"title": "T2", "url": "u2", "identifier": "i2",
+         "duration_seconds": 90, "source": "youtube", "is_stream": False},
+        {"title": "T3", "url": "u3", "identifier": "i3",
+         "duration_seconds": 120, "source": "youtube", "is_stream": False},
+    ]
+    repo.load = AsyncMock(return_value=saved_tracks)
+
+    resp = await cog.handle_music_request(
+        "load chill", user_id=1, guild_id=10,
+        tool_args={"action": "load_playlist", "name": "chill"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "Loaded" in resp
+    assert "3 tracks" in resp
+    # queue.add was called once per track
+    assert player.queue.add.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_load_playlist_missing_returns_silent_error() -> None:
+    cog, player, repo = _make_cog_with_playlist_repo()
+    repo.load = AsyncMock(return_value=None)
+
+    resp = await cog.handle_music_request(
+        "load chill", user_id=1, guild_id=10,
+        tool_args={"action": "load_playlist", "name": "chill"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "no playlist" in resp.lower()
+    player.queue.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_load_playlist_missing_name_returns_help() -> None:
+    cog, player, repo = _make_cog_with_playlist_repo()
+
+    resp = await cog.handle_music_request(
+        "load", user_id=1, guild_id=10,
+        tool_args={"action": "load_playlist"},
+    )
+
+    assert "name" in resp.lower()
+    repo.load.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_playlists_returns_alphabetical_names() -> None:
+    cog, player, repo = _make_cog_with_playlist_repo()
+    repo.list_names = AsyncMock(return_value=["chill", "deep-focus", "gym"])
+
+    resp = await cog.handle_music_request(
+        "list my playlists", user_id=1, guild_id=10,
+        tool_args={"action": "list_playlists"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "chill" in resp
+    assert "deep-focus" in resp
+    assert "gym" in resp
+    repo.list_names.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_list_playlists_empty_returns_friendly_message() -> None:
+    cog, player, repo = _make_cog_with_playlist_repo()
+    repo.list_names = AsyncMock(return_value=[])
+
+    resp = await cog.handle_music_request(
+        "list", user_id=1, guild_id=10,
+        tool_args={"action": "list_playlists"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "no saved" in resp.lower() or "no playlists" in resp.lower()
+
+
+@pytest.mark.asyncio
+async def test_delete_playlist_removes_and_replies() -> None:
+    cog, player, repo = _make_cog_with_playlist_repo()
+    repo.delete = AsyncMock(return_value=True)
+
+    resp = await cog.handle_music_request(
+        "forget chill", user_id=1, guild_id=10,
+        tool_args={"action": "delete_playlist", "name": "chill"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "Deleted" in resp
+    assert "chill" in resp
+
+
+@pytest.mark.asyncio
+async def test_delete_playlist_missing_returns_silent_error() -> None:
+    cog, player, repo = _make_cog_with_playlist_repo()
+    repo.delete = AsyncMock(return_value=False)
+
+    resp = await cog.handle_music_request(
+        "forget nonexistent", user_id=1, guild_id=10,
+        tool_args={"action": "delete_playlist", "name": "nonexistent"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "no playlist" in resp.lower()
+
+
+@pytest.mark.asyncio
+async def test_delete_playlist_missing_name_returns_help() -> None:
+    cog, player, repo = _make_cog_with_playlist_repo()
+
+    resp = await cog.handle_music_request(
+        "delete", user_id=1, guild_id=10,
+        tool_args={"action": "delete_playlist"},
+    )
+
+    assert "name" in resp.lower()
+    repo.delete.assert_not_awaited()

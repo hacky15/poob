@@ -36,6 +36,58 @@ if TYPE_CHECKING:
 log = get_logger("discord.music_cog")
 
 
+def _track_to_dict(track: Track) -> dict:
+    """Project a :class:`Track` into the persisted-playlist shape.
+
+    Stream URLs are intentionally omitted — they expire (~6 h on YouTube)
+    and the player resolves them lazily at play time via :class:`AsyncYTDL`.
+    See ``docs/plans/music-named-playlists.md``.
+    """
+    return {
+        "title": track.title,
+        "url": track.url,
+        "identifier": track.identifier,
+        "duration_seconds": int(track.duration.total_seconds()) if track.duration else None,
+        "source": track.source.value if hasattr(track.source, "value") else str(track.source),
+        "is_stream": track.is_stream,
+    }
+
+
+def _track_from_dict(
+    data: dict, requester_id: int, requester_name: str,
+) -> Track:
+    """Rebuild a :class:`Track` from a persisted-playlist dict.
+
+    The requester fields are populated with the loader's identity (the
+    person calling ``load_playlist``), not the original saver — matches
+    "loaded by X" semantics in the queue display.
+    """
+    from datetime import timedelta
+
+    from poob.music.queue import TrackSource
+
+    duration = (
+        timedelta(seconds=int(data["duration_seconds"]))
+        if data.get("duration_seconds") is not None
+        else None
+    )
+    source_raw = data.get("source", "youtube")
+    try:
+        source = TrackSource(source_raw)
+    except (KeyError, ValueError):
+        source = TrackSource.YOUTUBE
+    return Track(
+        title=data["title"],
+        url=data["url"],
+        duration=duration,
+        requester_id=requester_id,
+        requester_name=requester_name,
+        identifier=data.get("identifier"),
+        source=source,
+        is_stream=bool(data.get("is_stream", False)),
+    )
+
+
 class MusicCog(commands.Cog, name="Music"):
     """YouTube music player with real-time TTS mixing.
 
@@ -51,6 +103,7 @@ class MusicCog(commands.Cog, name="Music"):
         poob_brain: PoobBrain | None = None,
         get_voice_session=None,  # Callable[[int], VoiceSession | None]
         setup_voice_session=None,  # async (vc, channel, is_stage=False) -> VoiceSession | None
+        playlist_repo=None,  # GuildPlaylistsRepository | None — named-playlist persistence
     ) -> None:
         self.bot = bot
         self.config = config
@@ -59,6 +112,10 @@ class MusicCog(commands.Cog, name="Music"):
         # Wire-up callback to set up STT + wake word + dual pipeline on a
         # VC the music cog connected itself. See _auto_join_requester_vc.
         self._setup_voice_session = setup_voice_session
+        # Optional per-guild named-playlist store. None disables the
+        # save/load/list/delete actions with a friendly soft error. See
+        # docs/plans/music-named-playlists.md.
+        self._playlist_repo = playlist_repo
 
         self._ytdl = AsyncYTDL(cookie_file=config.music_ytdl_cookie_file)
         self._players: dict[int, GuildMusicPlayer] = {}  # guild_id → player
@@ -274,6 +331,7 @@ class MusicCog(commands.Cog, name="Music"):
         effect = (tool_args or {}).get("effect")
         time_arg = (tool_args or {}).get("time")
         mode = (tool_args or {}).get("mode")
+        playlist_name = (tool_args or {}).get("name")
 
         log.info("music.action", action=action, query=query[:60] if query else "",
                  value=value, user=user_id)
@@ -480,6 +538,62 @@ class MusicCog(commands.Cog, name="Music"):
                 if len(not_found) > 3:
                     head += f" (+{len(not_found) - 3} more)"
             return f"{head}."
+
+        # --- Named playlists (save / load / list / delete) ---
+        # Per-guild persistent store. The repo is optional at cog-init
+        # time so tests can run without a DB; production wires one in
+        # via main.py. See docs/plans/music-named-playlists.md.
+
+        if action in {"save_playlist", "load_playlist", "delete_playlist"}:
+            if self._playlist_repo is None:
+                return "[SILENT]Playlists aren't configured on this stack yet."
+            name_clean = (playlist_name or "").strip()
+            if not name_clean:
+                return "[SILENT]Name your playlist?"
+            guild_id_str = str(guild.id)
+
+            if action == "save_playlist":
+                upcoming = list(player.queue.upcoming)
+                current = player.current_track
+                tracks_to_save = ([current] if current else []) + upcoming
+                if not tracks_to_save:
+                    return "[SILENT]Nothing to save — queue is empty."
+                payload = [_track_to_dict(t) for t in tracks_to_save]
+                existed = await self._playlist_repo.load(guild_id_str, name_clean) is not None
+                await self._playlist_repo.save(guild_id_str, name_clean, payload)
+                verb = "Updated" if existed else "Saved"
+                count = len(payload)
+                return (
+                    f"[SILENT]{verb} playlist '{name_clean}' with {count} track"
+                    f"{'s' if count != 1 else ''}."
+                )
+
+            if action == "load_playlist":
+                stored = await self._playlist_repo.load(guild_id_str, name_clean)
+                if stored is None:
+                    return f"[SILENT]No playlist named '{name_clean}'."
+                tracks = [_track_from_dict(d, user_id, requester_name) for d in stored]
+                for track in tracks:
+                    player.queue.add(track)
+                count = len(tracks)
+                return (
+                    f"[SILENT]Loaded playlist '{name_clean}' — {count} track"
+                    f"{'s' if count != 1 else ''} queued."
+                )
+
+            # action == "delete_playlist"
+            removed = await self._playlist_repo.delete(guild_id_str, name_clean)
+            if not removed:
+                return f"[SILENT]No playlist named '{name_clean}'."
+            return f"[SILENT]Deleted playlist '{name_clean}'."
+
+        if action == "list_playlists":
+            if self._playlist_repo is None:
+                return "[SILENT]Playlists aren't configured on this stack yet."
+            names = await self._playlist_repo.list_names(str(guild.id))
+            if not names:
+                return "[SILENT]No saved playlists yet."
+            return f"[SILENT]Playlists: {', '.join(names)}."
 
         # Default: "play" action (or unrecognized action treated as play)
         if not query or len(query) < 2:

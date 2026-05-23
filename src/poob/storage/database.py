@@ -253,6 +253,18 @@ async def init_schema(conn: aiosqlite.Connection) -> None:
             ON exclusion_items(discord_user_id);
         CREATE INDEX IF NOT EXISTS idx_exclusion_items_active
             ON exclusion_items(is_active);
+
+        CREATE TABLE IF NOT EXISTS guild_playlists (
+            id TEXT PRIMARY KEY,
+            guild_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            tracks_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_guild_playlists_unique
+            ON guild_playlists(guild_id, LOWER(name));
         """
     )
     await conn.commit()

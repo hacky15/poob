@@ -56,6 +56,7 @@ class ScraperBot(commands.Bot):
         self.listing_repo: ListingRepository | None = None
         self.poob_brain: PoobBrain | None = None
         self.feedback_repo: FeedbackRepository | None = None
+        self.playlist_repo: object | None = None  # GuildPlaylistsRepository — wired in main.py
         self.voice_session_factory: object | None = None  # Callable[[VoiceClient], VoiceSession]
         self._cogs_loaded = False
         self._owner_notified = False
@@ -126,6 +127,7 @@ class ScraperBot(commands.Bot):
                 poob_brain=self.poob_brain,
                 get_voice_session=_get_voice_session,
                 setup_voice_session=_setup_voice_session,
+                playlist_repo=self.playlist_repo,
             )
             self.add_cog(music_cog)
 

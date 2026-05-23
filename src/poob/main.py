@@ -120,6 +120,10 @@ async def startup() -> None:
     scan_log_repo = ScanLogRepository(conn)
     feedback_repo = FeedbackRepository(conn)
     exclusion_repo = ExclusionRepository(conn)
+    # Per-guild named playlists (music save/load/list/delete actions).
+    # See docs/decisions/music-named-playlists.md.
+    from poob.storage.repositories.playlist_repo import GuildPlaylistsRepository
+    playlist_repo = GuildPlaylistsRepository(conn)
 
     # --- Initialize LLM providers ---
     # 1. Browser LLM: browser-use's own ChatOllama (required by browser-use 0.12+)
@@ -651,6 +655,7 @@ async def startup() -> None:
     bot.listing_repo = listing_repo
     bot.poob_brain = poob_brain
     bot.feedback_repo = feedback_repo
+    bot.playlist_repo = playlist_repo
     bot.voice_session_factory = voice_session_factory
 
     log.info("Startup complete. Launching bot and scheduler.")

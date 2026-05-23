@@ -3,7 +3,7 @@ type: architecture
 status: active
 date: 2026-04-07
 tags: [music, audio, ytdl, ffmpeg]
-related: [[voice-architecture]] [[one-handler-music-contract]] [[poobbrain-architecture]] [[music-autoplay-cascade]]
+related: [[voice-architecture]] [[one-handler-music-contract]] [[poobbrain-architecture]] [[music-autoplay-cascade]] [[music-named-playlists]]
 ---
 
 # Music player — yt-dlp + FFmpeg + audioop PCM mixer
@@ -83,7 +83,7 @@ A ~200-400 ms audio gap on respawn is intentional, documented in [[ffmpeg-effect
 
 ## Tool-action surface (music_assistant)
 
-20 actions total, dispatched by ``MusicCog.handle_music_request`` against structured tool args from the brain:
+24 actions total, dispatched by ``MusicCog.handle_music_request`` against structured tool args from the brain:
 
 | Group | Actions |
 |---|---|
@@ -94,6 +94,7 @@ A ~200-400 ms audio gap on respawn is intentional, documented in [[ffmpeg-effect
 | Effects | ``apply_effect`` (preset name via ``effect`` arg) |
 | Position | ``seek`` (multi-format ``time`` string via [[music-seek]]) |
 | Autoplay | ``autoplay`` (``mode`` arg: ``on`` / ``off`` / ``status``) |
+| Playlists | ``save_playlist``, ``load_playlist``, ``list_playlists``, ``delete_playlist`` (``name`` arg for save/load/delete) |
 
 ``queue_many`` takes a ``tracks: list[str]`` for multi-song requests in one utterance; see [[music-queue-many-tool]]. ``apply_effect`` takes an ``effect`` name from the registry; see [[music-filter-presets]]. Move / remove / clear take 1-based positions to match the user-facing ``format_queue()`` display; see [[music-queue-primitives]]. ``autoplay`` toggles continuous playback via the cascade in [[music-autoplay-cascade]].
 
@@ -109,12 +110,17 @@ When the queue drains and ``GuildMusicPlayer.autoplay_enabled`` is ``True``, the
 
 Per-guild state lives on the player instance (no SQLite persistence yet, by design — matches the ``loop_mode`` / ``shuffle`` / ``volume`` pattern). Resets on bot restart. See [[music-autoplay-cascade]] for the cascade design + deferred items (Last.fm tier, LLM-as-DJ "vibe" mode, persistence).
 
+## Named playlists (per-guild SQLite persistence)
+
+Separate from runtime player state, the cog persists user-defined named track collections per guild via ``GuildPlaylistsRepository`` ([storage/repositories/playlist_repo.py](../../src/poob/storage/repositories/playlist_repo.py)) and the ``guild_playlists`` table (added in the [storage/database.py](../../src/poob/storage/database.py) bootstrap). Four brain actions — ``save_playlist`` / ``load_playlist`` / ``list_playlists`` / ``delete_playlist`` — let voice or text users save the current queue under a name and recall it later. Case-insensitive uniqueness per guild; cross-guild isolation guaranteed by the ``guild_id`` partition. Stream URLs are NOT persisted (they expire ~6 h on YouTube); the player's existing resolve-at-play path rebuilds them. See [[music-named-playlists]] for the full design + alternatives.
+
 ## Key files
 
 - [music/queue.py](../../src/poob/music/queue.py) — Track dataclass, MusicQueue with loop / shuffle / move / previous
 - [music/effects.py](../../src/poob/music/effects.py) — Effect preset registry + ``resolve_effect_chain``
 - [music/ytdl.py](../../src/poob/music/ytdl.py) — AsyncYTDL wrapper + pre-download
 - [music/autoplay.py](../../src/poob/music/autoplay.py) — ``AutoplayEngine`` cascade (ytmusicapi → ytdl mix URL → history shuffle)
+- [storage/repositories/playlist_repo.py](../../src/poob/storage/repositories/playlist_repo.py) — ``GuildPlaylistsRepository`` (per-guild named-playlist persistence)
 - [music/player.py](../../src/poob/music/player.py) — MixingAudioSource + BufferedAudioSource + GuildMusicPlayer (position tracker + respawn loop + replay / previous / set_effect + autoplay queue-empty hook)
 - [discord_bot/cogs/music_cog.py](../../src/poob/discord_bot/cogs/music_cog.py) — handler entrypoint (action dispatch)
 
