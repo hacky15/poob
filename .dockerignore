@@ -13,6 +13,7 @@ __pycache__
 browser_profiles/
 data/*
 !data/hey_poob.onnx
+!data/hey_poob_v3.onnx
 docs/
 tests/
 logs.md
