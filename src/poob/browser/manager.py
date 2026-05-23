@@ -151,22 +151,40 @@ class BrowserManager:
     async def get_page(self) -> object:
         """Get the current CDP Page for direct browser control.
 
-        Returns the browser-use Page object from the active BrowserSession,
-        enabling direct navigation, JS evaluation, and content extraction
-        without creating an LLM Agent.
+        Returns the browser-use Page object from the active BrowserSession.
+        If the session has no open tab (browser-use 0.12+ does not auto-open
+        one on ``start()``), materializes a fresh tab via ``new_page()`` so
+        callers always get a usable Page instead of ``None``.
 
         Returns:
             A browser-use Page instance.
 
         Raises:
-            RuntimeError: If browser has not been started or no page is active.
+            RuntimeError: If browser has not been started, or if both
+                ``get_current_page()`` and ``new_page()`` fail to produce
+                a usable tab.
         """
         if self._browser is None:
             raise RuntimeError("Browser not started. Call start() first.")
         page = await self._browser.get_current_page()
-        if page is None:
-            raise RuntimeError("No active page in browser session.")
-        return page
+        if page is not None:
+            return page
+        # No active tab — materialize one. This is the post-`start()` state
+        # for a fresh browser-use 0.12+ session; without this, the patrol
+        # engine's `_browser.get_page()` raises "No active page in browser
+        # session" on every cycle and the auth-only paths never run.
+        log.info("No active page in browser session; creating a new tab")
+        try:
+            new_page = await self._browser.new_page()
+        except Exception as exc:
+            raise RuntimeError(
+                f"No active page in browser session and new_page() failed: {exc}",
+            ) from exc
+        if new_page is None:
+            raise RuntimeError(
+                "No active page in browser session and new_page() returned None.",
+            )
+        return new_page
 
     def get_session(self) -> BrowserSession:
         """Get the underlying BrowserSession for CDP access.
