@@ -56,6 +56,7 @@ class ScraperBot(commands.Bot):
         self.listing_repo: ListingRepository | None = None
         self.poob_brain: PoobBrain | None = None
         self.feedback_repo: FeedbackRepository | None = None
+        self.scan_log_repo: object | None = None  # ScanLogRepository — wired in main.py; consumed by AdminCog.!logs
         self.playlist_repo: object | None = None  # GuildPlaylistsRepository — wired in main.py
         self.spotify_resolver: object | None = None  # SpotifyPlaylistResolver — wired in main.py
         self.lyrics_resolver: object | None = None  # LyricsResolver — wired in main.py
@@ -81,7 +82,11 @@ class ScraperBot(commands.Bot):
             ))
 
         if self.site_registry:
-            self.add_cog(AdminCog(bot=self, registry=self.site_registry))
+            self.add_cog(AdminCog(
+                bot=self,
+                registry=self.site_registry,
+                scan_log_repo=self.scan_log_repo,
+            ))
 
         self.add_cog(SearchCog(
             bot=self,

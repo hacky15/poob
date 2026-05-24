@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -10,6 +11,32 @@ import aiosqlite
 import pytest
 
 from poob.storage.models import Deal, DealScore, Listing, ScanLog, WatchItem
+
+# Snapshot ``os.environ`` at conftest-import time — BEFORE any test
+# imports anything that transitively pulls in ``browser_use``. The
+# ``browser_use`` package calls ``load_dotenv()`` at module import
+# (venv/.../browser_use/agent/service.py:32), which pollutes
+# ``os.environ`` process-wide with the project's ``.env`` values. That
+# pollution leaks into AppConfig() calls in tests that probe default
+# values, breaking ``test_cloud_llm_defaults`` /
+# ``test_browser_defaults`` / ``test_env_file_loading`` whenever they
+# run alongside any test that touches the browser subsystem.
+# The autouse fixture below restores the env to this snapshot before
+# every test.
+_PRE_DOTENV_ENV: dict[str, str] = dict(os.environ)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_dotenv_pollution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip any env keys that ``browser_use``'s module-level
+    ``load_dotenv()`` leaked into the process. Restores the pre-import
+    snapshot so tests that probe AppConfig defaults see a clean
+    environment regardless of which other tests ran first in the
+    session.
+    """
+    for key in list(os.environ.keys()):
+        if key not in _PRE_DOTENV_ENV:
+            monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture

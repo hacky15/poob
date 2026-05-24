@@ -1,6 +1,6 @@
 ---
 type: decision
-status: proposed
+status: active
 date: 2026-04-23
 tags: [voice, wake-word, training, data-capture]
 related: [[wake-word-dual-gate]] [[wake-gate-over-rejection-during-music]] [[voice-architecture]]

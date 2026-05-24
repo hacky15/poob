@@ -1,6 +1,6 @@
 ---
 type: decision
-status: proposed
+status: active
 date: 2026-04-23
 tags: [brain, llm, groq, tool-calling, latency]
 related: [[brain-routing-audit]] [[poobbrain-architecture]] [[voice-pipeline-optimization-prompt]]

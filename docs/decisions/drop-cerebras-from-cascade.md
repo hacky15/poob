@@ -1,6 +1,6 @@
 ---
 type: decision
-status: proposed
+status: active
 date: 2026-04-23
 tags: [brain, llm, cascade, cerebras, latency]
 related: [[brain-routing-audit]] [[groq-gpt-oss-20b-swap]] [[poobbrain-architecture]] [[vlm-cascade-operational-findings]]

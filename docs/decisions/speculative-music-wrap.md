@@ -1,6 +1,6 @@
 ---
 type: decision
-status: proposed
+status: active
 date: 2026-04-23
 tags: [brain, music, voice, tts, latency, concurrency]
 related: [[voice-architecture]] [[music-player-architecture]] [[poobbrain-architecture]] [[toob-voice-filter-chain]] [[voice-pipeline-optimization-prompt]]

@@ -1,6 +1,6 @@
 ---
 type: decision
-status: proposed
+status: active
 date: 2026-04-23
 tags: [voice, stt, deepgram, latency]
 related: [[voice-architecture]] [[voice-pipeline-optimization-prompt]]

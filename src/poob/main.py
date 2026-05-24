@@ -669,6 +669,7 @@ async def startup() -> None:
     bot.listing_repo = listing_repo
     bot.poob_brain = poob_brain
     bot.feedback_repo = feedback_repo
+    bot.scan_log_repo = scan_log_repo
     bot.playlist_repo = playlist_repo
     bot.spotify_resolver = spotify_resolver
     bot.lyrics_resolver = lyrics_resolver

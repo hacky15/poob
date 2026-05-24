@@ -1,6 +1,6 @@
 ---
 type: decision
-status: proposed
+status: active
 date: 2026-04-27
 tags: [brain, music, voice, llm-tool-calling, robustness]
 related: [[poobbrain-architecture]] [[speculative-music-wrap]] [[music-tool-hallucination]] [[one-handler-music-contract]] [[groq-gpt-oss-20b-swap]]
