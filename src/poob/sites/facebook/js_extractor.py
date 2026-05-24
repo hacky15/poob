@@ -68,16 +68,34 @@ EXTRACT_LISTINGS_JS = """() => {
             }
         }
 
-        // Freshness hint: "Just listed", "Listed X hours ago", etc.
-        // Primary: find as a standalone line
-        // Fallback: regex across full text for concatenated layouts
+        // Freshness hint. The Python-side _parse_freshness accepts every
+        // FB badge format observed in prod; this regex must too, or the
+        // signal is silently dropped before it ever reaches the parser
+        // (a freshness miss cascades all the way to the notify gate,
+        // where posted_at=None kills the deal regardless of VLM score).
+        // Covers: "Just listed/posted", "[Listed|Posted|Updated] N
+        // (minutes|hours|days|weeks|months|years) ago", "a minute ago",
+        // "a few minutes ago", "about an hour ago", abbreviated units
+        // ("5m ago", "3h ago", "2d ago", "2w ago", "3mo ago"),
+        // "yesterday", "last week".
+        const FRESH_RE = new RegExp(
+            "(?:Just (?:listed|posted)"
+            + "|(?:Listed|Posted|Updated)?\\s*"
+            + "(?:about\\s+)?(?:an?\\s+|a\\s+few\\s+)?"
+            + "(?:\\d+\\s*)?"
+            + "(?:minutes?|mins?|hours?|hrs?|days?|weeks?|months?|mos?|years?|yr)\\s+ago"
+            + "|\\d+\\s*[mhdwy]\\s+ago"
+            + "|yesterday(?:\\s+at\\s+[\\d:\\sAPMapm]+)?"
+            + "|last\\s+week)",
+            "i"
+        );
         let freshness = '';
-        const freshLine = lines.find(l => /^(Just listed|Listed\\s)/i.test(l));
+        // Primary: standalone line that *starts* with a known badge prefix.
+        const freshLine = lines.find(l => /^(Just (?:listed|posted)|Listed\\s|Posted\\s|Updated\\s)/i.test(l));
         if (freshLine) freshness = freshLine;
+        // Fallback: scan full text for any of the broadened forms.
         if (!freshness) {
-            const freshMatch = allText.match(
-                /(Just listed|Listed (?:\\d+ (?:minutes?|hours?|days?|weeks?) ago|yesterday|last week))/i
-            );
+            const freshMatch = allText.match(FRESH_RE);
             if (freshMatch) freshness = freshMatch[0];
         }
 

@@ -13,7 +13,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from poob.sites.facebook.detail_extractor import extract_listing_details
+from poob.sites.facebook.detail_extractor import (
+    EnrichmentRedirectedError,
+    extract_listing_details,
+)
 from poob.storage.models import Listing
 
 
@@ -239,3 +242,67 @@ class TestDetailExtractionImmutability:
         ))
         await extract_listing_details(mock_page, base_listing)
         assert base_listing.image_urls == original_images
+
+
+# --- Redirect detection (cross-contamination) ---
+
+
+class TestEnrichmentRedirected:
+    @pytest.mark.asyncio
+    async def test_raises_on_redirect_to_different_listing(self, mock_page):
+        """Original title is substantive; enriched title shares zero overlap
+        (Facebook served a recommendation page for a sold listing)."""
+        original = Listing(
+            id="listing-3", site="facebook_marketplace",
+            external_id="333",
+            title="Complete backyard patio set including chairs",
+            listing_url="https://www.facebook.com/marketplace/item/333",
+        )
+        mock_page.evaluate = AsyncMock(side_effect=_make_evaluate(
+            sjs_result=[_sjs_payload(
+                title="Husqvarna Riding Lawnmower",
+                description="Lawnmower with bagger",
+                price=2500.0,
+            )],
+        ))
+        with pytest.raises(EnrichmentRedirectedError):
+            await extract_listing_details(mock_page, original)
+
+    @pytest.mark.asyncio
+    async def test_does_not_raise_on_partial_overlap(self, mock_page):
+        """Sufficient overlap (>=30%) means same listing — no raise."""
+        original = Listing(
+            id="listing-4", site="facebook_marketplace",
+            external_id="444",
+            title="PlayStation 5 Console with 2 Controllers",
+            listing_url="https://www.facebook.com/marketplace/item/444",
+        )
+        mock_page.evaluate = AsyncMock(side_effect=_make_evaluate(
+            sjs_result=[_sjs_payload(
+                title="PlayStation 5 Console Bundle",  # 3/7 = 43% overlap
+                description="Bundle with games",
+            )],
+        ))
+        result = await extract_listing_details(mock_page, original)
+        # Should succeed and use the enriched data.
+        assert result.description == "Bundle with games"
+
+    @pytest.mark.asyncio
+    async def test_does_not_raise_when_original_title_too_short(self, mock_page):
+        """Originals with <3 words skip the overlap check — short titles
+        like "FREE" or "Just listed" should be overridden by enriched data."""
+        original = Listing(
+            id="listing-5", site="facebook_marketplace",
+            external_id="555",
+            title="FREE",  # 1 word, below 3-word minimum
+            listing_url="https://www.facebook.com/marketplace/item/555",
+        )
+        mock_page.evaluate = AsyncMock(side_effect=_make_evaluate(
+            sjs_result=[_sjs_payload(
+                title="Husqvarna Riding Lawnmower",
+                description="Free lawnmower",
+            )],
+        ))
+        # No raise — short original titles are intentionally overridden.
+        result = await extract_listing_details(mock_page, original)
+        assert result.title == "Husqvarna Riding Lawnmower"

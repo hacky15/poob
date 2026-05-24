@@ -37,6 +37,18 @@ from poob.utils.logging import get_logger
 log = get_logger("sites.facebook.detail_extractor")
 
 
+class EnrichmentRedirectedError(Exception):
+    """Detail page redirected to a different listing.
+
+    Raised when the enriched title does not overlap with the original
+    listing's title (Facebook serves a "similar item" recommendation page
+    when the original was sold, deleted, or made private). Callers should
+    treat the listing as permanently unavailable: do not feed to VLM, mark
+    evaluated so it stops appearing in the backlog.
+
+    See docs/incidents/husqvarna-enrichment-cross-contamination.
+    """
+
 
 async def extract_listing_details(
     page: object,
@@ -264,11 +276,12 @@ async def extract_listing_details(
                     enriched_title=detail.title[:50],
                     overlap_pct=round(len(overlap) / max_words * 100),
                 )
-                detail = DetailPageData(
-                    posted_at=detail.posted_at,
-                    condition=detail.condition,
+                # Detail data is fully contaminated — posted_at and
+                # condition came from the wrong listing's page too. Raise
+                # so callers skip VLM and mark the listing evaluated.
+                raise EnrichmentRedirectedError(
+                    f"redirect: {listing.title[:40]!r} -> {detail.title[:40]!r}"
                 )
-                extraction_tier = "none"
 
         # Build enriched listing — never overwrite existing good data
         title = detail.title or listing.title
@@ -335,6 +348,9 @@ async def extract_listing_details(
         )
         return enriched
 
+    except EnrichmentRedirectedError:
+        # Propagate to caller — listing is unrecoverable, not a transient failure.
+        raise
     except Exception as exc:
         log.warning(
             "Detail extraction failed, keeping existing data",

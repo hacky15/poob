@@ -43,3 +43,43 @@ class TestJsExtractorConstants:
     def test_extract_listing_urls_targets_marketplace_items(self):
         """EXTRACT_LISTING_URLS_JS should target marketplace item links."""
         assert "/marketplace/item/" in EXTRACT_LISTING_URLS_JS
+
+
+class TestFreshnessRegexBroadened:
+    """The JS-side freshness regex must accept every badge format the
+    Python parser accepts — narrower JS = silent timestamp drop."""
+
+    def test_handles_just_listed(self):
+        assert "Just (?:listed|posted)" in EXTRACT_LISTINGS_JS
+
+    def test_handles_posted_prefix(self):
+        assert "Posted" in EXTRACT_LISTINGS_JS
+
+    def test_handles_updated_prefix(self):
+        assert "Updated" in EXTRACT_LISTINGS_JS
+
+    def test_handles_word_form_quantifiers(self):
+        # "a few minutes ago" / "an hour ago" / "a minute ago"
+        assert "an?" in EXTRACT_LISTINGS_JS
+        assert "few" in EXTRACT_LISTINGS_JS
+
+    def test_handles_about_prefix(self):
+        # "about an hour ago"
+        assert "about" in EXTRACT_LISTINGS_JS
+
+    def test_handles_abbreviated_units(self):
+        # "5m ago", "3h ago", "2d ago", "2w ago"
+        assert "mhdwy" in EXTRACT_LISTINGS_JS
+
+    def test_handles_month_units(self):
+        # "3 months ago" / "3mo ago"
+        assert "months?|mos?" in EXTRACT_LISTINGS_JS
+
+    def test_handles_year_units(self):
+        assert "years?|yr" in EXTRACT_LISTINGS_JS
+
+    def test_handles_yesterday(self):
+        assert "yesterday" in EXTRACT_LISTINGS_JS
+
+    def test_handles_last_week(self):
+        assert "last\\s+week" in EXTRACT_LISTINGS_JS

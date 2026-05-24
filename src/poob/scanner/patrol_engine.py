@@ -87,6 +87,15 @@ class PatrolCycleResult:
     duration_seconds: float = 0.0
     data_source: str = ""  # "graphql", "dom_fallback", or "mixed"
     suspected_shadow_ban: bool = False
+    # Funnel telemetry — populated by the engine at each pipeline stage
+    # so the cycle can emit one structured "funnel.cycle" log line. The
+    # gap between any two consecutive counts is the attrition at that
+    # stage. Diagnosing "why aren't notifications firing" starts here.
+    enriched: int = 0
+    enrichment_redirected: int = 0
+    enrichment_failed: int = 0
+    timestamp_coverage_pct: int = 0  # % of enriched listings with posted_at
+    vlm_evaluated: int = 0
 
 
 def _graphql_to_listing(gql: GraphQLListingData) -> Listing:
@@ -465,7 +474,7 @@ class PatrolEngine:
 
             if enrich_page is not None:
                 new_listings = await self._enrich_listings_from_detail_pages(
-                    enrich_page, new_listings,
+                    enrich_page, new_listings, result,
                 )
                 # Phase 1.75 ground truth: how many listings gained a
                 # posted_at from enrichment? If this stays at 0, the
@@ -479,6 +488,10 @@ class PatrolEngine:
                     with_timestamp=with_ts,
                     no_timestamp=len(new_listings) - with_ts,
                 )
+                if new_listings:
+                    result.timestamp_coverage_pct = round(
+                        100.0 * with_ts / len(new_listings)
+                    )
             else:
                 log.info(
                     "Detail-page enrichment skipped — no browser available",
@@ -539,6 +552,24 @@ class PatrolEngine:
             source=result.data_source,
             shadow_ban=result.suspected_shadow_ban,
             duration=f"{result.duration_seconds:.1f}s",
+        )
+
+        # Funnel telemetry — one line per cycle so each stage's attrition
+        # is visible without grepping. Gap between consecutive counts is
+        # where listings die; gap between vlm_evaluated and deals_found is
+        # where the VLM cut things; gap between deals_found and
+        # deals_notified is where the freshness/threshold gates cut things.
+        log.info(
+            "funnel.cycle",
+            total_seen=result.total_listings_seen,
+            new=result.new_listings,
+            enriched=result.enriched,
+            redirected=result.enrichment_redirected,
+            enrich_failed=result.enrichment_failed,
+            ts_coverage_pct=result.timestamp_coverage_pct,
+            vlm_evaluated=result.vlm_evaluated,
+            deals=result.deals_found,
+            notified=result.deals_notified,
         )
 
         return result
@@ -1165,7 +1196,10 @@ class PatrolEngine:
     _ENRICHMENT_CONCURRENCY = 2
 
     async def _enrich_listings_from_detail_pages(
-        self, page: object, listings: list[Listing]
+        self,
+        page: object,
+        listings: list[Listing],
+        result: PatrolCycleResult | None = None,
     ) -> list[Listing]:
         """Visit detail pages to enrich new listings with descriptions.
 
@@ -1188,7 +1222,10 @@ class PatrolEngine:
         Returns:
             The same list with listings replaced by enriched versions.
         """
+        from dataclasses import replace as _replace
+
         from poob.sites.facebook.detail_extractor import (
+            EnrichmentRedirectedError,
             extract_listing_details,
         )
 
@@ -1224,6 +1261,7 @@ class PatrolEngine:
 
         enriched_count = 0
         failed_count = 0
+        redirected_count = 0
 
         # Per-listing timeout: bounds each detail-page navigation so one
         # stuck page can't stall the batch. A page that hits this timeout
@@ -1233,7 +1271,7 @@ class PatrolEngine:
 
         async def _enrich_one(idx: int, tab: object) -> None:
             """Enrich a single listing using the given browser tab."""
-            nonlocal enriched_count, failed_count
+            nonlocal enriched_count, failed_count, redirected_count
             listing = listings[idx]
             try:
                 enriched = await asyncio.wait_for(
@@ -1244,6 +1282,7 @@ class PatrolEngine:
                     (enriched.description and not listing.description)
                     or enriched.title != listing.title
                     or enriched.price != listing.price
+                    or (enriched.posted_at is not None and listing.posted_at is None)
                 )
                 if got_new_data:
                     listings[idx] = enriched
@@ -1260,6 +1299,29 @@ class PatrolEngine:
                         desc_len=len(enriched.description or ""),
                         price=enriched.price,
                     )
+            except EnrichmentRedirectedError as exc:
+                # FB served a "similar item" recommendation page — the
+                # original listing is sold/deleted/private. Mark evaluated
+                # so it never reappears as backlog, flag for VLM exclusion
+                # this cycle, and count as a redirect (not a failure).
+                redirected_count += 1
+                listings[idx] = _replace(
+                    listing,
+                    raw_data={
+                        **(listing.raw_data or {}),
+                        "_enrichment_redirected": True,
+                    },
+                )
+                if listing.id:
+                    try:
+                        await self._listing_repo.mark_evaluated([listing.id])
+                    except Exception:
+                        pass
+                log.info(
+                    "Detail enrichment redirected — skipping VLM",
+                    external_id=listing.external_id,
+                    reason=str(exc)[:120],
+                )
             except asyncio.TimeoutError:
                 failed_count += 1
                 log.warning(
@@ -1352,9 +1414,14 @@ class PatrolEngine:
             attempted=len(needs_enrichment),
             enriched=enriched_count,
             failed=failed_count,
+            redirected=redirected_count,
             concurrency=len(all_tabs),
             batches=batch_count,
         )
+        if result is not None:
+            result.enriched = enriched_count
+            result.enrichment_redirected = redirected_count
+            result.enrichment_failed = failed_count
         return listings
 
     # Garbage/stale/category/location filtering is now handled by the unified
@@ -1371,6 +1438,25 @@ class PatrolEngine:
         Unevaluated listings from previous cycles are included in the backlog.
         """
         interests = await self._watchlist_repo.list_active()
+
+        # Drop listings whose detail-page enrichment redirected to a
+        # different listing (FB serves a recommendation feed when the
+        # original is sold/deleted/private). They have no description and
+        # no verified timestamp, so VLM evaluation is wasted and the
+        # freshness gate auto-rejects them. They were already marked
+        # evaluated in _enrich_one so they won't reappear as backlog.
+        pre_redirect_count = len(listings)
+        listings = [
+            l for l in listings
+            if not (l.raw_data or {}).get("_enrichment_redirected")
+        ]
+        redirected_dropped = pre_redirect_count - len(listings)
+        if redirected_dropped:
+            log.info(
+                "Excluded redirected listings from VLM",
+                dropped=redirected_dropped,
+                remaining=len(listings),
+            )
 
         # Prioritize: watchlist-matched listings first, then the rest.
         # A listing is watchlist-matched if either:
@@ -1476,6 +1562,8 @@ class PatrolEngine:
 
         if not self._smart_deal_radar or not to_evaluate:
             return eval_result, to_evaluate
+
+        result.vlm_evaluated = len(to_evaluate)
 
         try:
             pipeline_results = await self._smart_deal_radar.evaluate_batch(
