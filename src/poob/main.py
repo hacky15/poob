@@ -643,6 +643,7 @@ async def startup() -> None:
                 brain=poob_brain,
                 vad_config=vad_config,
                 dual_pipeline_config=dual_pipeline_config,
+                use_silero_vad=config.voice_use_silero_vad,
             )
             session.filler_player = filler_player
             return session

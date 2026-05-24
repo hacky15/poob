@@ -291,6 +291,11 @@ class AppConfig(BaseSettings):
     # --- Voice Chat ---
     voice_enabled: bool = True  # Enable voice channel integration
     voice_stt_provider: str = "groq_whisper"  # groq_whisper | local_whisper
+    # Neural VAD opt-in. Default False keeps the energy-RMS gate as the
+    # active end-of-speech detector (matches behavior pre-refactor). Flip
+    # to True after validating the shared-model Silero path in a real
+    # voice channel. See docs/decisions/voice-latency-phase1-silero-reenabled.md.
+    voice_use_silero_vad: bool = False
     voice_tts_provider: str = "google_tts"  # google_tts | edge_tts | kokoro
     voice_tts_voice: str = "en-US-RogerNeural"  # Edge TTS voice name (fallback)
     voice_tts_rate: str = "+35%"  # Speech rate for Edge TTS (fallback, match Fenrir pacing)

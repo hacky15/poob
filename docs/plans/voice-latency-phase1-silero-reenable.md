@@ -1,8 +1,9 @@
 ---
 type: plan
-status: active
+status: superseded
 date: 2026-05-24
 tags: [voice, latency, vad, silero, refactor]
+superseded_by: [[voice-latency-phase1-silero-reenabled]]
 related: [[voice-latency-optimization]] [[voice-latency-phase2-filler-dispatch]] [[voice-latency-phase3-kokoro]] [[voice-architecture]]
 ---
 

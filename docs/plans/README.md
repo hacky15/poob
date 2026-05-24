@@ -14,12 +14,12 @@ Plans are not permanent. Once the feature ships, the plan can be archived — th
 
 ### Active
 
-- [[voice-latency-phase1-silero-reenable]] — shared Silero VAD model + per-user state + lazy init so Phase 1 ("highest impact" item) can come back on without the per-user-load stall (2026-05-24)
 - [[wake-word-v4-phonetic-neighbor-followup]] — close v3's `Hey Noob/Tube` + bare-stem gaps via phrase-weight reshaping (2026-05-16)
 - [[voice-latency-optimization]] — VAD + STT + TTS improvements; some items shipped, others open
 
 ### Superseded / historical
 
+- [[voice-latency-phase1-silero-reenable]] — shipped 2026-05-24 (default OFF — opt-in via VOICE_USE_SILERO_VAD); landed via [[voice-latency-phase1-silero-reenabled]] decision
 - [[voice-latency-phase3-kokoro-ship]] — shipped 2026-05-23; landed via [[voice-latency-phase3-kokoro]] decision
 - [[music-synced-lyrics]] — v1 shipped 2026-05-23; landed via [[music-synced-lyrics]] decision (live overlay-tick loop queued as v2 follow-up; see deferred items in the plan)
 - [[music-spotify-playlist-import]] — shipped 2026-05-23; landed via [[music-spotify-playlist-import]] decision

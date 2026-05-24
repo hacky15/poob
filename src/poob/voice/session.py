@@ -183,6 +183,7 @@ class VoiceSession:
         vad_config: VADConfig | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
         dual_pipeline_config: dict | None = None,
+        use_silero_vad: bool = False,
     ) -> None:
         self.voice_client = voice_client
         self.stt_providers = stt_providers
@@ -222,13 +223,15 @@ class VoiceSession:
                     wake_model=os.path.basename(model_path) if model_path else "hey_jarvis (testing)",
                 )
 
-        # Silero VAD disabled — creates per-user model instances that are too slow
-        # to initialize in multi-user channels. Energy-based VAD with packet gap
-        # detection is reliable. Silero can be re-enabled once we solve:
-        # 1. Shared model instance with per-user state management
-        # 2. Lazy initialization (not on every new user join)
-        self._silero_vad = None
-        self._use_silero = False
+        # Neural VAD (Silero). One shared SileroVADProcessor per session —
+        # the per-user model issue that disabled Phase 1 is resolved by
+        # the per-user state save/restore inside the processor. Model
+        # load is deferred to the first speech frame so multi-user
+        # joins don't stall. Gated by VOICE_USE_SILERO_VAD (default
+        # False so this commit is a no-op on rollout; operator opts in
+        # to A/B). See docs/decisions/voice-latency-phase1-silero-reenabled.md.
+        self._silero_vad: SileroVADProcessor | None = None
+        self._use_silero = bool(use_silero_vad)
 
         self._user_buffers: dict[int, UserAudioBuffer] = {}
         self._speech_detectors: dict[int, SpeechDetector] = {}
@@ -652,10 +655,13 @@ class VoiceSession:
         Only used when dual pipeline is not active.
         """
         if self._use_silero:
+            if self._silero_vad is None:
+                self._silero_vad = SileroVADProcessor()
             if user_id not in self._speech_detectors:
                 self._speech_detectors[user_id] = SpeechDetector(
                     user_id=user_id,
                     on_utterance=self._on_utterance_detected,
+                    vad_processor=self._silero_vad,
                 )
             return self._speech_detectors[user_id]
 

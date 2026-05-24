@@ -20,6 +20,7 @@ Write a new note (don't edit in place) when a decision is reversed or materially
 - [[music-on-the-fly-filter-respawn]] — change effects mid-track via FFmpeg respawn with ``-ss`` seek; shared mechanism for replay / previous / set_effect (2026-05-12, active)
 - [[music-seek]] — ``seek`` action with multi-format parser (``2:30``, ``2m30s``, ``150``, ``+10``, ``-1m``); reuses respawn machinery (2026-05-12, active)
 - [[music-now-playing-embed-buttons]] — 3 new persistent-view buttons (previous / replay / leave) + active-effect embed indicator; cross-cog leave reaches VoiceCog (2026-05-12, active)
+- [[voice-latency-phase1-silero-reenabled]] — shared `SileroVADProcessor` per session + per-user `_state`/`_context` clone-restore + lazy model load; gated by `VOICE_USE_SILERO_VAD` (default OFF for A/B) (2026-05-24, active)
 - [[voice-latency-phase2-filler-dispatch]] — wake up `FillerPlayer`: dispatch filler clip via `create_task(self._maybe_play_filler())` at the start of `_process_single_response`; routes through existing `_play_audio` + mutex for natural queue-behind semantics (2026-05-24, active)
 - [[voice-latency-phase3-kokoro]] — Kokoro-82M as opt-in TTS provider via `VOICE_TTS_PROVIDER=kokoro`; eliminates cloud round-trip when active; cloud cascade is the fallback (2026-05-23, active)
 - [[music-synced-lyrics]] — `lyrics` brain action; LRCLIB synced → plain cascade via `syncedlyrics`; inline `[SILENT]` reply (live overlay-tick loop deferred to v2 — needs channel-ref plumbing) (2026-05-23, active)

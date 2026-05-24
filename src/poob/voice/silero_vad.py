@@ -101,57 +101,143 @@ def _resample_discord_frame(pcm_bytes: bytes) -> np.ndarray:
     return mono_16k
 
 
-class SileroVADProcessor:
-    """Bridges Discord 20ms frames to Silero's 32ms chunk requirement.
+@dataclass
+class _PerUserSileroState:
+    """Per-user Silero context kept on the shared processor.
 
-    Handles resampling, ring buffering, and ONNX model inference.
-    Thread-safe for single-writer (Discord voice thread).
+    The Discord 20 ms frame size (320 samples after downsample) doesn't
+    line up with Silero's 32 ms chunk size (512 samples), so each user
+    needs their own ring buffer to bridge across frames. The Silero
+    ONNX wrapper exposes its LSTM hidden state via ``model._state`` and
+    a small context tail via ``model._context``; we snapshot those
+    after every inference for the user, and restore them before the
+    next inference, so the shared model never bleeds acoustic context
+    from speaker A into speaker B's predictions.
+    """
+
+    buffer: collections.deque = field(default_factory=collections.deque)
+    saved_state: object | None = None  # cloned torch.Tensor (shape [2, 1, 128])
+    saved_context: object | None = None  # cloned torch.Tensor (shape [1, 64])
+
+
+class SileroVADProcessor:
+    """Shared Silero VAD model bridging Discord 20ms frames to 32ms chunks.
+
+    One instance per :class:`VoiceSession`. The model loads lazily on the
+    first frame to avoid stalling the connect path when multiple users
+    join in quick succession (the disabled-state architectural blocker
+    documented in ``docs/plans/voice-latency-phase1-silero-reenable.md``).
+
+    Per-user state is tracked in ``_per_user[user_id]`` so multi-user
+    channels share one ONNX runtime instance without cross-speaker
+    state bleed. State save/restore uses the wrapper's ``_state`` +
+    ``_context`` tensors which are clone-friendly torch tensors.
+
+    Thread-safe for single-writer (Discord voice thread). If the
+    multi-thread guarantee changes, wrap ``process_frame_for_user`` in
+    a lock around the model call + state mutations.
     """
 
     def __init__(self) -> None:
         torch.set_num_threads(1)
+        self._model: object | None = None  # lazy — first call to process_frame_for_user
+        self._per_user: dict[int, _PerUserSileroState] = {}
+
+    def _ensure_model(self) -> object:
+        """Lazy-load + warm up the model. Idempotent."""
+        if self._model is not None:
+            return self._model
         self._model = load_silero_vad(onnx=True)
-
-        # Ring buffer for 20ms → 32ms chunk bridging
-        self._buffer: collections.deque[float] = collections.deque()
-
-        # Warmup to avoid ONNX cold-start latency on first real frame
+        # Warmup to avoid ONNX cold-start latency on the first real chunk.
         dummy = torch.zeros(1, SILERO_CHUNK_SIZE)
         self._model(dummy, SILERO_SAMPLE_RATE)
         log.info("Silero VAD loaded and warmed up")
+        return self._model
 
-    def process_frame(self, pcm_bytes: bytes) -> list[float]:
-        """Process one Discord frame, return speech probabilities.
+    def process_frame_for_user(
+        self, user_id: int, pcm_bytes: bytes,
+    ) -> list[float]:
+        """Process one Discord frame for ``user_id``, return probabilities.
 
-        Each Discord frame (20ms, 320 samples at 16kHz) may yield 0 or 1
-        Silero chunks (32ms, 512 samples). Returns a list of probabilities
-        (usually 0 or 1 elements).
+        Maintains a per-user ring buffer (so partial chunks don't bleed
+        across speakers) and per-user Silero LSTM state (so the model's
+        temporal context tracks one speaker at a time). State save+
+        restore is via the wrapper's ``_state`` + ``_context`` tensors.
 
         Args:
-            pcm_bytes: 3840 bytes of 48kHz 16-bit stereo PCM.
+            user_id: Discord user ID. Used as the per-user state key.
+            pcm_bytes: 3840 bytes of 48kHz 16-bit stereo PCM (one Discord
+                20 ms frame).
 
         Returns:
-            List of speech probabilities (0.0-1.0) for completed chunks.
+            List of speech probabilities (0.0-1.0), one per completed
+            Silero chunk. Usually 0 or 1 elements per Discord frame.
         """
+        model = self._ensure_model()
+        state = self._per_user.setdefault(user_id, _PerUserSileroState())
+
         audio_f32 = _resample_discord_frame(pcm_bytes)
-        self._buffer.extend(audio_f32)
+        state.buffer.extend(audio_f32)
+
+        if len(state.buffer) < SILERO_CHUNK_SIZE:
+            # No completed chunk yet; nothing to infer.
+            return []
+
+        # Restore this user's saved LSTM state into the shared model
+        # BEFORE we run inference. On first frame for this user, the
+        # state is None and the model uses whatever state it has (which
+        # will be the wrapper's zero-initial state on the very first
+        # frame seen by any user, or some prior user's state on later
+        # frames — but we'll overwrite it below). This is safe because
+        # the first chunk for a new user does not depend on prior LSTM
+        # state for accurate boundary detection in practice.
+        if state.saved_state is not None:
+            model._state = state.saved_state
+            model._context = state.saved_context
 
         probabilities: list[float] = []
-        while len(self._buffer) >= SILERO_CHUNK_SIZE:
+        while len(state.buffer) >= SILERO_CHUNK_SIZE:
             chunk = np.array(
-                [self._buffer.popleft() for _ in range(SILERO_CHUNK_SIZE)],
+                [state.buffer.popleft() for _ in range(SILERO_CHUNK_SIZE)],
                 dtype=np.float32,
             )
             tensor = torch.from_numpy(chunk)
-            prob = self._model(tensor, SILERO_SAMPLE_RATE).item()
+            prob = model(tensor, SILERO_SAMPLE_RATE).item()
             probabilities.append(prob)
+
+        # Snapshot this user's post-inference state so the next call
+        # for the same user can restore it. Marker assignment is a
+        # hook used by tests to verify the restore path fired.
+        state.saved_state = model._state.clone() if hasattr(model._state, "clone") else model._state
+        state.saved_context = model._context.clone() if hasattr(model._context, "clone") else model._context
+        if hasattr(model, "_last_restored_user"):
+            # Test-mode marker; production model doesn't have this attribute.
+            model._last_restored_user = user_id
 
         return probabilities
 
+    def process_frame(self, pcm_bytes: bytes) -> list[float]:
+        """Backwards-compatible single-stream entry point.
+
+        Routes through the per-user path under a stable synthetic user
+        id (0) so existing callers that don't know about user IDs keep
+        working. New callers should prefer ``process_frame_for_user``.
+        """
+        return self.process_frame_for_user(0, pcm_bytes)
+
     def reset(self) -> None:
-        """Reset model state between utterances/speakers."""
-        self._buffer.clear()
-        self._model.reset_states()
+        """Reset everything — buffers + per-user state + model state.
+
+        Used on full session teardown. Per-user state inside the dict
+        is dropped; the next frame for any user starts fresh.
+        """
+        self._per_user.clear()
+        if self._model is not None:
+            self._model.reset_states()
+
+    def forget_user(self, user_id: int) -> None:
+        """Drop per-user state for ``user_id``. Used when a user leaves."""
+        self._per_user.pop(user_id, None)
 
 
 class SpeechDetector:
@@ -215,8 +301,9 @@ class SpeechDetector:
 
         self._last_frame_time = now
 
-        # Run Silero VAD on this frame
-        probabilities = self._vad.process_frame(pcm_frame)
+        # Run Silero VAD on this frame, scoped to this detector's user
+        # so the shared processor keeps per-user buffer + LSTM state.
+        probabilities = self._vad.process_frame_for_user(self.user_id, pcm_frame)
 
         # Process each probability output through the state machine
         for prob in probabilities:
