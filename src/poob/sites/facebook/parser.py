@@ -393,11 +393,29 @@ def _dict_to_listing(data: dict, site: str) -> Listing:
 def _parse_freshness(text: str) -> datetime | None:
     """Parse Facebook freshness text into a datetime estimate.
 
+    Handles all observed Facebook badge formats. Examples that map to
+    ~now (and therefore PASS the just-listed gate):
+
+    - "Just listed"
+    - "Listed a few minutes ago" / "a few minutes ago"
+    - "Listed an hour ago" / "an hour ago" / "about an hour ago"
+    - "Listed 5 minutes ago" / "5 minutes ago" / "5m ago"
+    - "Posted 5 minutes ago" / "Updated 5 minutes ago"
+
+    Examples that map to older times (safely fail the just-listed gate):
+
+    - "Listed yesterday" / "yesterday at 3:14 PM"
+    - "Listed 3 days ago" / "3d ago"
+    - "Listed last week" / "last week"
+    - "Listed 2 weeks ago" / "2w ago"
+
     Args:
-        text: Freshness string like "Just listed", "Listed 3 hours ago", etc.
+        text: Any text that may contain a Facebook freshness badge.
 
     Returns:
-        Estimated posted_at datetime, or None if unparseable.
+        Estimated ``posted_at`` datetime, or None if no recognized
+        pattern matched. Callers should treat None as "no usable
+        freshness signal" rather than "definitely fresh."
     """
     if not text:
         return None
@@ -405,32 +423,62 @@ def _parse_freshness(text: str) -> datetime | None:
     text = text.strip().lower()
     now = datetime.now(timezone.utc)
 
-    if "just listed" in text:
+    # "Just listed" — strongest fresh signal.
+    if "just listed" in text or "just posted" in text:
         return now
 
-    # "Listed X minutes ago"
-    m = re.search(r"(\d+)\s*minutes?\s*ago", text)
+    # "a few minutes ago" / "Listed a few minutes ago" — treat as ~3 min.
+    if "a few minutes ago" in text or "few minutes ago" in text:
+        return now - timedelta(minutes=3)
+
+    # "an hour ago" / "about an hour ago" — single-word "an" instead of "1".
+    if re.search(r"(?:about\s+)?an\s+hour\s+ago", text):
+        return now - timedelta(hours=1)
+
+    # "a minute ago" — single-word "a" before "minute".
+    if re.search(r"\ba\s+minute\s+ago\b", text):
+        return now - timedelta(minutes=1)
+
+    # "X minutes ago" / "5m ago" — covers full and abbreviated forms,
+    # with or without "Listed"/"Posted"/"Updated" prefix.
+    m = re.search(r"(\d+)\s*(?:minutes?|mins?|m)\s*ago", text)
     if m:
         return now - timedelta(minutes=int(m.group(1)))
 
-    # "Listed X hours ago"
-    m = re.search(r"(\d+)\s*hours?\s*ago", text)
+    # "X hours ago" / "5h ago".
+    m = re.search(r"(\d+)\s*(?:hours?|hrs?|h)\s*ago", text)
     if m:
         return now - timedelta(hours=int(m.group(1)))
 
-    # "Listed yesterday"
+    # "yesterday" / "yesterday at 3:14 PM" — treat as 24h.
     if "yesterday" in text:
         return now - timedelta(hours=24)
 
-    # "Listed X days ago"
-    m = re.search(r"(\d+)\s*days?\s*ago", text)
+    # "X days ago" / "3d ago".
+    m = re.search(r"(\d+)\s*(?:days?|d)\s*ago", text)
     if m:
         return now - timedelta(days=int(m.group(1)))
 
-    # "Listed X weeks ago"
-    m = re.search(r"(\d+)\s*weeks?\s*ago", text)
+    # "last week" — treat as 7d.
+    if "last week" in text:
+        return now - timedelta(weeks=1)
+
+    # "X weeks ago" / "2w ago".
+    m = re.search(r"(\d+)\s*(?:weeks?|w)\s*ago", text)
     if m:
         return now - timedelta(weeks=int(m.group(1)))
+
+    # "X months ago" / "2mo ago".
+    m = re.search(r"(\d+)\s*(?:months?|mos?|mo)\s*ago", text)
+    if m:
+        # Approximate — calendar months vary, 30d is good enough for
+        # gating purposes (this is well past every notification cutoff).
+        return now - timedelta(days=30 * int(m.group(1)))
+
+    # "X years ago".
+    m = re.search(r"(\d+)\s*(?:years?|y|yr)\s*ago", text)
+    if m:
+        return now - timedelta(days=365 * int(m.group(1)))
 
     return None
 

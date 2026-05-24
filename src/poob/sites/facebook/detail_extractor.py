@@ -189,7 +189,12 @@ async def extract_listing_details(
         except Exception as exc:
             log.debug("DOM extraction failed", error=str(exc)[:100])
 
-        # Tier 3: Page markdown for freshness + seller (last resort)
+        # Tier 3: Page markdown for freshness + seller (last resort).
+        # The regex catches every observed Facebook badge format because
+        # missing a freshness signal cascades all the way to the notify
+        # gate, where `posted_at is None` silently kills the deal even
+        # if the VLM scored it INCREDIBLE. See
+        # docs/incidents/dresser-incredible-deal-blocked-no-timestamp.
         if detail.posted_at is None or not detail.seller_name:
             try:
                 page_text = ""
@@ -202,9 +207,24 @@ async def extract_listing_details(
                     import re
                     from poob.sites.facebook.parser import _parse_freshness
 
+                    # Broader pattern: catch freshness badges with OR without
+                    # the "Listed " / "Posted " / "Updated " prefix, plus
+                    # word-form numbers ("an hour ago", "a few minutes ago")
+                    # and abbreviated units ("5m ago", "3h ago", "2d ago").
+                    # Prefix is optional because some FB layouts show the
+                    # badge as bare text near a "Posted" label rather than
+                    # an inline "Posted X ago" sentence.
                     fresh_match = re.search(
-                        r"(Just listed|Listed (?:\d+ (?:minutes?|hours?|days?|weeks?) ago"
-                        r"|yesterday|last week))",
+                        r"("
+                        r"Just (?:listed|posted)"
+                        r"|(?:Listed|Posted|Updated)?\s*"
+                        r"(?:about\s+)?(?:an?\s+|a\s+few\s+)?"
+                        r"(?:\d+\s*)?"
+                        r"(?:minutes?|mins?|hours?|hrs?|days?|weeks?|months?|mos?|years?|yr)\s+ago"
+                        r"|yesterday(?:\s+at\s+[\d:\sAPMapm]+)?"
+                        r"|last\s+week"
+                        r"|\d+[mhdwy]\s+ago"
+                        r")",
                         page_text, re.IGNORECASE,
                     )
                     if fresh_match:

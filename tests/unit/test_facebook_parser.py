@@ -2,15 +2,126 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from poob.sites.facebook.parser import (
     _merge_marketplace_urls,
     _parse_csv_listings,
+    _parse_freshness,
     _parse_json_robust,
     _parse_text_listings,
     parse_listings,
 )
+
+
+class TestParseFreshness:
+    """Coverage for every Facebook freshness-badge format we've observed.
+
+    Each "fresh" pattern MUST resolve to a posted_at within a few minutes
+    of now so it passes the 10-minute public notification gate. Each
+    "stale" pattern MUST resolve to something older than that gate.
+    """
+
+    def _now(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    @pytest.mark.parametrize("text", [
+        "Just listed",
+        "Just posted",
+        "just listed in Madison",
+        "JUST LISTED",
+    ])
+    def test_just_listed_variants(self, text: str) -> None:
+        result = _parse_freshness(text)
+        assert result is not None
+        assert (self._now() - result).total_seconds() < 60
+
+    @pytest.mark.parametrize("text,expected_min", [
+        ("a minute ago", 1),
+        ("a few minutes ago", 3),
+        ("Listed a few minutes ago", 3),
+        ("3 minutes ago", 3),
+        ("Listed 5 minutes ago", 5),
+        ("Posted 12 minutes ago", 12),
+        ("Updated 7 minutes ago", 7),
+        ("5m ago", 5),
+        ("12m ago", 12),
+        ("3 mins ago", 3),
+    ])
+    def test_minutes_ago_variants(self, text: str, expected_min: int) -> None:
+        result = _parse_freshness(text)
+        assert result is not None
+        delta = (self._now() - result).total_seconds() / 60
+        # ±1 minute tolerance for now() drift between call and assertion.
+        assert abs(delta - expected_min) <= 1
+
+    @pytest.mark.parametrize("text,expected_h", [
+        ("an hour ago", 1),
+        ("about an hour ago", 1),
+        ("Listed an hour ago", 1),
+        ("2 hours ago", 2),
+        ("Listed 5 hours ago", 5),
+        ("Updated 3 hours ago", 3),
+        ("5h ago", 5),
+        ("2 hrs ago", 2),
+    ])
+    def test_hours_ago_variants(self, text: str, expected_h: int) -> None:
+        result = _parse_freshness(text)
+        assert result is not None
+        delta_h = (self._now() - result).total_seconds() / 3600
+        assert abs(delta_h - expected_h) < 0.1
+
+    @pytest.mark.parametrize("text", [
+        "yesterday",
+        "Listed yesterday",
+        "yesterday at 3:14 PM",
+        "Posted yesterday",
+    ])
+    def test_yesterday_variants(self, text: str) -> None:
+        result = _parse_freshness(text)
+        assert result is not None
+        delta_h = (self._now() - result).total_seconds() / 3600
+        assert abs(delta_h - 24) < 0.1
+
+    @pytest.mark.parametrize("text,expected_d", [
+        ("3 days ago", 3),
+        ("Listed 5 days ago", 5),
+        ("3d ago", 3),
+        ("last week", 7),
+        ("Listed last week", 7),
+        ("2 weeks ago", 14),
+        ("Listed 3 weeks ago", 21),
+        ("2w ago", 14),
+        ("Listed 2 months ago", 60),
+        ("3 mo ago", 90),
+    ])
+    def test_older_variants(self, text: str, expected_d: int) -> None:
+        result = _parse_freshness(text)
+        assert result is not None
+        delta_d = (self._now() - result).total_seconds() / 86400
+        assert abs(delta_d - expected_d) < 0.5
+
+    def test_unparseable_returns_none(self) -> None:
+        assert _parse_freshness("hello world") is None
+        assert _parse_freshness("") is None
+        assert _parse_freshness("   ") is None
+        # Just numbers without time unit
+        assert _parse_freshness("5") is None
+
+    def test_freshness_in_longer_text(self) -> None:
+        """Real page-text use case: freshness embedded in a page dump."""
+        haystack = (
+            "Solid wood vintage dresser with mirror\n"
+            "$120\n"
+            "Listed 5 minutes ago in Appleton, WI\n"
+            "Condition: Used - good\n"
+        )
+        result = _parse_freshness(haystack)
+        assert result is not None
+        delta_min = (self._now() - result).total_seconds() / 60
+        assert abs(delta_min - 5) < 1
 
 
 # ---------------------------------------------------------------------------
