@@ -65,6 +65,28 @@ class TestBuildPatrolUrl:
         url = build_patrol_url("electronics", radius=0)
         assert "radius=" not in url
 
+    def test_url_with_location_slug_anchors_path(self):
+        """When location_slug is provided, FB sees /marketplace/<slug>/..."""
+        url = build_patrol_url("electronics", location_slug="madison")
+        assert "/marketplace/madison/category/" in url
+        # And the standard params still ride along.
+        assert "deliveryMethod=local_pick_up" in url
+        assert "sortBy=creation_time_descend" in url
+
+    def test_url_with_location_slug_no_category(self):
+        """Location-only sweep (no category) hits /marketplace/<slug>?..."""
+        url = build_patrol_url(None, location_slug="appleton")
+        assert "/marketplace/appleton?" in url
+        assert "/category/" not in url
+
+    def test_url_location_slug_none_preserves_legacy_format(self):
+        """None location_slug must not regress the original URL shape."""
+        url = build_patrol_url("electronics", location_slug=None)
+        assert "/marketplace/category/" in url
+        assert "/marketplace/" in url
+        # Specifically: NO location segment between marketplace and category.
+        assert "/marketplace//category/" not in url
+
 
 # --- RadiusOscillator ---
 

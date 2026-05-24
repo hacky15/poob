@@ -227,25 +227,39 @@ def build_patrol_url(
     radius: int = 20,
     days_since_listed: int = 1,
     exact: bool = False,
+    location_slug: str | None = None,
 ) -> str:
     """Build a Facebook Marketplace patrol URL for a category or all listings.
+
+    Without a ``location_slug``, the URL hits ``facebook.com/marketplace``
+    with no location anchor — FB then picks a default location based on
+    the request IP / cookies, which in prod often resolves to the Bay
+    Area regardless of the actual outbound IP (verified 2026-05-24).
+    With ``location_slug``, the URL becomes ``/marketplace/<slug>/...``
+    which forces FB to anchor results to that city.
 
     Args:
         category: Application category name (e.g. "electronics"), or None for all.
         radius: Search radius in miles (oscillated for cache busting).
         days_since_listed: Filter to listings posted within this many days.
         exact: Whether to use exact=true parameter.
+        location_slug: FB city slug (e.g. "madison", "appleton", "green-bay").
+            None falls back to FB's default geolocated feed.
 
     Returns:
         Fully formed Facebook Marketplace URL for category browsing.
     """
     base = "https://www.facebook.com/marketplace"
 
+    # Build the path: /marketplace/<location>/category/<cat> when both
+    # are present, /marketplace/<location> when only location, etc.
+    location_part = f"/{location_slug}" if location_slug else ""
     if category:
         slug = CATEGORY_SLUG_MAP.get(category.lower().strip(), category)
-        path = f"/category/{slug}"
+        category_part = f"/category/{slug}"
     else:
-        path = ""
+        category_part = ""
+    path = f"{location_part}{category_part}"
 
     params = [
         "sortBy=creation_time_descend",
@@ -307,6 +321,7 @@ class PatrolScanner:
         fixed_radius: int | None = None,
         scroll_until_stable: bool = True,
         scroll_max_stable_checks: int = 3,
+        default_location_slug: str | None = None,
     ) -> None:
         self._oscillator = radius_oscillator or RadiusOscillator()
         self._scroll_steps = scroll_steps
@@ -315,6 +330,11 @@ class PatrolScanner:
         self._fixed_radius = fixed_radius
         self._scroll_until_stable = scroll_until_stable
         self._scroll_max_stable_checks = scroll_max_stable_checks
+        # Anchors the category-sweep URL to the configured city so FB
+        # serves listings near the user instead of falling back to its
+        # default geolocated feed (which prod showed is often Bay Area
+        # regardless of the actual outbound IP). None disables anchoring.
+        self._default_location_slug = default_location_slug
 
     async def sweep_category(
         self,
@@ -335,7 +355,12 @@ class PatrolScanner:
         """
         radius = self._fixed_radius if self._fixed_radius else self._oscillator.next()
         days = days_since_listed or self._days_since_listed
-        url = build_patrol_url(category, radius=radius, days_since_listed=days)
+        url = build_patrol_url(
+            category,
+            radius=radius,
+            days_since_listed=days,
+            location_slug=self._default_location_slug,
+        )
 
         try:
             await navigate_and_wait(page, url)

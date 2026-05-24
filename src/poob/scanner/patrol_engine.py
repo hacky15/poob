@@ -193,6 +193,7 @@ class PatrolEngine:
             fixed_radius=fixed_radius,
             scroll_until_stable=getattr(config, "patrol_scroll_until_stable", True),
             scroll_max_stable_checks=getattr(config, "patrol_scroll_max_stable_checks", 3),
+            default_location_slug=getattr(config, "marketplace_default_location", None),
         )
 
         # Parse min score from config string

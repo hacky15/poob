@@ -343,18 +343,17 @@ class AnonymousGraphQLClient:
     def _build_variables(self, params: GraphQLSearchParams) -> dict[str, Any]:
         """Build the GraphQL variables JSON for a marketplace search.
 
-        ``commerce_enable_shipping`` is False so FB enforces the lat/lng
-        bounding box. With shipping enabled, FB ignored ``filter_radius_km``
-        and served shipping-only listings from anywhere — verified in prod
-        on 2026-05-24 when 640/750 listings collected over 24h were Bay
-        Area items, dwarfing the 107 Wisconsin listings the user wanted.
-        The DOM sweep (``patrol_scanner.build_patrol_url``) already uses
-        the equivalent ``deliveryMethod=local_pick_up`` URL parameter and
-        correctly returns WI-local listings; mirror that here.
+        ``commerce_enable_shipping`` must stay True. Verified in prod on
+        2026-05-24: setting it False returned 0 listings across every
+        category (FB's anonymous GQL has no local-only mode). The
+        out-of-region listings this lets through are caught by
+        ``LocationTextFilter`` + ``GeoDistanceFilter`` downstream.
+        Location bias is corrected by anchoring the anon-browser DOM
+        sweep URL to the configured city slug instead.
         """
         browse_params: dict[str, Any] = {
             "commerce_enable_local_pickup": True,
-            "commerce_enable_shipping": False,
+            "commerce_enable_shipping": True,
             "commerce_search_and_rp_available": True,
             "commerce_search_and_rp_condition": params.condition,
             "commerce_search_and_rp_ctime_days": params.days_listed,
