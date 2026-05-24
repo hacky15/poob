@@ -184,16 +184,21 @@ class PatrolScheduler:
                 continue
 
             # Per-cycle hard timeout. Without this a single hung browser
-            # call (browser-use's CDP get_page can block indefinitely when
-            # the session degrades after a Discord reconnect) silently
-            # kills the entire scheduler — observed in prod April 25:
-            # one hung anonymous_browser.get_page() ate 51h of patrols.
-            # 5 minutes is well above the typical full-cycle duration
-            # (~10-15s anon-only, ~2-3 min with full enrichment).
+            # call can silently kill the entire scheduler (observed in
+            # prod April 25 — one hung anonymous_browser.get_page() ate
+            # 51h of patrols).
+            #
+            # 600s (10 min) accommodates a full-volume local cycle: 50
+            # detail-page enrichments at ~5s each with 2-tab parallelism
+            # is ~125s, plus triage + VLM evaluation on the survivors
+            # can take another 2-4 min. The previous 300s ceiling was
+            # set when CA-bias was rejecting all but 0-3 listings per
+            # cycle; once b628f7d shipped the WI-anchored URL and 50+
+            # listings reach enrichment, 300s became too tight.
             try:
                 result = await asyncio.wait_for(
                     self._engine.run_patrol_cycle(),
-                    timeout=300.0,
+                    timeout=600.0,
                 )
                 self._last_scan_time = datetime.now(timezone.utc)
                 log.info(
@@ -204,7 +209,7 @@ class PatrolScheduler:
                 )
             except asyncio.TimeoutError:
                 log.error(
-                    "Patrol cycle hung past 300s — abandoned, "
+                    "Patrol cycle hung past 600s — abandoned, "
                     "scheduler continues to next interval",
                 )
             except Exception as exc:

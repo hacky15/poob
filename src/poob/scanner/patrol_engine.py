@@ -1225,12 +1225,21 @@ class PatrolEngine:
         enriched_count = 0
         failed_count = 0
 
+        # Per-listing timeout: bounds each detail-page navigation so one
+        # stuck page can't stall the batch. A page that hits this timeout
+        # is counted as a failure (consecutive_misses increments) so the
+        # early-bail kicks in if many pages hang in a row.
+        _PER_LISTING_TIMEOUT_S = 20.0
+
         async def _enrich_one(idx: int, tab: object) -> None:
             """Enrich a single listing using the given browser tab."""
             nonlocal enriched_count, failed_count
             listing = listings[idx]
             try:
-                enriched = await extract_listing_details(tab, listing)
+                enriched = await asyncio.wait_for(
+                    extract_listing_details(tab, listing),
+                    timeout=_PER_LISTING_TIMEOUT_S,
+                )
                 got_new_data = (
                     (enriched.description and not listing.description)
                     or enriched.title != listing.title
@@ -1251,6 +1260,13 @@ class PatrolEngine:
                         desc_len=len(enriched.description or ""),
                         price=enriched.price,
                     )
+            except asyncio.TimeoutError:
+                failed_count += 1
+                log.warning(
+                    "Detail enrichment timed out",
+                    external_id=listing.external_id,
+                    timeout_s=_PER_LISTING_TIMEOUT_S,
+                )
             except Exception as exc:
                 failed_count += 1
                 log.warning(
