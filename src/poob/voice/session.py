@@ -444,6 +444,32 @@ class VoiceSession:
             except asyncio.QueueEmpty:
                 break
 
+    async def _maybe_play_filler(self) -> None:
+        """Fire a quick filler clip ("Hmm...", "Let me think...", etc.) to
+        mask the LLM-call + TTS-synth latency on the path to the real
+        response. Phase 2 of [[voice-latency-optimization]].
+
+        Fire-and-forget. Skips silently when no filler paths are loaded
+        (e.g., ``generate_fillers`` didn't run at startup), when bytes
+        can't be read, or when ``_play_audio`` itself errors. Routes
+        through the same overlay mechanism the real response uses, so
+        music ducks identically and the real response naturally queues
+        behind via the ``voice_client.is_playing()`` check in the caller.
+        """
+        if not self.filler_player.available:
+            return
+        try:
+            audio = await asyncio.to_thread(self.filler_player.get_filler_bytes)
+        except Exception as exc:
+            log.debug("filler load failed", error=str(exc)[:100])
+            return
+        if not audio:
+            return
+        try:
+            await self._play_audio(audio)
+        except Exception as exc:
+            log.debug("filler play failed", error=str(exc)[:100])
+
     async def _process_single_response(self, user_id: int, user_name: str, transcript: str) -> None:
         """Process a single addressed utterance: LLM → TTS → play.
 
@@ -454,6 +480,16 @@ class VoiceSession:
         t0 = _time.monotonic()
 
         async with self._response_lock:
+            # Phase 2 latency mask: kick off a filler clip ("hmm...",
+            # "let me think...") in parallel with prompt-building +
+            # LLM-call + TTS-synth. The filler queues behind any
+            # in-flight audio; the real response queues behind the
+            # filler via the existing ``voice_client.is_playing()``
+            # gate before ``_play_audio``. See
+            # docs/decisions/voice-latency-phase2-filler-dispatch.md.
+            filler_task = self._loop.create_task(self._maybe_play_filler())
+            self._inflight_tasks.add(filler_task)
+            filler_task.add_done_callback(self._inflight_tasks.discard)
             # Build context prompt. The CURRENT SPEAKER must be unambiguous,
             # but the addressee rule lives in the system prompt now — the
             # earlier user-message version was leaking into tool_call query

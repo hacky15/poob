@@ -75,7 +75,11 @@ pip install silero-vad onnxruntime numpy
 - `src/poob/voice/session.py` — Update echo suppression to use speech probability
 - `pyproject.toml` — Add silero-vad, onnxruntime deps
 
-## Phase 2: Filler Audio (Cheapest UX Win)
+## Phase 2: Filler Audio (Cheapest UX Win) — ✅ SHIPPED 2026-05-24
+
+`FillerPlayer` was instantiated and populated at startup but never actually dispatched a clip — dead code from the original Phase 2 attempt. The ship adds `VoiceSession._maybe_play_filler()` + a `create_task` invocation at the start of `_process_single_response`, routing through the existing `_play_audio` overlay mechanism so music ducks normally and the real response queues behind via the existing `voice_client.is_playing()` mutex. Full decision in [[voice-latency-phase2-filler-dispatch]].
+
+### Original spec (preserved below for context):
 
 ### What
 Play pre-generated "thinking" sounds immediately when end-of-speech fires, masking 1-2s of pipeline processing.
