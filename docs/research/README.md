@@ -15,7 +15,8 @@ When research leads to a commitment, open a matching decision note and link to i
 ### Voice / Brain
 
 - [[dave-handshake-failure-april2026]] — DAVE never completes; bot deaf in voice; Option A workaround (env flag) recommended
-- [[voice-pipeline-optimization-prompt]] — 2026 research prompt: end-to-end latency + accuracy, ready-to-dispatch
+- [[voice-bot-latency-april2026-findings]] — 2026 research dump (response to [[voice-pipeline-optimization-prompt]]); shipped vs deferred mapping included
+- [[voice-pipeline-optimization-prompt]] — 2026 research prompt; resolved by [[voice-bot-latency-april2026-findings]]
 - [[conversation-classifier]] — intelligent address detection for multi-user voice
 - [[wake-word-latency]] — custom wake-word detection + response latency
 - [[wake-word-augmentation-2026]] — 2024-2026 SOTA survey: hard-negative mining, TTS diversity, augmentation sweet spots, top-5 lift recipes for Hey Poob

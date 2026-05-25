@@ -1,9 +1,10 @@
 ---
 type: research
-status: proposed
+status: resolved
 date: 2026-04-23
 tags: [voice, tts, stt, llm, latency, research-prompt]
-related: [[voice-architecture]] [[voice-latency-optimization]] [[wake-word-latency]] [[conversation-classifier]] [[poobbrain-architecture]]
+superseded_by: [[voice-bot-latency-april2026-findings]]
+related: [[voice-bot-latency-april2026-findings]] [[voice-architecture]] [[voice-latency-optimization]] [[wake-word-latency]] [[conversation-classifier]] [[poobbrain-architecture]]
 ---
 
 # Research prompt: voice pipeline latency + accuracy (April 2026)
