@@ -657,6 +657,7 @@ async def startup() -> None:
             tts=[p.name for p in tts_providers],
             brain="PoobBrain",
             dual_pipeline=use_dual,
+            silero_vad=config.voice_use_silero_vad,
         )
 
     # Build Discord bot
