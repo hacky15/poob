@@ -30,12 +30,15 @@ The 6h triage cutoff served measurement, not the product requirement. Every VLM 
 
 ## Decision
 
-**Tighten triage cutoff, but not all the way to the watchlist gate.**
+**Kept the no-posted_at rejection. Backed off the cutoff tightening.**
 
-1. `listing_max_age_hours: int = 6 → 3` — VLM spends budget only on listings within 3h of posting. Tighter than the original 6h but with margin above the 30-min watchlist DM gate so that fresh-but-slowly-enriched listings still reach VLM. **Initial value was 1h; that proved too narrow** — FB's anon ranked feed serves mostly stale-popular listings, so 1h produced `vlm_evaluated=0` for 11 hours straight (verified in prod 2026-05-25). 3h is the smallest value that empirically allows VLM to keep producing scores.
-2. **`FreshnessFilter` rejects `posted_at is None` at `POST_ENRICHMENT`** (skip at PRE_ENRICHMENT remains — the timestamp may still arrive during detail-page extraction). After enrichment, an unverified-age listing cannot fire a notification under any gate, so it must not reach VLM. **This part is load-bearing and stays.**
+The tightening attempts (1h, then 3h) both produced `vlm_evaluated=0` over multi-hour prod windows. The structural problem the user-facing audit revealed isn't fixable by tightening the eval cutoff — FB's anon ranked feed simply doesn't surface listings <3h old in any reliable volume, so any tight cutoff produces zero VLM activity. Settled state:
 
-Combined effect: every listing reaching VLM has a verified timestamp AND is within a window where it might still hit a notification gate by the time evaluation completes. VLM credit is spent only on listings that can plausibly produce a user-visible outcome.
+1. `listing_max_age_hours: int = 6` — back to the original. Eval pool needs to be wide enough to contain *something* or the notification path is structurally dead. The notification gates (10-min public, 30-min watchlist) enforce "just listed" at the product layer; the eval cutoff just keeps day-old garbage out.
+2. **`FreshnessFilter` rejects `posted_at is None` at `POST_ENRICHMENT`.** This is the load-bearing correctness fix — listings reaching VLM without a verified timestamp can never satisfy any notification gate, so spending VLM credit on them is pure waste. Skip at PRE_ENRICHMENT remains (timestamp may still arrive during detail-page extraction).
+3. **`patrol_moderate_interval_seconds: 600 → 300`** — sweep every 5 min during moderate hours instead of every 10 min. More chances to catch listings while they're still in their freshness window. Catches partially for the FB-feed-staleness issue without requiring an identity pool or paid endpoint.
+
+Combined effect: VLM gets a non-empty pool to score, every scored listing has a verified timestamp, and we sweep often enough to occasionally catch a fresh listing. The user-facing notification gates do the rest of the work — they're strict by design and unaffected by the eval cutoff value.
 
 ## Why supersede `just-listed-rework`
 
@@ -44,14 +47,15 @@ The original split-knob decision is still load-bearing for the cleanly-separated
 - The justification for keeping the eval pool wide (backlog recovery, observability) no longer applies. The new `funnel.cycle` log line ([[husqvarna-enrichment-cross-contamination]]) replaces the observability need that the wide eval pool was serving.
 - Backlog recovery via `get_unevaluated(max_age_hours=24)` still runs — backlog listings pass through the same FreshnessFilter and are correctly dropped if stale. The cap was never the right recovery lever; the filter chain is.
 
-## Alternatives considered
+## Alternatives considered (and the journey)
 
-- **Keep 6h, just fix no-posted_at rejection.** Saves the VLM-blind-eval problem but still spends VLM on listings >30min old that can never notify. Half-measure.
-- **Lower to 1h (the original tightening).** Tested in prod — produced `vlm_evaluated=0` for 11 hours because FB rarely shows us listings <1h old in the anon ranked feed. Empirically too tight.
-- **Lower to 0.5h (30 min, matching watchlist gate exactly).** Strictly worse than 1h for the same reason.
+- **1h (first attempt, 2026-05-25 morning).** Reasoning at the time: triage should converge with the widest notification gate (30-min watchlist). Empirically produced `vlm_evaluated=0` for 11 hours straight. Too tight.
+- **3h (second attempt, 2026-05-25 afternoon).** Reasoning: tighter than 6h, looser than 1h, give VLM SOME pool. Still produced `vlm_evaluated=0` for several hours. FB's anon feed simply doesn't surface that much fresh material to us.
+- **6h (settled, 2026-05-25 afternoon).** Acceptance of the empirical reality: the eval pool needs headroom because FB controls what we see. The no-posted_at rejection at POST_ENRICHMENT prevents the no-timestamp leak that was the original problem; the wider cutoff lets enough listings through to keep VLM productive.
+- **0.5h (matching watchlist gate exactly).** Strictly worse than 1h for the same reason; never tested.
 - **Configurable per-stage cutoff (different at pre vs post).** Adds knob complexity without product benefit — the notification gate is the binding constraint regardless.
 
-The 3h value was settled after live prod data showed the structural problem: FB serves stale-popular listings to anon viewers, so the eval pool needs headroom above the user-facing notification gates to maintain a non-zero catch rate. 3h is the smallest value that keeps the pool non-empty without re-burning credit on truly-stale items the notify gate would reject anyway.
+**Lesson learned:** the user-facing notification gates already enforce "just listed" — the eval cutoff is a budget control, not a freshness control. Tightening it cannot make notifications fresher; it only reduces the chance VLM ever sees a listing that could notify. The no-posted_at rejection is the meaningful correctness fix; the cutoff is just the floor.
 
 ## Consequences
 

@@ -83,7 +83,7 @@ class TestPatrolConfig:
 
     def test_patrol_timing_defaults(self, app_config):
         assert app_config.patrol_peak_interval_seconds == 180
-        assert app_config.patrol_moderate_interval_seconds == 600
+        assert app_config.patrol_moderate_interval_seconds == 300
         assert app_config.patrol_offpeak_interval_seconds == 900
         assert app_config.patrol_dead_interval_seconds == 1800
 

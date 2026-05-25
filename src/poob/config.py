@@ -225,7 +225,7 @@ class AppConfig(BaseSettings):
     patrol_inter_listing_delay_max_ms: int = 7000
     # Polling intervals: research shows FB indexing is 3-15 min (eventual consistency)
     patrol_peak_interval_seconds: int = 180  # 3 min (was 5 min)
-    patrol_moderate_interval_seconds: int = 600  # 10 min
+    patrol_moderate_interval_seconds: int = 300  # 5 min (was 10 min, 2026-05-25 — more chances to catch fresh listings before they age out)
     patrol_offpeak_interval_seconds: int = 900  # 15 min
     patrol_dead_interval_seconds: int = 1800  # 30 min
     patrol_peak_hours_start: int = 16
@@ -233,15 +233,17 @@ class AppConfig(BaseSettings):
     patrol_include_all_categories: bool = True
     patrol_days_since_listed: int = 1
     # Evaluation cutoff: listings older than this are dropped from the VLM pipeline.
-    # Set to 3h: tighter than the original 6h (which was burning VLM credit on
-    # listings that could never satisfy the notification gates), looser than
-    # the 1h initial tightening (which produced vlm_evaluated=0 for 11 hours
-    # straight — FB's anon ranked feed serves mostly stale-popular content,
-    # so 1h was structurally too narrow). The POST_ENRICHMENT
-    # FreshnessFilter still rejects no-posted_at listings; that part remains
-    # the load-bearing correctness fix. See
+    # Empirically settled at 6h after the 1h and 3h attempts both produced
+    # vlm_evaluated=0 over multi-hour windows: FB's anon ranked feed surfaces
+    # mostly stale-popular content, so the eval pool needs to be wide enough
+    # to contain SOME listings or VLM never runs. The post-enrichment
+    # FreshnessFilter still rejects no-posted_at listings — that piece is
+    # load-bearing and stays. The user-facing notification gates
+    # (10-min public / 30-min watchlist) are what enforce "just listed"
+    # at product level; eval cutoff is just the rough floor that keeps
+    # VLM from burning credit on day-old garbage. See
     # docs/decisions/triage-freshness-converge-with-notify.md.
-    listing_max_age_hours: int = 3
+    listing_max_age_hours: int = 6
     # Public channel notification cutoff: a deal reaching the public
     # #facebook-marketplace channel must be posted within this many minutes.
     # This is the "just listed AND clearly worth something" product rule.

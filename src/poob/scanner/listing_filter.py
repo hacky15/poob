@@ -316,7 +316,7 @@ class FreshnessFilter:
     name: str = "freshness"
     stage: FilterStage = FilterStage.PRE_ENRICHMENT
     exempt_tags: frozenset[str] = frozenset()
-    max_age_hours: int = 3
+    max_age_hours: int = 6
 
     def __call__(self, listing: Listing) -> FilterVerdict:
         if self.max_age_hours <= 0:
