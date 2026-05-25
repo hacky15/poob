@@ -233,11 +233,15 @@ class AppConfig(BaseSettings):
     patrol_include_all_categories: bool = True
     patrol_days_since_listed: int = 1
     # Evaluation cutoff: listings older than this are dropped from the VLM pipeline.
-    # Tightened from 6h to 1h on 2026-05-25 so triage only spends VLM budget on
-    # listings that have any chance of clearing the user-facing notification
-    # gates (10min public / 30min watchlist). See
+    # Set to 3h: tighter than the original 6h (which was burning VLM credit on
+    # listings that could never satisfy the notification gates), looser than
+    # the 1h initial tightening (which produced vlm_evaluated=0 for 11 hours
+    # straight — FB's anon ranked feed serves mostly stale-popular content,
+    # so 1h was structurally too narrow). The POST_ENRICHMENT
+    # FreshnessFilter still rejects no-posted_at listings; that part remains
+    # the load-bearing correctness fix. See
     # docs/decisions/triage-freshness-converge-with-notify.md.
-    listing_max_age_hours: int = 1
+    listing_max_age_hours: int = 3
     # Public channel notification cutoff: a deal reaching the public
     # #facebook-marketplace channel must be posted within this many minutes.
     # This is the "just listed AND clearly worth something" product rule.
