@@ -2,8 +2,8 @@
 type: architecture
 status: active
 date: 2026-04-07
-tags: [voice, stt, tts, wake-word]
-related: [[poobbrain-architecture]] [[music-player-architecture]] [[wake-word-dual-gate]] [[toob-voice-filter-chain]] [[tts-loudness-speechnorm]]
+tags: [voice, stt, tts, wake-word, vad]
+related: [[poobbrain-architecture]] [[music-player-architecture]] [[wake-word-dual-gate]] [[toob-voice-filter-chain]] [[tts-loudness-speechnorm]] [[voice-latency-phase1-silero-reenabled]] [[voice-latency-phase2-filler-dispatch]] [[voice-latency-phase3-kokoro]]
 ---
 
 # Voice architecture — dual pipeline, Toob, deferred playback, multi-provider cascade
@@ -106,6 +106,19 @@ Because the vibe changes every turn, even if history is full of paranoid respons
 
 Rules in the system prompt: answer what was asked FIRST, then let vibe color delivery. 1-2 sentences max. Never mention or describe the vibe — embody it.
 
+## End-of-speech detection (VAD)
+
+Two paths, operator-selected at deploy time via `VOICE_USE_SILERO_VAD`:
+
+- **Energy-RMS (default).** `UserAudioBuffer` uses a packet-gap + RMS-threshold gate. Cheap (no model), reliable on loud unambiguous speech, but has a long failure tail (5-15 s utterance extension on quiet trailing speech, false-fires on loud non-speech like keyboards/music).
+- **Silero VAD (opt-in).** `SpeechDetector` routes Discord frames through a single per-session `SileroVADProcessor` instance. The processor maintains `_PerUserSileroState` (per-user 320-sample ring buffer + cloned LSTM `_state`/`_context` snapshot) so the model is shared across users without bleeding acoustic context. Model load is deferred to the first speech frame to avoid stalling multi-user joins. Re-enabled 2026-05-24 — see [[voice-latency-phase1-silero-reenabled]]. Default flip pending operator A/B.
+
+`get_or_create_buffer` (in `session.py`) is the single switch — it returns either path based on `use_silero_vad`. Downstream code (utterance callback, STT dispatch) is path-agnostic.
+
+## Filler audio (perceived-latency mask)
+
+After end-of-speech fires, `_process_single_response` dispatches `_maybe_play_filler()` via `create_task` before queueing the real LLM-driven response. Pre-rendered filler clips ("hmm", "let me think...") play immediately via the shared `_play_audio` overlay so music ducks naturally; the real response queues behind the filler via the existing `voice_client.is_playing()` mutex. Shipped 2026-05-24, see [[voice-latency-phase2-filler-dispatch]].
+
 ## Wake word detection
 
 Details in [[wake-word-dual-gate]]. Summary:
@@ -127,6 +140,8 @@ Details in [[wake-word-dual-gate]]. Summary:
 - [voice/session.py](../../src/poob/voice/session.py)
 - [voice/dual_pipeline.py](../../src/poob/voice/dual_pipeline.py)
 - [voice/address_detector.py](../../src/poob/voice/address_detector.py)
-- [voice/audio_buffer.py](../../src/poob/voice/audio_buffer.py)
+- [voice/audio_buffer.py](../../src/poob/voice/audio_buffer.py) — energy-RMS VAD path
+- [voice/silero_vad.py](../../src/poob/voice/silero_vad.py) — Silero VAD path (opt-in)
+- [voice/fillers.py](../../src/poob/voice/fillers.py) — pre-rendered filler clip player
 - [voice/stt.py](../../src/poob/voice/stt.py)
 - [voice/tts.py](../../src/poob/voice/tts.py)

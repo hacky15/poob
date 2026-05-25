@@ -33,7 +33,11 @@ User speaks → Silero VAD (300ms silence timeout) → Filler audio plays instan
 Total actual: ~1.2-1.8s | Perceived: ~0.3-0.5s
 ```
 
-## Phase 1: Silero VAD (Highest Impact — Fixes the Core Problem)
+## Phase 1: Silero VAD (Highest Impact — Fixes the Core Problem) — ✅ SHIPPED 2026-05-24
+
+Landed as opt-in via `VOICE_USE_SILERO_VAD=true`. The processor + detector classes existed since the original Phase 1 attempt but were disabled because each Discord user instantiated a fresh `SileroVADProcessor`, stalling multi-user joins by 5-10 s on the ONNX load. The ship rebuilt the processor as a per-session shared instance with per-user state (`_PerUserSileroState`: ring buffer + cloned LSTM `_state`/`_context` snapshot) and deferred model load to the first speech frame. Default stays OFF until A/B evidence in a real voice channel justifies the default flip. Full decision in [[voice-latency-phase1-silero-reenabled]]; planning trail in [[voice-latency-phase1-silero-reenable]].
+
+### Original spec (preserved below for context):
 
 ### What
 Replace `rms_energy()` threshold with Silero VAD v6 neural network.
