@@ -3,10 +3,12 @@ type: decision
 status: active
 date: 2026-04-22
 tags: [scanner, patrol, notifications, freshness]
-related: [[unified-filter-pipeline]] [[listing-freshness-verification]]
+related: [[unified-filter-pipeline]] [[listing-freshness-verification]] [[triage-freshness-converge-with-notify]]
 ---
 
 # "Just Listed" rework — split freshness knobs + auto-start scheduler
+
+> **Partial update 2026-05-25:** The split-knob design (three separate cutoffs: triage / public / watchlist) still stands. The original `listing_max_age_hours=6` *value* and its "keep eval pool wide for observability" rationale are superseded by [[triage-freshness-converge-with-notify]] — triage is now tightened to 1h and POST_ENRICHMENT rejects no-timestamp listings. The `funnel.cycle` log line replaces the wide-eval observability need.
 
 ## Context
 

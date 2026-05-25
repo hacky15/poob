@@ -233,10 +233,11 @@ class AppConfig(BaseSettings):
     patrol_include_all_categories: bool = True
     patrol_days_since_listed: int = 1
     # Evaluation cutoff: listings older than this are dropped from the VLM pipeline.
-    # Notification cutoffs (below) are what enforce the user-facing "just listed"
-    # product requirement — evaluation can still run on older items so the
-    # watchlist backlog recovery and measurement/observability work.
-    listing_max_age_hours: int = 6
+    # Tightened from 6h to 1h on 2026-05-25 so triage only spends VLM budget on
+    # listings that have any chance of clearing the user-facing notification
+    # gates (10min public / 30min watchlist). See
+    # docs/decisions/triage-freshness-converge-with-notify.md.
+    listing_max_age_hours: int = 1
     # Public channel notification cutoff: a deal reaching the public
     # #facebook-marketplace channel must be posted within this many minutes.
     # This is the "just listed AND clearly worth something" product rule.

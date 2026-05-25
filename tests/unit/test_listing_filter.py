@@ -282,6 +282,57 @@ class TestFreshnessFilter:
         assert self.filt.stage == FilterStage.PRE_ENRICHMENT
 
 
+class TestFreshnessFilterPostEnrichmentRejectsNoTimestamp:
+    """At POST_ENRICHMENT this is the last chance to verify freshness.
+    A listing without posted_at after enrichment can never fire a
+    notification, so spending VLM budget on it is waste."""
+
+    filt = FreshnessFilter(
+        max_age_hours=1,
+        stage=FilterStage.POST_ENRICHMENT,
+    )
+
+    def test_rejects_no_posted_at_at_post_enrichment(self):
+        listing = make_listing(posted_at=None)
+        v = self.filt(listing)
+        assert v.passed is False
+        assert "no posted_at" in v.reason or "verify fresh" in v.reason
+
+    def test_pre_enrichment_still_skips_no_posted_at(self):
+        """Default (PRE_ENRICHMENT) behavior must remain SKIP — the
+        timestamp may still arrive during detail-page enrichment."""
+        pre_filt = FreshnessFilter(
+            max_age_hours=1,
+            stage=FilterStage.PRE_ENRICHMENT,
+        )
+        listing = make_listing(posted_at=None)
+        v = pre_filt(listing)
+        assert v.passed is True
+        assert "skipped" in v.reason
+
+    def test_post_enrichment_passes_fresh_listing(self):
+        listing = make_listing(posted_at=_utc_now() - timedelta(minutes=10))
+        v = self.filt(listing)
+        assert v.passed is True
+
+    def test_post_enrichment_rejects_over_age_listing(self):
+        listing = make_listing(posted_at=_utc_now() - timedelta(hours=2))
+        v = self.filt(listing)
+        assert v.passed is False
+        assert "old" in v.reason
+
+    def test_post_enrichment_disabled_max_age_still_ok_on_none(self):
+        """When max_age_hours<=0 the filter is fully disabled — even
+        no-posted_at listings pass (filter contributes nothing)."""
+        filt = FreshnessFilter(
+            max_age_hours=0,
+            stage=FilterStage.POST_ENRICHMENT,
+        )
+        listing = make_listing(posted_at=None)
+        v = filt(listing)
+        assert v.passed is True
+
+
 # ===================================================================
 # GeoDistanceFilter
 # ===================================================================

@@ -298,20 +298,35 @@ class CategoryFilter:
 class FreshnessFilter:
     """Reject listings older than ``max_age_hours``.
 
-    Runs at both stages:
-    - PRE_ENRICHMENT: checks whatever ``posted_at`` is available from search
-    - POST_ENRICHMENT: checks enriched ``posted_at`` from detail page
+    Stage-specific behavior on missing ``posted_at``:
+
+    - PRE_ENRICHMENT: SKIP (timestamp may still be filled by detail-page
+      enrichment in the next stage; don't drop yet).
+    - POST_ENRICHMENT: REJECT (this is the last chance to enforce
+      freshness; an unverified-age listing here can never fire a
+      notification — every gate downstream requires posted_at — so
+      spending VLM budget on it is waste).
+
+    Supersedes the prior "skip both stages" behavior documented in
+    docs/architecture/listing-freshness-verification.md, replaced by the
+    stricter triage standard in
+    docs/decisions/triage-freshness-converge-with-notify.md.
     """
 
     name: str = "freshness"
     stage: FilterStage = FilterStage.PRE_ENRICHMENT
     exempt_tags: frozenset[str] = frozenset()
-    max_age_hours: int = 6
+    max_age_hours: int = 1
 
     def __call__(self, listing: Listing) -> FilterVerdict:
         if self.max_age_hours <= 0:
             return FilterVerdict.ok(self.name)
         if listing.posted_at is None:
+            if self.stage == FilterStage.POST_ENRICHMENT:
+                return FilterVerdict.reject(
+                    self.name,
+                    "no posted_at after enrichment — cannot verify fresh",
+                )
             return FilterVerdict.skip(self.name)
         now = datetime.now(timezone.utc)
         age_hours = (now - listing.posted_at).total_seconds() / 3600
