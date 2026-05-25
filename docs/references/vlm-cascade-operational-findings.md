@@ -3,7 +3,7 @@ type: reference
 status: active
 date: 2026-03-29
 tags: [vlm, llm, cascade, providers]
-related: [[vlm-triage-pipeline]] [[google-vlm-ipm-undocumented-limit]]
+related: [[vlm-triage-pipeline]] [[google-vlm-ipm-undocumented-limit]] [[groq-gpt-oss-20b-swap]] [[drop-cerebras-from-cascade]]
 ---
 
 # VLM cascade — per-provider operational behavior
@@ -50,20 +50,34 @@ The cascade distinguishes transient rate limits (429, RESOURCE_EXHAUSTED) from p
 
 When 2/3 voters agree and the third task is cancelled, the cancellation must NOT increment the consecutive-failure counter — otherwise healthy providers get demoted for 10 minutes because of successful early exits.
 
-## Tool-caller (brain) cascade (April 7 2026)
+## Tool-caller (brain) cascade
 
-Different from VLM but the same operational pattern. Benchmark for music-assistant / deal routing:
+Different from VLM but the same operational pattern. Original benchmark + cascade order from April 7 is preserved below for historical reference; **current production order has shifted** per [[groq-gpt-oss-20b-swap]] and [[drop-cerebras-from-cascade]].
+
+### Current production order (as of 2026-05-24)
+
+`_groq_with_tools` in [brain/poob.py](../../src/poob/brain/poob.py):
+
+1. Groq `openai/gpt-oss-20b` (primary) — Harmony tool-call format, NOT affected by Groq's parser regression on Meta's `<function=...>` wrapper that broke llama-3.3-70b
+2. NVIDIA NIM `qwen3-next-80b` — different provider, sidesteps Groq rate limits
+3. Groq `meta-llama/llama-4-scout-17b-16e-instruct` — last resort only; over-routes to music_assistant, kept for emergency fallback
+
+Removed from the cascade:
+- Groq `llama-3.3-70b-versatile` — chronic 400 `tool_use_failed` from Groq's parser misreading the model's native `<function=...>` syntax. Open since Jul 2025 upstream.
+- Cerebras `qwen-3-235b-a22b-instruct-2507` — chronic 429-rate-limited, added 200-300ms of dead retry tax per call without ever serving a successful one.
+
+### Historical benchmark (April 7 2026, pre-shift)
+
+Preserved so future audits can trace WHY the order changed. The latency numbers were valid at the time but the practical reliability ratings drove the order shift more than raw latency:
 
 | Provider / Model | Play Latency | Skip Correct? | Tool Support |
 |---|---|---|---|
-| Groq llama-3.3-70b-versatile | 925ms | Yes | Full |
+| Groq llama-3.3-70b-versatile | 925ms | Yes | Full **(now broken via Groq parser regression)** |
 | Groq llama-4-scout-17b | 858ms | Yes | Full but over-aggressive ("Did you get offended?" → plays "Big Ole Freak") |
-| Cerebras qwen-3-235b | 752ms | Yes | Full |
+| Cerebras qwen-3-235b | 752ms | Yes | Full **(429-throttled in production; dropped)** |
 | NVIDIA qwen3-next-80b | 930ms | Yes | Full |
 | Groq llama-3.1-8b-instant | 518ms | ERR 400 | Partial (fails on short msgs) |
 | Groq llama-3.3-70b-specdec | - | ERR 400 | Broken |
-
-Resulting order in `_groq_with_tools`: Groq 70B → Cerebras → NVIDIA → Groq Scout (last resort).
 
 ## Usage in this project
 

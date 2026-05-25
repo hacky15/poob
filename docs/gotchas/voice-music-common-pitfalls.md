@@ -18,7 +18,7 @@ Each item is a hazard that has bitten us before.
 
 - **`yield from` in async generators is a syntax error.** Use `for item in ...: yield item`.
 - **asetrate math is inverted from intuition.** `asetrate` *below* the native rate = pitch DOWN (not up). The filter reinterprets the source rate, so a lower asetrate effectively stretches the audio, which drops pitch. See [[toob-voice-filter-chain]].
-- **Groq 70B rate-limits constantly in multi-user voice sessions.** Always have non-Groq fallbacks (Cerebras, NVIDIA). See [[vlm-cascade-operational-findings]].
+- **The brain cascade needs non-Groq fallbacks.** Multi-user voice sessions exhaust Groq's per-key rate limits quickly. Current order: Groq `gpt-oss-20b` → NVIDIA NIM → Groq Scout (last-resort). Cerebras 235B and llama-3.3-70b are both OUT — see [[groq-gpt-oss-20b-swap]] and [[drop-cerebras-from-cascade]] for why. See [[vlm-cascade-operational-findings]] for benchmark history.
 - **Scout 17B over-routes to music** — "Did you get offended?" → plays "Big Ole Freak". Keep it last in the cascade.
 - **`<function=...>` in LLM output.** Some models emit tool calls as raw text instead of structured `tool_calls`. Regex cleanup in both `respond()` and `respond_streaming()` prevents this markup from reaching Discord.
 - **Deepgram transcript replay.** `reset_transcript(user_id)` must be called after utterance emission, not just at utterance start — otherwise the next utterance carries the tail of the previous transcript.
