@@ -3,10 +3,21 @@ type: incident
 status: active
 date: 2026-04-23
 tags: [voice, wake-word, dual-gate, brain]
-related: [[wake-word-dual-gate]] [[wake-gate-over-rejection-during-music]]
+related: [[wake-word-dual-gate]] [[wake-gate-over-rejection-during-music]] [[wake-word-v3-shipped]]
 ---
 
 # Wake-gate rejects commands when STT mis-transcribes "Poob" as "Poop" / "Boop" / etc.
+
+## Current state (2026-05-24 audit)
+
+Partially mitigated. Option A from §"Fix (proposed, not yet implemented)" shipped at the address-detector layer — `_WAKE_WORDS` in [voice/address_detector.py](../../src/poob/voice/address_detector.py) accepts the broad phonetic family (`poob|poop|boob|boop|hoob|noob|goop|pewb|...` plus a catch-all `p[ou]{1,2}[bp]e?`). However, the dual-pipeline gate that emitted the original "Audio wake word overridden by text" rejection still uses a narrower `_TEXT_WAKE_RE` at [voice/dual_pipeline.py:590](../../src/poob/voice/dual_pipeline.py#L590) which requires a literal `hey ` prefix before any phonetic stem — so the original-symptom transcript "They poop. Play..." would still miss at the dual-pipeline layer specifically.
+
+Whether this produces a user-visible rejection now depends on whether the session-level `MultiSignalAddressDetector` (which uses the broader allowlist) elevates the utterance from passive → addressed before the response pipeline gives up. That's not something we can know from static reading; it needs a live reproduction.
+
+The original 13.5 s symptom this was filed with is gone post-[[groq-gpt-oss-20b-swap]], so the practical urgency is low. Option B (audio_match + command-verb override) remains unshipped and is deferred until after Silero VAD [[voice-latency-phase1-silero-reenabled]] is validated in a real voice channel — stacking voice-gate changes on un-validated VAD is the wrong order.
+
+Keeping `status: active` so the unaddressed delta is visible.
+
 
 ## Symptom
 

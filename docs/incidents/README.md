@@ -24,6 +24,8 @@ Resolved incidents stay `status: resolved`. Open ones stay `status: active`. If 
 
 - [[dave-timeout-fail-hard-regression]] — agent flipped DAVE-not-ready into a fatal disconnect; auto-leave on every /join until reverted (2026-04-29)
 - [[voice-three-failure-modes-april27]] — `/join` crash + empty-query play + casual leak of tool-name (2026-04-27)
+- [[casual-chat-response-13s-latency]] — casual voice reply took 13.5 s end-to-end; cloud LLM cascade thrashed by 429s; resolved via Groq primary swap + Cerebras drop + casual-bypass (2026-04-23, resolved)
+- [[wake-gate-stt-mishear-rejection]] — wake gate rejected "play X" when STT mis-heard "Poob" as "poop" / "boop" / etc.; phonetic allowlist landed in address-detector but dual-pipeline regex still narrow (2026-04-23, active)
 - [[music-tool-hallucination]] — LLM played "Bad Guy" from 20-minute-old context
 - [[wake-gate-over-rejection-during-music]] — wake gate rejected legit addresses while music was playing
 - [[voice-addressee-confusion]] — Poob called Ben "lab rat" and Jeweinery "lab rat"

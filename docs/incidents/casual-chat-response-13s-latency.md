@@ -1,12 +1,23 @@
 ---
 type: incident
-status: active
+status: resolved
 date: 2026-04-23
 tags: [brain, voice, latency, groq, cerebras]
-related: [[poobbrain-architecture]] [[brain-routing-audit]]
+related: [[poobbrain-architecture]] [[brain-routing-audit]] [[groq-gpt-oss-20b-swap]] [[drop-cerebras-from-cascade]] [[text-casual-fallback-bypass-deal-agent]]
 ---
 
 # Casual voice chat reply taking 13+ seconds end-to-end
+
+## Resolution (2026-05-24 audit)
+
+The three short-term proposals named in §"Fix (proposed, not yet implemented)" below have all shipped:
+
+- Groq `gpt-oss-20b` pinned as primary tool-routing model → [[groq-gpt-oss-20b-swap]] (2026-04-23)
+- Cerebras 235B leg dropped from the cascade entirely → [[drop-cerebras-from-cascade]] (2026-04-23)
+- Casual-chat path bypasses the deal sub-agent when router returns empty → [[text-casual-fallback-bypass-deal-agent]] (2026-05-06)
+
+The medium-term proposals (per-cascade-segment structured timing, distinct latency budgets per path) did not ship as named, but the underlying 13s symptom was driven by the routing-LLM cascade chain, which the three shipped fixes addressed. No further reproduction has been logged.
+
 
 ## Symptom
 
