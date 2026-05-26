@@ -253,6 +253,13 @@ class PatrolEngine:
 
         # Sweep mode: "unified" (1 page load) or "categories" (multi-page)
         self._sweep_mode = getattr(config, "patrol_sweep_mode", "unified")
+        # Rotating DOM category index — each cycle hits a different category
+        # page instead of the FB marketplace home page (which is dominated
+        # by vehicles/housing/boats in WI and gives us almost no fresh
+        # non-excluded listings). Rotation across the configured browse
+        # categories pulls more diverse non-vehicle items via the DOM path
+        # even when GraphQL is rate-limited.
+        self._dom_category_idx = 0
 
         # Anonymous GraphQL client (depersonalized, no browser needed)
         self._graphql_enabled = getattr(config, "patrol_anonymous_graphql_enabled", True)
@@ -894,8 +901,30 @@ class PatrolEngine:
         seen_external_ids: set[str] = set()
 
         if self._sweep_mode == "unified":
-            # Single unified feed — 1 page load captures all new local listings
-            categories: list[str | None] = [None]
+            # Unified mode used to sweep ONLY the FB marketplace home page
+            # (`category=None`), which in WI is dominated by vehicles,
+            # housing, and boats — all excluded categories. The non-excluded
+            # listings that DO appear were vehicle-feed bycatch and almost
+            # never fresh non-excluded items.
+            #
+            # Now: rotate through the configured browse categories one per
+            # cycle. Each cycle hits a different category-anchored page
+            # (e.g. /marketplace/madison/category/electronics) which is far
+            # less vehicle-dominated. The home page (`None`) is still in
+            # the rotation but is only 1 of N slots instead of every cycle.
+            rotation = list(self._config.patrol_anonymous_browse_categories or [""])
+            if not rotation:
+                rotation = [""]
+            slot = rotation[self._dom_category_idx % len(rotation)]
+            self._dom_category_idx += 1
+            # Empty string in the config means "home page" (no category anchor).
+            categories: list[str | None] = [slot if slot else None]
+            log.info(
+                "DOM sweep rotating category",
+                category=slot or "(home page)",
+                rotation_idx=(self._dom_category_idx - 1) % len(rotation),
+                rotation_size=len(rotation),
+            )
         else:
             # Legacy category sweep
             categories = list(self._config.patrol_categories)

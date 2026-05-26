@@ -184,7 +184,7 @@ def patrol_engine(
 class TestSweepAndIntercept:
     @pytest.mark.asyncio
     async def test_unified_mode_single_sweep(self, patrol_engine, mock_listing_repo):
-        """Unified mode should sweep only once (None category)."""
+        """Unified mode should sweep once per cycle (one category from the rotation)."""
         mock_listing_repo.filter_new_ids = AsyncMock(return_value=set())
         mock_listing_repo.get_known_external_ids = AsyncMock(return_value=set())
 
@@ -197,8 +197,66 @@ class TestSweepAndIntercept:
             mock_sweep.return_value = []
             result = await patrol_engine.run_patrol_cycle()
 
-        # Unified mode: only 1 sweep call (None = all listings)
+        # Unified mode rotates through one category per cycle — exactly 1 call.
         assert mock_sweep.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_unified_mode_rotates_categories_across_cycles(
+        self, patrol_engine, mock_config, mock_listing_repo,
+    ):
+        """Each successive cycle should pick the next category in the rotation.
+
+        Pre-fix behavior was to always sweep the FB home page (`category=None`),
+        which in WI is dominated by vehicles/housing. Rotation diversifies the
+        feed across the configured browse categories.
+        """
+        mock_config.patrol_anonymous_browse_categories = [
+            "electronics", "furniture", "appliances",
+        ]
+        # Reset engine state so the test starts at rotation index 0.
+        patrol_engine._dom_category_idx = 0
+        mock_listing_repo.filter_new_ids = AsyncMock(return_value=set())
+        mock_listing_repo.get_known_external_ids = AsyncMock(return_value=set())
+
+        with patch.object(
+            patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
+            mock_sweep.return_value = []
+            for _ in range(4):  # 4 cycles, rotation size 3 → wraps once
+                await patrol_engine.run_patrol_cycle()
+
+        # Each call's second positional arg is the category passed to the scanner.
+        categories_used = [call.args[1] for call in mock_sweep.call_args_list]
+        assert categories_used == [
+            "electronics", "furniture", "appliances", "electronics",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_unified_mode_empty_string_in_rotation_means_home_page(
+        self, patrol_engine, mock_config, mock_listing_repo,
+    ):
+        """Empty string in patrol_anonymous_browse_categories means
+        the FB marketplace home page (passed as `None` to sweep_category)."""
+        mock_config.patrol_anonymous_browse_categories = ["", "electronics"]
+        patrol_engine._dom_category_idx = 0
+        mock_listing_repo.filter_new_ids = AsyncMock(return_value=set())
+        mock_listing_repo.get_known_external_ids = AsyncMock(return_value=set())
+
+        with patch.object(
+            patrol_engine._scanner, "sweep_category", new_callable=AsyncMock
+        ) as mock_sweep, patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ):
+            mock_sweep.return_value = []
+            await patrol_engine.run_patrol_cycle()  # idx 0 — empty → None
+            await patrol_engine.run_patrol_cycle()  # idx 1 — "electronics"
+
+        categories_used = [call.args[1] for call in mock_sweep.call_args_list]
+        assert categories_used == [None, "electronics"]
 
     @pytest.mark.asyncio
     async def test_categories_mode_sweeps_all(self, patrol_engine, mock_config, mock_listing_repo):
