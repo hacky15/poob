@@ -43,7 +43,9 @@ Two things, in order:
 1. **Use the routing model only for tool-detection.** When it returns no tool, ignore its text response (or at least don't trust it as your final answer for content the user actually asked for).
 2. **Fall through to a casual-content model for any "no tool" case** — empty *or* text. The voice path's pattern is the canonical example: discard routing's text, run a separate streaming call to a less-aligned content model (`llama-3.1-8b-instant`).
 
-The text path now mirrors voice via `_casual_text_fallback` ([poob.py:962-1003](../../src/poob/brain/poob.py#L962-L1003)). Empty content + no tool → casual call to `llama-3.1-8b-instant` with the tool-free system prompt. Only fall through to the deal sub-agent if even llama returns empty (rare).
+The text path mirrors voice via `_casual_text_fallback`. **Any** no-tool result — empty content OR non-empty text — discards the routing model's text and regenerates via `llama-3.1-8b-instant` with the tool-free system prompt. Only fall through to the deal sub-agent if even llama returns empty (rare).
+
+> **Note (2026-05-29):** from 2026-05-06 to 2026-05-29 this rule was honored only for the *empty* case — non-empty routing text (refusals-in-disguise + ChatGPT markdown) still leaked verbatim via an `if text: return text` short-circuit. That is the [[text-mode-rlhf-refusal-leak-2026-05-29]] incident. The short-circuit is now removed; rule #2 above ("empty *or* text") is fully enforced in code.
 
 ## Reference
 

@@ -3,10 +3,12 @@ type: decision
 status: active
 date: 2026-05-06
 tags: [brain, llm, routing, censorship, refusal, gpt-oss]
-related: [[poobbrain-architecture]] [[brain-routing-audit]] [[groq-gpt-oss-20b-swap]] [[empty-routing-response-is-not-failure]]
+related: [[poobbrain-architecture]] [[brain-routing-audit]] [[groq-gpt-oss-20b-swap]] [[empty-routing-response-is-not-failure]] [[text-mode-rlhf-refusal-leak-2026-05-29]]
 ---
 
 # Text-mode casual fallback bypasses the deal agent
+
+> **Extended 2026-05-29 — see [[text-mode-rlhf-refusal-leak-2026-05-29]].** This decision originally scoped the casual fallback to the **empty-content** refusal mode only (`("", None, None)`). Production audit on 2026-05-29 found the **non-empty** modes still leaking: gpt-oss-20b's literal `"I'm sorry, but I can't help with that."` refusals and its ChatGPT-style markdown answers were returned verbatim because `if text: return text` short-circuited before the fallback. The fix below now applies to **all no-tool cases (empty OR text)** — the text path fully mirrors the voice path, which always discards routing text. The "router empty" framing throughout this note should be read as "router returned no tool" post-2026-05-29.
 
 ## Context
 
@@ -105,7 +107,7 @@ This decision touches **only** the casual fall-through path. Routing model, tool
 | Toob music wrap | llama-3.1-8b-instant streaming | unchanged |
 | Deal personality wrap | gpt-oss-20b | unchanged |
 | Voice casual | llama-3.1-8b-instant streaming | unchanged |
-| Text casual (router empty + no tool) | llama-3.1-8b-instant non-streaming | **new** |
+| Text casual (router returns NO TOOL — empty OR text) | llama-3.1-8b-instant non-streaming | **new** (extended to non-empty text 2026-05-29) |
 
 ## Alternatives considered
 

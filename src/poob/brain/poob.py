@@ -832,23 +832,23 @@ class PoobBrain:
                             clean_message, user_id, voice, max_tok,
                             tool_args=tool_args, guild_id=guild_id,
                         )
-                    if text and "<function=" in text:
-                        text = re.sub(
-                            r'\s*<function=\w+>.*?</function>\s*', '', text
-                        ).strip()
-                    if text:
-                        self._save_response(guild_id, user_id, text)
-                        return text
 
-                    # Routing model returned empty + no tool. Mirror the
-                    # voice path: separate llama-3.1-8b-instant call for
-                    # casual content. See decisions/text-casual-fallback-
-                    # bypass-deal-agent — falling through to deal_agent
-                    # here was sending casual chat to an RLHF-aligned
-                    # model that refused edgy prompts.
+                    # No tool called. The routing model (gpt-oss-20b,
+                    # RLHF-aligned) may have produced text, but its prose
+                    # reaches the user as bland-assistant boilerplate,
+                    # ChatGPT markdown, or "I'm sorry, but..." refusals —
+                    # and the persona prompt can't override RLHF weights.
+                    # Discard the routing text and regenerate casual
+                    # content via the non-RLHF model, mirroring the voice
+                    # path (respond_streaming Step 3). The routing call is
+                    # tool-detection only. See
+                    # docs/gotchas/empty-routing-response-is-not-failure.md
+                    # ("fall through for ANY no-tool case — empty OR text")
+                    # and docs/incidents/text-mode-rlhf-refusal-leak-2026-05-29.md.
                     log.info(
-                        "poob.routing_empty_casual_fallback",
+                        "poob.routing_no_tool_casual_fallback",
                         message=clean_message[:50],
+                        had_routing_text=bool(text),
                     )
                     casual = await self._casual_text_fallback(
                         messages, max_tok, guild_id=guild_id,

@@ -58,18 +58,49 @@ async def test_empty_routing_response_calls_casual_fallback() -> None:
 
 
 @pytest.mark.asyncio
-async def test_routing_text_response_skips_casual_fallback() -> None:
+async def test_routing_text_response_regenerates_via_casual_fallback() -> None:
+    """Non-empty routing text + no tool MUST be discarded and regenerated
+    via the non-RLHF casual model — mirroring the voice path. The routing
+    model (gpt-oss-20b) is RLHF-aligned; its prose reaches the user as
+    bland-assistant text or refusals if trusted. See
+    docs/incidents/text-mode-rlhf-refusal-leak-2026-05-29.md and
+    docs/gotchas/empty-routing-response-is-not-failure.md (fall through
+    for ANY no-tool case — empty OR text).
+    """
     deal_agent = AsyncMock()
     brain = _make_brain(deal_agent=deal_agent)
 
     with patch.object(brain, "_groq_with_tools", new=AsyncMock(return_value=("yo whats good", None, None))), \
-         patch.object(brain, "_casual_text_fallback", new=AsyncMock(return_value="should not be reached")) as fb:
+         patch.object(brain, "_casual_text_fallback", new=AsyncMock(return_value="YOOO what's good fam")) as fb:
 
         out = await brain.respond("yo", user_id="u1", guild_id=10)
 
-    assert out == "yo whats good"
-    fb.assert_not_called()
+    # Routing text is NOT returned verbatim; casual model output is.
+    assert out == "YOOO what's good fam"
+    assert out != "yo whats good"
+    fb.assert_called_once()
     deal_agent.run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_rlhf_refusal_text_never_reaches_user() -> None:
+    """A literal RLHF refusal from the routing model must never reach the
+    user. This is the exact production failure (2026-05-29): 'Epstein
+    files' / 'would you smash Dyno' → 'I'm sorry, but I can't help with
+    that.' The non-empty refusal bypassed the empty-only fallback.
+    """
+    deal_agent = AsyncMock()
+    brain = _make_brain(deal_agent=deal_agent)
+    refusal = "I'm sorry, but I can't help with that."
+
+    with patch.object(brain, "_groq_with_tools", new=AsyncMock(return_value=(refusal, None, None))), \
+         patch.object(brain, "_casual_text_fallback", new=AsyncMock(return_value="pfft, wild question — yeah obviously")) as fb:
+
+        out = await brain.respond("would you smash dyno", user_id="u1", guild_id=10)
+
+    assert refusal not in out
+    assert "sorry" not in out.lower()
+    fb.assert_called_once()
 
 
 @pytest.mark.asyncio
