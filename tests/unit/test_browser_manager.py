@@ -312,3 +312,25 @@ class TestGetPageRetries:
         assert result is created_page
         assert manager._consecutive_cdp_failures == 0  # Reset
         assert not manager._cdp_permanently_broken
+
+
+class TestHeadlessAutoDetect:
+    """Headful Chromium cannot launch without an X display, so headless=False
+    in a displayless container must be auto-forced to headless — the root
+    cause of the authenticated main browser being dead in prod."""
+
+    def test_forces_headless_when_no_display(self, monkeypatch):
+        monkeypatch.delenv("DISPLAY", raising=False)
+        mgr = BrowserManager(headless=False)
+        assert mgr._headless is True
+
+    def test_respects_headful_when_display_present(self, monkeypatch):
+        monkeypatch.setenv("DISPLAY", ":0")
+        mgr = BrowserManager(headless=False)
+        assert mgr._headless is False
+
+    def test_headless_true_stays_true_regardless(self, monkeypatch):
+        monkeypatch.delenv("DISPLAY", raising=False)
+        assert BrowserManager(headless=True)._headless is True
+        monkeypatch.setenv("DISPLAY", ":0")
+        assert BrowserManager(headless=True)._headless is True

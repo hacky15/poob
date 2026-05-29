@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -41,6 +42,19 @@ class BrowserManager:
         stealth_min_delay_ms: int = 1500,
         stealth_max_delay_ms: int = 4000,
     ) -> None:
+        # Force headless when no X display is available. A headful Chromium
+        # cannot launch without a display, so headless=False in a server
+        # container (the prod default shipped BROWSER_HEADLESS=false) makes
+        # the browser hang at launch and never connect CDP — the root cause
+        # of the authenticated main browser being dead in prod. Auto-detect
+        # rather than trusting the env so a redeploy can't reintroduce it.
+        # See docs/incidents/main-browser-headful-in-headless-container.
+        if not headless and not os.environ.get("DISPLAY"):
+            log.warning(
+                "No DISPLAY available — forcing headless=True "
+                "(headful Chromium cannot launch without a display)",
+            )
+            headless = True
         self._headless = headless
         self._profiles_dir = profiles_dir
         self._use_vision = use_vision
