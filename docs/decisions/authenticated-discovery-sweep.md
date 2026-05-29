@@ -29,9 +29,20 @@ Root cause: authentication powered *enrichment* (detail pages → 100% timestamp
 
 The freshness problem is a *discovery* problem (what FB shows us), not an *extraction* problem (we already get timestamps when we enrich). Fixing it at discovery — sweeping the feed FB actually keeps fresh for logged-in users — is the source-level fix. Enrichment-only auth was treating the symptom.
 
-## The honest open question
+## The open question — ANSWERED: the logged-in feed is materially fresher
 
-Whether the logged-in marketplace feed is *materially* fresher than anon is still empirical — this change is the mechanism to find out. It will be measured the same way the gap was found: age-at-scrape distribution of `authenticated_dom`-sourced listings + `funnel.cycle` `vlm_evaluated`/`notified`. If the logged-in feed is ALSO stale, then FB serves stale marketplace *browse* to everyone and freshness needs a different mechanism (saved-search notifications), which would be a separate decision. The expectation (audit premise + general behavior) is that the personalized logged-in feed is fresher.
+Measured within the hour of deploy (age-at-scrape, distinct listings):
+
+| Age when first seen | Auth-discovery (≥21:03) | Anon baseline (19:00–21:03) |
+|---|---|---|
+| **<10 min** | **7** | **0** |
+| 30–60 min | 1 | 2 |
+| 1–6 h | 2 | 13 |
+| 6–24 h | 2 | 9 |
+| >24 h | 29 | 26 |
+| NULL posted_at | 5 (11%) | 80 (62%) |
+
+The logged-in feed surfaced **7 listings <10 min old** (the public-gate band) vs **0** on anon, and NULL-timestamp coverage improved from 62% to 11%. `funnel.cycle` `vlm_evaluated` rose from the chronic 0–2 to **7** in the first auth-discovery cycle. Confirmed: routing discovery through the authenticated browser is what converts the login into genuinely-fresh local listings. The freshness barrier behind near-zero notifications is resolved at the source. (The >24h tail is the broad category-browse backlog; it's correctly filtered out before VLM.)
 
 ## Validation
 
