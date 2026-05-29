@@ -1238,6 +1238,38 @@ class TestWatchlistSweepMultiConfig:
             assert len(listings) == 1  # deduped
 
 
+class TestBrowsePathLocationThreading:
+    """The general-browse GQL path must center queries on the configured
+    location. A prior bug (audited 2026-05-29) omitted location_slug, so
+    build_search_params fell through to a hardcoded Appleton default and FB
+    served Fox-Valley inventory ~100mi outside the configured Madison radius
+    — which the geo filter then discarded after it flooded the eval pool.
+    The watchlist path already threaded location; the browse path didn't."""
+
+    @pytest.mark.asyncio
+    async def test_browse_threads_configured_location(self, patrol_engine, mock_config):
+        from poob.scanner.patrol_engine import PatrolCycleResult
+
+        mock_config.marketplace_default_location = "madison"
+        mock_config.patrol_anonymous_browse_categories = ["electronics", "furniture"]
+        patrol_engine._graphql_enabled = True
+
+        with patch.object(
+            patrol_engine._graphql_client, "search_all_pages",
+            new_callable=AsyncMock, return_value=[],
+        ), patch(
+            "poob.scanner.patrol_engine.build_search_params",
+        ) as mock_bsp:
+            mock_bsp.return_value = MagicMock()
+            await patrol_engine._fetch_anonymous_graphql(PatrolCycleResult())
+
+        # One build_search_params call per browse category, each carrying the
+        # configured location — NOT falling through to the Appleton default.
+        assert mock_bsp.call_count == 2
+        for call in mock_bsp.call_args_list:
+            assert call.kwargs.get("location_slug") == "madison"
+
+
 class TestAnonBrowserSelfHeal:
     """The anonymous browser's CDP session can die mid-run and never
     recover — every DOM sweep then times out at 60s. In prod this ran

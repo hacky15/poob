@@ -908,8 +908,20 @@ class PatrolEngine:
                 if self._graphql_client.is_rate_limited:
                     return []
                 try:
+                    # Thread the configured location into the browse query.
+                    # Without it, build_search_params falls through to the
+                    # hardcoded Appleton default (graphql_client DEFAULT_*),
+                    # so FB served Fox-Valley inventory ~100mi outside the
+                    # configured radius — the geo filter then discarded most
+                    # of it after it had already flooded the eval pool. The
+                    # watchlist path already threads this; the browse path
+                    # silently didn't. See
+                    # docs/incidents/browse-path-ignored-configured-location.
                     params = build_search_params(
                         query=category,
+                        location_slug=getattr(
+                            self._config, "marketplace_default_location", None,
+                        ),
                         radius_miles=self._config.patrol_base_radius_miles,
                         days_listed=self._config.patrol_days_since_listed,
                         count=self._config.scan_max_listings_per_query,
