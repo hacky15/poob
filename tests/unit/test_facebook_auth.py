@@ -55,9 +55,12 @@ class TestBuildLoginJs:
         assert "user@example.com" in js
         assert "hunter2" in js
 
-    def test_is_self_invoking_expression(self):
+    def test_is_bare_arrow_function_not_iife(self):
+        # browser-use's page.evaluate CALLS the function, so it must be a bare
+        # arrow function, NOT a self-invoking IIFE (that throws).
         js = _build_login_js("a@b.com", "x")
-        assert js.strip().startswith("(()")
+        assert js.strip().startswith("() =>")
+        assert not js.strip().startswith("(()")
         assert "royal_login_button" in js  # targets FB's login button
 
 

@@ -102,8 +102,11 @@ def _build_login_js(email: str, password: str) -> str:
     The returned string contains the password — it MUST NOT be logged.
     """
     creds = json.dumps({"email": email, "password": password})
+    # MUST be a bare arrow function (like every other JS in this codebase),
+    # NOT a self-invoking IIFE — browser-use's page.evaluate CALLS the
+    # function, so an IIFE throws/misbehaves.
     return (
-        "(() => {"
+        "() => {"
         f"  const c = {creds};"
         "  const email = document.querySelector('input[name=\"email\"], input#email');"
         "  const pass = document.querySelector('input[name=\"pass\"], input#pass');"
@@ -120,7 +123,7 @@ def _build_login_js(email: str, password: str) -> str:
         "  if (btn) { btn.click(); return JSON.stringify({ok:true, method:'click'}); }"
         "  if (pass.form) { pass.form.submit(); return JSON.stringify({ok:true, method:'form'}); }"
         "  return JSON.stringify({ok:false, reason:'no_submit'});"
-        "})()"
+        "}"
     )
 
 
