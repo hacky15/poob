@@ -710,6 +710,38 @@ async def startup() -> None:
             log.warning("Anonymous browser failed/timed out", error=str(exc)[:100])
             anonymous_browser = None
 
+    # Establish an authenticated FB session on the main browser so its DOM
+    # sweep + detail pages see the fresher logged-in feed. Reuses a persisted
+    # cookie session (browser_profiles volume) when present; otherwise a
+    # one-time headless login with the .env credentials. NEVER solves a
+    # CAPTCHA/checkpoint — on a checkpoint it logs and continues on the
+    # anonymous path. See docs/decisions/authenticated-session-no-human.md.
+    if getattr(config, "patrol_authenticated_login_enabled", True):
+        try:
+            from poob.sites.facebook.auth import ensure_logged_in
+
+            main_page = await asyncio.wait_for(
+                browser_manager.get_page(), timeout=45.0,
+            )
+            auth_status = await asyncio.wait_for(
+                ensure_logged_in(
+                    main_page,
+                    config.facebook_email,
+                    config.facebook_password,
+                ),
+                timeout=150.0,
+            )
+            log.info("FB authentication result", status=auth_status.value)
+        except asyncio.TimeoutError:
+            log.warning(
+                "FB authentication timed out — continuing on anonymous path",
+            )
+        except Exception as exc:
+            log.warning(
+                "FB authentication error — continuing anonymous",
+                error=str(exc)[:120],
+            )
+
     # Auto-start the patrol scheduler loop unless explicitly disabled.
     # scheduler.start() creates a background asyncio task and returns
     # immediately; the bot event loop below owns the lifetime.

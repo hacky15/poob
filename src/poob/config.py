@@ -275,6 +275,11 @@ class AppConfig(BaseSettings):
         "tools",
     ]
     patrol_anonymous_browser_enabled: bool = True  # Separate headless browser for DOM sweep
+    # Establish an authenticated FB session on the main browser at startup
+    # (cookie-reuse if a session persists, else a one-time headless login with
+    # the .env creds). Never solves CAPTCHAs — checkpoint => fall back to anon.
+    # See docs/decisions/authenticated-session-no-human.md.
+    patrol_authenticated_login_enabled: bool = True
     # Rate limit: min delay between GQL requests. Restored 6->12s on
     # 2026-05-29: 6s was tripping FB's anon rate limit hard (consecutive_hits
     # >130, 177/182 cycles returned zero). Halving the request RATE is the
