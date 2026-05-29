@@ -18,13 +18,16 @@ import collections
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Callable
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 from silero_vad import load_silero_vad
 
 from poob.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 log = get_logger("voice.silero_vad")
 
@@ -101,6 +104,16 @@ def _resample_discord_frame(pcm_bytes: bytes) -> np.ndarray:
     return mono_16k
 
 
+def _clone_if_possible(tensor: Any) -> Any:
+    """Snapshot a Silero state tensor for per-user save/restore.
+
+    Real torch tensors expose ``.clone()``; test doubles may not. Falls
+    back to the object itself so the save/restore path stays exercised
+    under mocks.
+    """
+    return tensor.clone() if hasattr(tensor, "clone") else tensor
+
+
 @dataclass
 class _PerUserSileroState:
     """Per-user Silero context kept on the shared processor.
@@ -115,9 +128,9 @@ class _PerUserSileroState:
     from speaker A into speaker B's predictions.
     """
 
-    buffer: collections.deque = field(default_factory=collections.deque)
-    saved_state: object | None = None  # cloned torch.Tensor (shape [2, 1, 128])
-    saved_context: object | None = None  # cloned torch.Tensor (shape [1, 64])
+    buffer: collections.deque[float] = field(default_factory=collections.deque)
+    saved_state: Any = None  # cloned torch.Tensor (shape [2, 1, 128])
+    saved_context: Any = None  # cloned torch.Tensor (shape [1, 64])
 
 
 class SileroVADProcessor:
@@ -140,10 +153,12 @@ class SileroVADProcessor:
 
     def __init__(self) -> None:
         torch.set_num_threads(1)
-        self._model: object | None = None  # lazy — first call to process_frame_for_user
+        # Untyped third-party ONNX wrapper (silero_vad has no py.typed marker).
+        # Lazy — first call to process_frame_for_user triggers the load.
+        self._model: Any = None
         self._per_user: dict[int, _PerUserSileroState] = {}
 
-    def _ensure_model(self) -> object:
+    def _ensure_model(self) -> Any:
         """Lazy-load + warm up the model. Idempotent."""
         if self._model is not None:
             return self._model
@@ -208,8 +223,8 @@ class SileroVADProcessor:
         # Snapshot this user's post-inference state so the next call
         # for the same user can restore it. Marker assignment is a
         # hook used by tests to verify the restore path fired.
-        state.saved_state = model._state.clone() if hasattr(model._state, "clone") else model._state
-        state.saved_context = model._context.clone() if hasattr(model._context, "clone") else model._context
+        state.saved_state = _clone_if_possible(model._state)
+        state.saved_context = _clone_if_possible(model._context)
         if hasattr(model, "_last_restored_user"):
             # Test-mode marker; production model doesn't have this attribute.
             model._last_restored_user = user_id
