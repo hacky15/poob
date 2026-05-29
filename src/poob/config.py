@@ -117,7 +117,16 @@ class AppConfig(BaseSettings):
     local_fast_model: str = "qwen3:4b"
     local_fast_num_ctx: int = 4096
     ebay_http_timeout_seconds: int = 10
-    deal_radar_max_evaluations: int = 50  # Cap applied before detail enrichment
+    deal_radar_max_evaluations: int = 50  # VLM evaluation cap (top-N after enrichment)
+    # Detail-page enrichment cap, decoupled from the VLM eval cap. Enrichment
+    # is the ONLY source of posted_at for anon-GQL listings (FB strips
+    # creation_time), and it yields a timestamp ~100% of the time it runs —
+    # so enriching MORE listings directly raises the count that become
+    # notification-eligible. Set above deal_radar_max_evaluations: enrich a
+    # wider set for timestamps, then VLM only the freshest top-N. Bounded by
+    # the 600s cycle timeout + per-listing 20s timeout + early-bail.
+    # See docs/decisions/enrichment-cap-decoupled-from-eval-cap.md.
+    patrol_enrichment_cap: int = 75
 
     # --- Visual Enrichment (reverse image search) ---
     google_cloud_vision_api_key: str = ""  # Google Cloud Vision API key

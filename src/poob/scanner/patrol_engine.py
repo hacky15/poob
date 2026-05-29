@@ -208,6 +208,16 @@ class PatrolEngine:
         # Parse min score from config string
         self._min_score = DealScore(config.deal_radar_min_score)
         self._max_evaluations = config.deal_radar_max_evaluations
+        # Enrichment cap (decoupled from the VLM eval cap). Enrichment is the
+        # only source of posted_at for anon-GQL listings and yields a
+        # timestamp ~100% of the time it runs, so we enrich a wider set than
+        # we VLM-evaluate. Guard against a non-int (e.g. spec'd mock) or a
+        # value below the eval cap.
+        _ec = getattr(config, "patrol_enrichment_cap", None)
+        self._enrichment_cap = (
+            _ec if isinstance(_ec, int) and _ec >= self._max_evaluations
+            else self._max_evaluations
+        )
 
         # Build unified filter chain (replaces hardcoded _ALLOWED_NOTIFY_STATES,
         # _EXCLUDED_CATEGORY_PATTERNS, triple-check pattern, and backlog bypass).
@@ -480,13 +490,19 @@ class PatrolEngine:
 
                 new_listings.sort(key=_freshness_key)
 
-            if len(new_listings) > self._max_evaluations:
+            # Cap at the ENRICHMENT budget (>= eval cap), not the eval cap.
+            # We enrich a wider freshness-sorted set to discover timestamps;
+            # _evaluate() independently re-caps to the VLM eval budget. The
+            # extra enriched listings are still saved (timestamped) for
+            # backlog + future cycles even if they don't reach VLM this cycle.
+            if len(new_listings) > self._enrichment_cap:
                 log.info(
                     "Pre-enrichment cap applied",
                     before=len(new_listings),
-                    after=self._max_evaluations,
+                    after=self._enrichment_cap,
+                    eval_cap=self._max_evaluations,
                 )
-                new_listings = new_listings[: self._max_evaluations]
+                new_listings = new_listings[: self._enrichment_cap]
 
             # Step 2g: Enrich capped listings by visiting their detail pages.
             # The search grid gives title/price/location/image; detail pages

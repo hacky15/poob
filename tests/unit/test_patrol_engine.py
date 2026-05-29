@@ -1238,6 +1238,91 @@ class TestWatchlistSweepMultiConfig:
             assert len(listings) == 1  # deduped
 
 
+class TestEnrichmentCapDecoupled:
+    """Detail-page enrichment is the only posted_at source for anon-GQL
+    listings and yields a timestamp ~100% when it runs, so the enrichment
+    cap is decoupled from (and set above) the VLM eval cap: enrich a wider
+    set for timestamps, VLM only the freshest top-N."""
+
+    def test_enrichment_cap_set_above_eval_cap(self, patrol_engine):
+        # Fixture config: deal_radar_max_evaluations=10. With no explicit
+        # patrol_enrichment_cap on the spec'd mock, it falls back to the eval
+        # cap (never below it).
+        assert patrol_engine._enrichment_cap >= patrol_engine._max_evaluations
+
+    def test_explicit_enrichment_cap_honored(
+        self, mock_config, mock_browser_manager, mock_listing_repo,
+        mock_watchlist_repo, mock_deal_repo, mock_scan_log_repo,
+        mock_notifier, mock_smart_deal_radar, interest_matcher,
+    ):
+        from poob.scanner.patrol_engine import PatrolEngine
+
+        mock_config.deal_radar_max_evaluations = 50
+        mock_config.patrol_enrichment_cap = 75
+        engine = PatrolEngine(
+            browser_manager=mock_browser_manager,
+            listing_repo=mock_listing_repo,
+            watchlist_repo=mock_watchlist_repo,
+            deal_repo=mock_deal_repo,
+            scan_log_repo=mock_scan_log_repo,
+            notifier=mock_notifier,
+            interest_matcher=interest_matcher,
+            smart_deal_radar=mock_smart_deal_radar,
+            config=mock_config,
+        )
+        assert engine._enrichment_cap == 75
+        assert engine._max_evaluations == 50
+
+    @pytest.mark.asyncio
+    async def test_enriches_up_to_enrichment_cap_not_eval_cap(
+        self, patrol_engine, mock_config, mock_listing_repo, mock_watchlist_repo,
+    ):
+        """Feeding >enrichment_cap fresh listings should send enrichment_cap
+        (not the smaller eval cap) listings to detail-page enrichment."""
+        from datetime import datetime, timezone
+
+        patrol_engine._max_evaluations = 50
+        patrol_engine._enrichment_cap = 75
+        mock_watchlist_repo.list_active = AsyncMock(return_value=[])
+        # 90 fresh, in-region, non-excluded listings that pass pre-enrichment.
+        now = datetime.now(timezone.utc)
+        listings = [
+            _make_listing(
+                external_id=str(1000 + i),
+                title=f"Item {i}",
+                price=20.0,
+                location="Madison, WI",
+                posted_at=now,
+            )
+            for i in range(90)
+        ]
+        mock_listing_repo.filter_new_ids = AsyncMock(
+            return_value={str(1000 + i) for i in range(90)}
+        )
+        mock_listing_repo.get_known_external_ids = AsyncMock(return_value=set())
+
+        captured = {}
+
+        async def _capture_enrich(page, lst, result=None):
+            captured["count"] = len(lst)
+            return lst
+
+        with patch.object(
+            patrol_engine._scanner, "sweep_category", new_callable=AsyncMock,
+            return_value=listings,
+        ), patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ), patch.object(
+            patrol_engine, "_enrich_listings_from_detail_pages",
+            side_effect=_capture_enrich,
+        ):
+            await patrol_engine.run_patrol_cycle()
+
+        # Capped to the enrichment budget (75), NOT the eval cap (50).
+        assert captured.get("count") == 75
+
+
 class TestBrowsePathLocationThreading:
     """The general-browse GQL path must center queries on the configured
     location. A prior bug (audited 2026-05-29) omitted location_slug, so
