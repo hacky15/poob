@@ -1236,3 +1236,111 @@ class TestWatchlistSweepMultiConfig:
             listings = await patrol_engine._sweep_watchlist_items(MagicMock(), result)
 
             assert len(listings) == 1  # deduped
+
+
+class TestAnonBrowserSelfHeal:
+    """The anonymous browser's CDP session can die mid-run and never
+    recover — every DOM sweep then times out at 60s. In prod this ran
+    524 consecutive timeouts over ~3 days with zero ingestion until a
+    manual container restart. The engine must detect repeated timeouts
+    and recreate the browser in-process."""
+
+    @pytest.fixture
+    def engine_with_anon(self, patrol_engine, mock_config):
+        anon = AsyncMock()
+        anon.get_page = AsyncMock()
+        anon.stop = AsyncMock()
+        anon.start = AsyncMock()
+        patrol_engine._anonymous_browser = anon
+        mock_config.patrol_anonymous_browser_enabled = True
+        patrol_engine._anon_sweep_max_timeouts = 3
+        patrol_engine._anon_sweep_consecutive_timeouts = 0
+        return patrol_engine, anon
+
+    @pytest.mark.asyncio
+    async def test_timeout_increments_counter_below_threshold(self, engine_with_anon):
+        """Timeouts below the threshold increment the counter but don't restart."""
+        import asyncio as _asyncio
+
+        from poob.scanner.patrol_engine import PatrolCycleResult
+
+        engine, _anon = engine_with_anon
+        with patch.object(
+            engine, "_anon_dom_sweep", new_callable=AsyncMock,
+            side_effect=_asyncio.TimeoutError,
+        ), patch.object(
+            engine, "_fetch_anonymous_graphql", new_callable=AsyncMock, return_value=[],
+        ), patch.object(
+            engine, "_restart_anonymous_browser", new_callable=AsyncMock,
+        ) as mock_restart:
+            await engine._sweep_and_intercept(None, PatrolCycleResult())
+            await engine._sweep_and_intercept(None, PatrolCycleResult())
+
+        assert engine._anon_sweep_consecutive_timeouts == 2
+        mock_restart.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_restart_triggered_at_threshold(self, engine_with_anon):
+        """The Nth consecutive timeout triggers an in-process browser restart."""
+        import asyncio as _asyncio
+
+        from poob.scanner.patrol_engine import PatrolCycleResult
+
+        engine, _anon = engine_with_anon
+        with patch.object(
+            engine, "_anon_dom_sweep", new_callable=AsyncMock,
+            side_effect=_asyncio.TimeoutError,
+        ), patch.object(
+            engine, "_fetch_anonymous_graphql", new_callable=AsyncMock, return_value=[],
+        ), patch.object(
+            engine, "_restart_anonymous_browser", new_callable=AsyncMock,
+        ) as mock_restart:
+            for _ in range(3):  # threshold is 3
+                await engine._sweep_and_intercept(None, PatrolCycleResult())
+
+        mock_restart.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_successful_sweep_resets_counter(self, engine_with_anon):
+        """A sweep that completes (browser responsive) clears the hang counter."""
+        from poob.scanner.patrol_engine import PatrolCycleResult
+
+        engine, _anon = engine_with_anon
+        engine._anon_sweep_consecutive_timeouts = 2  # primed near threshold
+        with patch.object(
+            engine, "_anon_dom_sweep", new_callable=AsyncMock, return_value=[],
+        ), patch.object(
+            engine, "_fetch_anonymous_graphql", new_callable=AsyncMock, return_value=[],
+        ):
+            await engine._sweep_and_intercept(None, PatrolCycleResult())
+
+        assert engine._anon_sweep_consecutive_timeouts == 0
+
+    @pytest.mark.asyncio
+    async def test_restart_helper_stops_then_starts(self, engine_with_anon):
+        """The restart helper tears down then recreates the browser and
+        resets the counter on success."""
+        engine, anon = engine_with_anon
+        engine._anon_sweep_consecutive_timeouts = 5
+        await engine._restart_anonymous_browser()
+        anon.stop.assert_awaited_once()
+        anon.start.assert_awaited_once()
+        assert engine._anon_sweep_consecutive_timeouts == 0
+
+    @pytest.mark.asyncio
+    async def test_restart_starts_even_if_stop_hangs(self, engine_with_anon):
+        """A hung stop() must not block the recreate — start() still runs."""
+        engine, anon = engine_with_anon
+        anon.stop = AsyncMock(side_effect=Exception("stop hung"))
+        await engine._restart_anonymous_browser()
+        anon.start.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_restart_leaves_counter_elevated_on_start_failure(self, engine_with_anon):
+        """If start() fails, the counter stays elevated so the next cycle retries."""
+        engine, anon = engine_with_anon
+        engine._anon_sweep_consecutive_timeouts = 4
+        anon.start = AsyncMock(side_effect=Exception("start failed"))
+        await engine._restart_anonymous_browser()
+        # Not reset — next cycle will try again.
+        assert engine._anon_sweep_consecutive_timeouts == 4

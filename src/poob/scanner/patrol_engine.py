@@ -270,6 +270,19 @@ class PatrolEngine:
         # Shadow ban tracking
         self._consecutive_empty_sweeps = 0
 
+        # Anonymous-browser self-heal. A degraded CDP session (Discord WS
+        # reconnect, chromium crash, slow resource leak) leaves the DOM
+        # sweep blocking until the 60s per-step timeout fires — and it never
+        # recovers on its own. Observed in prod: the anon browser died
+        # 2026-05-26 18:57 and logged 524 consecutive 60s timeouts over
+        # ~3 days of ZERO ingestion until a manual container restart. After
+        # this many consecutive timeouts, recreate the browser in-process.
+        # See docs/incidents/anon-browser-cdp-death-no-recovery.
+        self._anon_sweep_consecutive_timeouts = 0
+        self._anon_sweep_max_timeouts = getattr(
+            config, "patrol_anon_browser_max_timeouts", 3,
+        )
+
         # Canary registry: ground-truth "did we see every listing" measurement.
         # Populated out-of-band by an admin command that registers a magic
         # token when the operator posts a dummy listing from a burner account.
@@ -655,6 +668,46 @@ class PatrolEngine:
             self._canaries.check_batch(listings, source="anonymous_dom")
         return listings
 
+    async def _restart_anonymous_browser(self) -> None:
+        """Tear down and recreate the anonymous browser session in-process.
+
+        Called after ``_anon_sweep_max_timeouts`` consecutive DOM-sweep
+        timeouts. The degraded CDP session leaves ``get_page()`` and
+        navigation blocking forever; recreating the BrowserSession restores
+        ingestion without an operator-driven container restart.
+
+        Both ``stop()`` and ``start()`` are bounded by their own timeouts —
+        a hung session's ``stop()`` can itself block, and ``start()`` is
+        replaced wholesale (``BrowserManager.start`` assigns a fresh
+        ``BrowserSession``), so even a stop() that times out is recovered by
+        the subsequent start(). See
+        docs/incidents/anon-browser-cdp-death-no-recovery.
+        """
+        if self._anonymous_browser is None:
+            return
+        log.warning(
+            "Recreating anonymous browser after consecutive sweep timeouts",
+            consecutive_timeouts=self._anon_sweep_consecutive_timeouts,
+        )
+        try:
+            await asyncio.wait_for(self._anonymous_browser.stop(), timeout=30.0)
+        except Exception as exc:
+            log.warning(
+                "Anonymous browser stop during restart failed (continuing to start)",
+                error=str(exc)[:100],
+            )
+        try:
+            await asyncio.wait_for(self._anonymous_browser.start(), timeout=90.0)
+            log.info("Anonymous browser recreated successfully")
+            self._anon_sweep_consecutive_timeouts = 0
+        except Exception as exc:
+            # Leave the counter elevated so the next cycle retries the
+            # restart rather than silently giving up.
+            log.error(
+                "Anonymous browser restart failed — will retry next cycle",
+                error=str(exc)[:120],
+            )
+
     async def _sweep_and_intercept(
         self, page: object, result: PatrolCycleResult,
         known_ids: set[str] | None = None,
@@ -701,11 +754,24 @@ class PatrolEngine:
                 anon_dom_listings = await asyncio.wait_for(
                     self._anon_dom_sweep(result), timeout=60.0,
                 )
+                # Sweep completed (browser responsive, even if it found
+                # nothing) — clear the hang counter.
+                self._anon_sweep_consecutive_timeouts = 0
             except asyncio.TimeoutError:
+                self._anon_sweep_consecutive_timeouts += 1
                 log.warning(
                     "Anonymous browser DOM sweep timed out (60s) — "
                     "skipping this cycle's DOM tier",
+                    consecutive_timeouts=self._anon_sweep_consecutive_timeouts,
                 )
+                # Self-heal: a hung CDP session never recovers on its own.
+                # After N consecutive timeouts, recreate the browser so
+                # ingestion resumes without a manual container restart.
+                if (
+                    self._anon_sweep_consecutive_timeouts
+                    >= self._anon_sweep_max_timeouts
+                ):
+                    await self._restart_anonymous_browser()
             except Exception as exc:
                 log.warning("Anonymous browser sweep failed", error=str(exc)[:100])
 
