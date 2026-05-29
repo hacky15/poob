@@ -85,11 +85,25 @@ def classify_auth_state(signals: dict) -> AuthStatus | None:
     return None  # login form present or inconclusive → caller decides
 
 
-async def _detect_state(page: object) -> AuthStatus | None:
-    """Load nothing; read the current page's auth signals."""
+async def _detect_state(page: object, *, label: str = "") -> AuthStatus | None:
+    """Load nothing; read the current page's auth signals.
+
+    Logs the signals (URL + booleans only — never credentials) so a
+    not-logged-in outcome can be diagnosed from prod without guessing at
+    FB's current login-page structure.
+    """
     try:
         raw = await page.evaluate(_DETECT_STATE_JS)
         signals = parse_evaluate_result(raw) or {}
+        log.info(
+            "FB auth signals",
+            phase=label,
+            url=str(signals.get("url", ""))[:120],
+            has_login_form=signals.get("hasLoginForm"),
+            checkpoint=signals.get("checkpoint"),
+            has_app_chrome=signals.get("hasAppChrome"),
+            logged_in=signals.get("loggedIn"),
+        )
         return classify_auth_state(signals)
     except Exception as exc:
         log.debug("auth state detection failed", error=str(exc)[:100])
@@ -155,7 +169,7 @@ async def ensure_logged_in(
 
     # Step 1: load home, check existing session (cookie reuse — no login event).
     await navigate_and_wait(page, _FB_HOME, wait_ms=2500)
-    state = await _detect_state(page)
+    state = await _detect_state(page, label="home")
     if state is AuthStatus.LOGGED_IN:
         log.info("FB session valid — reusing persisted cookies (no login)")
         return AuthStatus.LOGGED_IN
@@ -181,7 +195,7 @@ async def ensure_logged_in(
     await _asyncio.sleep(post_submit_wait_ms / 1000.0)
 
     # Step 3: re-detect outcome.
-    state = await _detect_state(page)
+    state = await _detect_state(page, label="post_login")
     if state is AuthStatus.LOGGED_IN:
         log.info("FB headless login succeeded — session established")
         return AuthStatus.LOGGED_IN
