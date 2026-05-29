@@ -324,6 +324,29 @@ class BrowserManager:
             f"last error: {last_exc}",
         )
 
+    async def load_cookies(self, cookies: list[dict]) -> int:
+        """Inject cookies into the live session via CDP Network.setCookies.
+
+        Used to adopt an operator-exported FB session (cookie import) so the
+        main browser is authenticated without automating the login. Cookies
+        are CDP CookieParam dicts (name/value/domain/path/secure/httpOnly/
+        sameSite/expires). Best-effort: returns the count set, 0 on failure.
+        Never logs cookie values.
+        """
+        if self._browser is None or not cookies:
+            return 0
+        try:
+            cdp = await self._browser.get_or_create_cdp_session()
+            await self._browser.cdp_client.send.Network.setCookies(
+                params={"cookies": cookies},
+                session_id=cdp.session_id,
+            )
+            log.info("Cookies injected into browser session", count=len(cookies))
+            return len(cookies)
+        except Exception as exc:
+            log.warning("Cookie injection failed", error=str(exc)[:120])
+            return 0
+
     def get_session(self) -> BrowserSession:
         """Get the underlying BrowserSession for CDP access.
 

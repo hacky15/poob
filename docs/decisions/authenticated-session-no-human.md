@@ -20,24 +20,24 @@ Authenticated FB Marketplace access touches the operator's standing rules (no sc
 
 - **We NEVER solve a CAPTCHA / checkpoint programmatically.** That is anti-bot bypass. On a checkpoint we STOP, log, and fall back to the anonymous path.
 
-## Decision
+## Decision (revised — cookie import)
 
-Establish an authenticated session with the minimum CAPTCHA exposure and zero ongoing human touch:
+The first approach was a headless credential login from the residential IP. Prod proved two things (logged via `FB auth signals`):
+- **FB does NOT checkpoint the headless residential login** — no CAPTCHA ever fired. The big risk was unfounded.
+- **But the automated credential *submit* does not establish a session** — post-submit the page stays on `/login/` with the form present. FB hardens the login submit against automation specifically.
 
-1. **Cookie reuse first.** The `browser_profiles` Docker volume persists across deploys. On startup we load FB and check for a valid session; if present, we reuse it with **no login event** (the login event is the #1 checkpoint trigger). A successful session lasts weeks, so logins are rare.
-2. **One-time headless login** with the `.env` credentials only when no valid session exists. The outbound IP is residential (Madison AT&T, matches the account's normal location), which keeps checkpoint risk low.
-3. **Checkpoint detection → fall back, never solve.** If FB shows a checkpoint/2FA/CAPTCHA (on home or post-login), we return `CHECKPOINT`, log it, and the patrol continues on the anonymous path.
-4. **Module:** `src/poob/sites/facebook/auth.py` — `ensure_logged_in(page, email, password) -> AuthStatus` with a pure, unit-tested `classify_auth_state(signals)`. Wired into `main.py` startup after the main browser starts, behind `patrol_authenticated_login_enabled` (default True), guarded by timeouts so a hang can't block boot.
+So automating login is brittle and FB-hostile (and repeatedly POSTing credentials risks flagging the account). The operator chose the reliable path: **one-time cookie import.**
 
-The patrol engine already prefers the main browser for the DOM sweep + detail-page enrichment; once its profile holds a logged-in session, that path is authenticated automatically. The anonymous browser + anon GQL remain as the fallback tier (functionality sustained).
+1. **Cookie import.** The operator exports their real FB session cookies once (a ~2-min local browser task, per [[facebook-cookie-import]]) into `browser_profiles/facebook/cookies.json`. On startup, if not already logged in, the patrol browser injects them via CDP `Network.setCookies` and re-checks. Cookies persist in the `poob_poob-browser` volume, so the import lasts weeks — no ongoing human touch.
+2. **No automated credential login.** Dropped entirely (didn't work; risked flagging).
+3. **Checkpoint detection → fall back, never solve.** Unchanged and non-negotiable.
+4. **Module:** `src/poob/sites/facebook/auth.py` — `ensure_logged_in(page, *, cookies_path, load_cookies)` with pure, unit-tested `classify_auth_state` + `parse_cookie_export` (accepts Cookie-Editor list or Playwright storage_state). `BrowserManager.load_cookies` injects via CDP. Wired into `main.py` startup behind `patrol_authenticated_login_enabled` (default True), timeout-guarded.
+
+The patrol engine already prefers the main browser for the DOM sweep + enrichment; once its session holds the imported cookies, that path is authenticated automatically. Anon browser + anon GQL remain the fallback tier (functionality sustained).
 
 ## The one honest caveat
 
-Whether FB checkpoints a *programmatic* login is empirical — the residential IP makes it likely-OK but not guaranteed. If it ever checkpoints:
-- The system falls back to anon automatically (no break).
-- Re-establishing auth would need a **one-time cookie refresh on a trusted machine** (local, ~2 min, not server/noVNC) — rare, because a session lasts weeks once established. This is the only residual human touch, and it does not violate the no-anti-bot-bypass rule.
-
-So "zero human intervention" holds for the steady state and the happy-path first login; it cannot be *guaranteed* forever because authenticating inherently requires credentials/cookies and FB may checkpoint.
+"Zero ongoing human intervention" holds: the cookie import is a one-time setup that lasts weeks. It is **not** literally zero-touch forever — FB sessions expire, so re-export is needed occasionally (rare, local, ~2 min, not server/noVNC). When a session is absent/expired the scanner falls back to anon automatically (no breakage). We never solve a CAPTCHA programmatically.
 
 ## Validation
 

@@ -710,26 +710,27 @@ async def startup() -> None:
             log.warning("Anonymous browser failed/timed out", error=str(exc)[:100])
             anonymous_browser = None
 
-    # Establish an authenticated FB session on the main browser so its DOM
-    # sweep + detail pages see the fresher logged-in feed. Reuses a persisted
-    # cookie session (browser_profiles volume) when present; otherwise a
-    # one-time headless login with the .env credentials. NEVER solves a
-    # CAPTCHA/checkpoint — on a checkpoint it logs and continues on the
-    # anonymous path. See docs/decisions/authenticated-session-no-human.md.
+    # Establish an authenticated FB session on the main browser via a
+    # one-time operator cookie import (see runbooks/facebook-cookie-import.md)
+    # so its DOM sweep + detail pages see the fresher logged-in feed. Reuses a
+    # persisted session if present; imports cookies otherwise. NEVER solves a
+    # CAPTCHA/checkpoint — on a checkpoint it logs and continues anonymous.
+    # See docs/decisions/authenticated-session-no-human.md.
     if getattr(config, "patrol_authenticated_login_enabled", True):
         try:
             from poob.sites.facebook.auth import ensure_logged_in
 
+            cookies_path = config.browser_profiles_dir / "facebook" / "cookies.json"
             main_page = await asyncio.wait_for(
                 browser_manager.get_page(), timeout=45.0,
             )
             auth_status = await asyncio.wait_for(
                 ensure_logged_in(
                     main_page,
-                    config.facebook_email,
-                    config.facebook_password,
+                    cookies_path=cookies_path,
+                    load_cookies=browser_manager.load_cookies,
                 ),
-                timeout=150.0,
+                timeout=120.0,
             )
             log.info("FB authentication result", status=auth_status.value)
         except asyncio.TimeoutError:

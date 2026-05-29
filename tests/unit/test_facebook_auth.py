@@ -1,9 +1,9 @@
-"""Tests for Facebook authenticated-session establishment.
+"""Tests for Facebook authenticated-session establishment via cookie import.
 
-The decision logic (classify_auth_state) is pure and exhaustively tested.
-The ensure_logged_in orchestration is tested with a mocked page so we can
-assert: cookie reuse skips login, checkpoints are reported (never solved),
-and login outcomes classify correctly.
+classify_auth_state and parse_cookie_export are pure and exhaustively tested.
+ensure_logged_in is tested with a mocked page + injected load_cookies so we
+assert: existing session skips import, checkpoints are reported (never
+solved), missing cookies => NO_SESSION, and import success/failure classify.
 """
 
 from __future__ import annotations
@@ -15,9 +15,10 @@ import pytest
 
 from poob.sites.facebook.auth import (
     AuthStatus,
-    _build_login_js,
     classify_auth_state,
     ensure_logged_in,
+    load_cookie_file,
+    parse_cookie_export,
 )
 
 
@@ -26,7 +27,6 @@ from poob.sites.facebook.auth import (
 
 class TestClassifyAuthState:
     def test_checkpoint_wins_over_loggedin(self):
-        # If FB shows a checkpoint we must NOT treat it as logged in.
         assert classify_auth_state(
             {"checkpoint": True, "loggedIn": True}
         ) is AuthStatus.CHECKPOINT
@@ -34,102 +34,180 @@ class TestClassifyAuthState:
     def test_logged_in(self):
         assert classify_auth_state({"loggedIn": True}) is AuthStatus.LOGGED_IN
 
-    def test_login_form_is_inconclusive(self):
-        # Login form present → caller should attempt login → None.
+    def test_login_form_inconclusive(self):
         assert classify_auth_state({"hasLoginForm": True}) is None
-
-    def test_empty_inconclusive(self):
-        assert classify_auth_state({}) is None
 
     def test_non_dict(self):
         assert classify_auth_state(None) is None
         assert classify_auth_state("nope") is None
 
 
-# --- _build_login_js ---
+# --- parse_cookie_export (pure) ---
 
 
-class TestBuildLoginJs:
-    def test_embeds_credentials(self):
-        js = _build_login_js("user@example.com", "hunter2")
-        assert "user@example.com" in js
-        assert "hunter2" in js
+class TestParseCookieExport:
+    def test_cookie_editor_list(self):
+        raw = [
+            {
+                "name": "c_user", "value": "100", "domain": ".facebook.com",
+                "path": "/", "secure": True, "httpOnly": True,
+                "expirationDate": 1900000000, "sameSite": "no_restriction",
+            },
+            {"name": "xs", "value": "abc", "domain": ".facebook.com"},
+        ]
+        out = parse_cookie_export(raw)
+        assert {c["name"] for c in out} == {"c_user", "xs"}
+        c_user = next(c for c in out if c["name"] == "c_user")
+        assert c_user["value"] == "100"
+        assert c_user["domain"] == ".facebook.com"
+        assert c_user["secure"] is True
+        assert c_user["httpOnly"] is True
+        assert c_user["expires"] == 1900000000.0
+        assert c_user["sameSite"] == "None"  # no_restriction -> None
 
-    def test_is_bare_arrow_function_not_iife(self):
-        # browser-use's page.evaluate CALLS the function, so it must be a bare
-        # arrow function, NOT a self-invoking IIFE (that throws).
-        js = _build_login_js("a@b.com", "x")
-        assert js.strip().startswith("() =>")
-        assert not js.strip().startswith("(()")
-        assert "royal_login_button" in js  # targets FB's login button
+    def test_drops_non_facebook_cookies(self):
+        out = parse_cookie_export([
+            {"name": "g", "value": "1", "domain": ".google.com"},
+            {"name": "c_user", "value": "1", "domain": ".facebook.com"},
+        ])
+        assert [c["name"] for c in out] == ["c_user"]
+
+    def test_drops_cookies_without_name_or_value(self):
+        out = parse_cookie_export([
+            {"value": "x", "domain": ".facebook.com"},   # no name
+            {"name": "y", "domain": ".facebook.com"},     # no value
+            {"name": "ok", "value": "v", "domain": ".facebook.com"},
+        ])
+        assert [c["name"] for c in out] == ["ok"]
+
+    def test_playwright_storage_state(self):
+        raw = {"cookies": [
+            {"name": "c_user", "value": "5", "domain": ".facebook.com", "expires": 123},
+        ], "origins": []}
+        out = parse_cookie_export(raw)
+        assert out and out[0]["name"] == "c_user" and out[0]["expires"] == 123.0
+
+    def test_json_string(self):
+        raw = json.dumps([{"name": "xs", "value": "v", "domain": ".facebook.com"}])
+        out = parse_cookie_export(raw)
+        assert out[0]["name"] == "xs"
+
+    def test_garbage(self):
+        assert parse_cookie_export("not json") == []
+        assert parse_cookie_export(None) == []
+        assert parse_cookie_export(42) == []
+
+    def test_defaults(self):
+        out = parse_cookie_export([{"name": "n", "value": "v", "domain": "facebook.com"}])
+        assert out[0]["path"] == "/"
+        assert out[0]["secure"] is True
+        assert out[0]["httpOnly"] is False
+        assert "expires" not in out[0]  # no expiry given => session cookie
+
+
+# --- load_cookie_file ---
+
+
+class TestLoadCookieFile:
+    def test_missing_file(self, tmp_path):
+        assert load_cookie_file(tmp_path / "nope.json") == []
+
+    def test_valid_file(self, tmp_path):
+        p = tmp_path / "cookies.json"
+        p.write_text(json.dumps([
+            {"name": "c_user", "value": "9", "domain": ".facebook.com"},
+        ]), encoding="utf-8")
+        out = load_cookie_file(p)
+        assert out and out[0]["name"] == "c_user"
 
 
 # --- ensure_logged_in orchestration ---
 
 
-def _make_page(detect_signals: list[dict], login_ok: bool = True):
-    """Mock page whose evaluate() returns the given detect signals in order
-    (for the detection JS) and a login-ok payload for the login JS."""
+def _make_page(detect_signals: list[dict]):
     page = AsyncMock()
     state = {"i": 0}
 
-    async def _eval(js, *args, **kwargs):
-        if "loggedIn" in js:  # detection JS
-            idx = min(state["i"], len(detect_signals) - 1)
-            state["i"] += 1
-            return json.dumps(detect_signals[idx])
-        return json.dumps({"ok": login_ok, "method": "click"})  # login JS
+    async def _eval(js, *a, **k):
+        idx = min(state["i"], len(detect_signals) - 1)
+        state["i"] += 1
+        return json.dumps(detect_signals[idx])
 
     page.evaluate = AsyncMock(side_effect=_eval)
     return page
 
 
 @pytest.fixture(autouse=True)
-def _no_nav_no_sleep():
-    """Stub navigation + sleep so tests don't hit the network or wait 6s."""
-    with patch(
-        "poob.sites.facebook.auth.navigate_and_wait", new_callable=AsyncMock
-    ), patch("asyncio.sleep", new_callable=AsyncMock):
-        yield
+def _no_nav(monkeypatch):
+    monkeypatch.setattr(
+        "poob.sites.facebook.auth.navigate_and_wait", AsyncMock(),
+    )
+
+
+def _cookie_file(tmp_path):
+    p = tmp_path / "cookies.json"
+    p.write_text(json.dumps([
+        {"name": "c_user", "value": "1", "domain": ".facebook.com"},
+        {"name": "xs", "value": "2", "domain": ".facebook.com"},
+    ]), encoding="utf-8")
+    return p
 
 
 class TestEnsureLoggedIn:
     @pytest.mark.asyncio
-    async def test_reuses_existing_session_no_login(self):
+    async def test_existing_session_skips_import(self, tmp_path):
         page = _make_page([{"loggedIn": True}])
-        status = await ensure_logged_in(page, "a@b.com", "pw")
+        load = AsyncMock(return_value=2)
+        status = await ensure_logged_in(
+            page, cookies_path=_cookie_file(tmp_path), load_cookies=load,
+        )
         assert status is AuthStatus.LOGGED_IN
-        # Only the home detection ran — no login JS evaluated.
-        assert page.evaluate.await_count == 1
+        load.assert_not_awaited()  # already logged in -> no cookie import
 
     @pytest.mark.asyncio
-    async def test_checkpoint_on_home_not_solved(self):
+    async def test_checkpoint_on_home(self, tmp_path):
         page = _make_page([{"checkpoint": True}])
-        status = await ensure_logged_in(page, "a@b.com", "pw")
+        load = AsyncMock(return_value=2)
+        status = await ensure_logged_in(
+            page, cookies_path=_cookie_file(tmp_path), load_cookies=load,
+        )
         assert status is AuthStatus.CHECKPOINT
-        assert page.evaluate.await_count == 1  # no login attempted
+        load.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_no_credentials(self):
-        page = _make_page([{"hasLoginForm": True}])  # not logged in
-        status = await ensure_logged_in(page, "", "")
-        assert status is AuthStatus.NO_CREDENTIALS
+    async def test_no_cookie_file(self, tmp_path):
+        page = _make_page([{"hasLoginForm": True}])
+        status = await ensure_logged_in(
+            page, cookies_path=tmp_path / "absent.json",
+            load_cookies=AsyncMock(return_value=0),
+        )
+        assert status is AuthStatus.NO_SESSION
 
     @pytest.mark.asyncio
-    async def test_login_succeeds(self):
-        # home: not logged in -> login -> post-login: logged in
+    async def test_cookie_import_succeeds(self, tmp_path):
+        # home: not logged in -> import cookies -> post: logged in
         page = _make_page([{"hasLoginForm": True}, {"loggedIn": True}])
-        status = await ensure_logged_in(page, "a@b.com", "pw")
+        load = AsyncMock(return_value=2)
+        status = await ensure_logged_in(
+            page, cookies_path=_cookie_file(tmp_path), load_cookies=load,
+        )
         assert status is AuthStatus.LOGGED_IN
+        load.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_login_hits_checkpoint(self):
-        page = _make_page([{"hasLoginForm": True}, {"checkpoint": True}])
-        status = await ensure_logged_in(page, "a@b.com", "pw")
-        assert status is AuthStatus.CHECKPOINT
-
-    @pytest.mark.asyncio
-    async def test_login_fails_no_session(self):
+    async def test_cookie_import_stale(self, tmp_path):
+        # cookies loaded but still not logged in -> FAILED
         page = _make_page([{"hasLoginForm": True}, {"hasLoginForm": True}])
-        status = await ensure_logged_in(page, "a@b.com", "pw")
+        status = await ensure_logged_in(
+            page, cookies_path=_cookie_file(tmp_path),
+            load_cookies=AsyncMock(return_value=2),
+        )
         assert status is AuthStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_no_load_callable(self, tmp_path):
+        page = _make_page([{"hasLoginForm": True}])
+        status = await ensure_logged_in(
+            page, cookies_path=_cookie_file(tmp_path), load_cookies=None,
+        )
+        assert status is AuthStatus.NO_SESSION
