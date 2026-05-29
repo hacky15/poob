@@ -352,7 +352,7 @@ class TestGeoDistanceFilter:
         listing = make_listing(raw_data={"latitude": 43.0389, "longitude": -87.9065})
         v = self.filt(listing)
         assert v.passed is False
-        assert "mi from center" in v.reason
+        assert "mi from nearest center" in v.reason
 
     def test_skips_when_no_coords(self):
         listing = make_listing(raw_data={})
@@ -392,6 +392,45 @@ class TestGeoDistanceFilter:
         listing = make_listing(raw_data={"latitude": 43.0389, "longitude": -87.9065})
         v = filt(listing)
         assert v.passed is True
+
+
+class TestGeoDistanceFilterMultiCenter:
+    """Multi-metro general browse: a listing within radius of ANY configured
+    center passes. Madison primary + Appleton extra (~100mi apart)."""
+
+    # Madison primary, Appleton as an extra center.
+    filt = GeoDistanceFilter(
+        center_lat=43.0731, center_lon=-89.4012, radius_miles=40.0,
+        extra_centers=((44.2619, -88.4154),),  # Appleton
+    )
+
+    def test_passes_near_primary_center(self):
+        # Sun Prairie, WI — ~15mi from Madison
+        listing = make_listing(raw_data={"latitude": 43.1836, "longitude": -89.2137})
+        assert self.filt(listing).passed is True
+
+    def test_passes_near_extra_center(self):
+        # Neenah, WI — ~10mi from Appleton, ~95mi from Madison.
+        # Single-center Madison would REJECT this; multi-center accepts it.
+        listing = make_listing(raw_data={"latitude": 44.1858, "longitude": -88.4626})
+        v = self.filt(listing)
+        assert v.passed is True
+
+    def test_rejects_outside_all_centers(self):
+        # Milwaukee, WI — ~77mi from Madison AND ~80mi from Appleton.
+        listing = make_listing(raw_data={"latitude": 43.0389, "longitude": -87.9065})
+        v = self.filt(listing)
+        assert v.passed is False
+        assert "nearest center" in v.reason
+
+    def test_single_center_still_rejects_extra_metro(self):
+        """Sanity: WITHOUT the extra center, Appleton-area is rejected —
+        proving the extra_centers entry is what flips it to pass."""
+        madison_only = GeoDistanceFilter(
+            center_lat=43.0731, center_lon=-89.4012, radius_miles=40.0,
+        )
+        neenah = make_listing(raw_data={"latitude": 44.1858, "longitude": -88.4626})
+        assert madison_only(neenah).passed is False
 
     def test_stage_is_post_enrichment(self):
         assert self.filt.stage == FilterStage.POST_ENRICHMENT

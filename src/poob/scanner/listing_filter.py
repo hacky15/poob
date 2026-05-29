@@ -342,9 +342,16 @@ class FreshnessFilter:
 class GeoDistanceFilter:
     """Reject listings outside the configured search radius.
 
-    Uses haversine distance from the user's configured center point.
+    Uses haversine distance from the user's configured center point(s).
     Coordinates come from ``raw_data["latitude"]`` / ``raw_data["longitude"]``,
     which are populated during detail page enrichment.
+
+    Multi-center: when general browse sweeps more than one metro (e.g.
+    Madison AND Appleton), a listing passes if it is within ``radius_miles``
+    of the primary center OR any entry in ``extra_centers``. Without this, a
+    Madison-centered filter would reject every Appleton listing (~100mi away)
+    even though Appleton is an intended search area. See
+    docs/decisions/multi-center-general-browse.md.
 
     Listings without valid coordinates pass through (benefit of the doubt).
 
@@ -358,6 +365,9 @@ class GeoDistanceFilter:
     center_lat: float = 0.0
     center_lon: float = 0.0
     radius_miles: float = 40.0
+    # Additional accepted centers (lat, lon) for multi-metro general browse.
+    # A listing within radius of ANY center passes. Empty = single-center.
+    extra_centers: tuple[tuple[float, float], ...] = ()
 
     def __call__(self, listing: Listing) -> FilterVerdict:
         if not has_valid_coordinates(self.center_lat, self.center_lon):
@@ -369,11 +379,15 @@ class GeoDistanceFilter:
         if not has_valid_coordinates(lat, lon):
             return FilterVerdict.skip(self.name)  # No coords on listing
 
-        dist = haversine_miles(self.center_lat, self.center_lon, lat, lon)
-        if dist > self.radius_miles:
+        # Distance to the nearest accepted center.
+        centers = [(self.center_lat, self.center_lon), *self.extra_centers]
+        min_dist = min(
+            haversine_miles(clat, clon, lat, lon) for clat, clon in centers
+        )
+        if min_dist > self.radius_miles:
             return FilterVerdict.reject(
                 self.name,
-                f"{dist:.1f}mi from center (limit: {self.radius_miles:.0f}mi)",
+                f"{min_dist:.1f}mi from nearest center (limit: {self.radius_miles:.0f}mi)",
             )
         return FilterVerdict.ok(self.name)
 

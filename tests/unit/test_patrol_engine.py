@@ -1250,9 +1250,11 @@ class TestBrowsePathLocationThreading:
     async def test_browse_threads_configured_location(self, patrol_engine, mock_config):
         from poob.scanner.patrol_engine import PatrolCycleResult
 
-        mock_config.marketplace_default_location = "madison"
         mock_config.patrol_anonymous_browse_categories = ["electronics", "furniture"]
         patrol_engine._graphql_enabled = True
+        # Single browse center for this assertion.
+        patrol_engine._browse_locations = ["madison"]
+        patrol_engine._browse_location_idx = 0
 
         with patch.object(
             patrol_engine._graphql_client, "search_all_pages",
@@ -1268,6 +1270,31 @@ class TestBrowsePathLocationThreading:
         assert mock_bsp.call_count == 2
         for call in mock_bsp.call_args_list:
             assert call.kwargs.get("location_slug") == "madison"
+
+    @pytest.mark.asyncio
+    async def test_browse_rotates_centers_across_cycles(self, patrol_engine, mock_config):
+        """General browse alternates center per cycle (Madison, Appleton, ...)
+        so two metros are covered without doubling POSTs per cycle."""
+        from poob.scanner.patrol_engine import PatrolCycleResult
+
+        mock_config.patrol_anonymous_browse_categories = ["electronics"]
+        patrol_engine._graphql_enabled = True
+        patrol_engine._browse_locations = ["madison", "appleton"]
+        patrol_engine._browse_location_idx = 0
+
+        with patch.object(
+            patrol_engine._graphql_client, "search_all_pages",
+            new_callable=AsyncMock, return_value=[],
+        ), patch(
+            "poob.scanner.patrol_engine.build_search_params",
+        ) as mock_bsp:
+            mock_bsp.return_value = MagicMock()
+            await patrol_engine._fetch_anonymous_graphql(PatrolCycleResult())  # madison
+            await patrol_engine._fetch_anonymous_graphql(PatrolCycleResult())  # appleton
+            await patrol_engine._fetch_anonymous_graphql(PatrolCycleResult())  # madison (wrap)
+
+        centers = [c.kwargs.get("location_slug") for c in mock_bsp.call_args_list]
+        assert centers == ["madison", "appleton", "madison"]
 
 
 class TestAnonBrowserSelfHeal:

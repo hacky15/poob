@@ -266,7 +266,12 @@ class AppConfig(BaseSettings):
         "tools",
     ]
     patrol_anonymous_browser_enabled: bool = True  # Separate headless browser for DOM sweep
-    patrol_graphql_min_delay_seconds: float = 6.0  # Rate limit: min delay between GQL requests (was 12)
+    # Rate limit: min delay between GQL requests. Restored 6->12s on
+    # 2026-05-29: 6s was tripping FB's anon rate limit hard (consecutive_hits
+    # >130, 177/182 cycles returned zero). Halving the request RATE is the
+    # $0 lever to stay under the limit. See
+    # docs/decisions/multi-center-general-browse.md.
+    patrol_graphql_min_delay_seconds: float = 12.0
     patrol_graphql_max_pages: int = 3  # Max pagination pages per search (3 * 50 = ~150 listings)
     patrol_graphql_watchlist_enabled: bool = True  # Use GraphQL for watchlist searches too
     patrol_graphql_concurrency: int = 2  # Concurrent GraphQL search streams (2-3 safe for anon)
@@ -274,6 +279,13 @@ class AppConfig(BaseSettings):
     patrol_watchlist_sweep_enabled: bool = True  # Search FB for each watchlist item per cycle
     patrol_watchlist_max_items: int = 50  # All items every cycle (was 10)
     marketplace_default_location: str = "madison"  # FB city slug for search URL path
+    # General-browse search centers (NOT watchlist — those carry their own
+    # bounds). Each cycle rotates to ONE of these so POST volume per cycle
+    # stays flat (one center x N categories) while coverage spans all centers
+    # across consecutive cycles — the $0 way to cover two metros without
+    # doubling GQL requests. The GeoDistanceFilter accepts listings within
+    # radius of ANY of these. See docs/decisions/multi-center-general-browse.md.
+    patrol_browse_locations: list[str] = ["madison", "appleton"]
     # Geo-filter center point: auto-resolved from marketplace_default_location
     # if left at 0.0. Set explicitly to override (e.g., for a user in a non-mapped city).
     patrol_center_lat: float = 0.0

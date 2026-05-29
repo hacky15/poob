@@ -216,6 +216,27 @@ class PatrolEngine:
             explicit_lat=getattr(config, "patrol_center_lat", 0.0),
             explicit_lon=getattr(config, "patrol_center_lon", 0.0),
         )
+
+        # General-browse search centers (e.g. Madison + Appleton). Each cycle
+        # rotates to ONE center so per-cycle POST volume stays flat while
+        # coverage spans all centers across cycles. The GeoDistanceFilter must
+        # accept listings near ANY of them, else the non-primary metro's
+        # listings get rejected ~100mi from the primary center.
+        _browse_cfg = getattr(config, "patrol_browse_locations", None)
+        if not isinstance(_browse_cfg, (list, tuple)) or not _browse_cfg:
+            _browse_cfg = [config.marketplace_default_location]
+        self._browse_locations: list[str] = [s for s in _browse_cfg if s]
+        if not self._browse_locations:
+            self._browse_locations = [config.marketplace_default_location]
+        self._browse_location_idx = 0
+        # Resolve each browse location to coords; the primary center is
+        # already (center_lat, center_lon), so extras are the rest.
+        extra_centers: list[tuple[float, float]] = []
+        for slug in self._browse_locations:
+            clat, clon = resolve_center_coordinates(city_slug=slug)
+            if (round(clat, 4), round(clon, 4)) != (round(center_lat, 4), round(center_lon, 4)):
+                extra_centers.append((clat, clon))
+
         # Learned location cache: locations rejected by GeoDistanceFilter
         # are cached so they skip enrichment on subsequent cycles.
         self._known_far_filter = KnownFarLocationFilter()
@@ -248,6 +269,7 @@ class PatrolEngine:
                 center_lat=center_lat,
                 center_lon=center_lon,
                 radius_miles=float(config.patrol_base_radius_miles),
+                extra_centers=tuple(extra_centers),
             ),
         ])
 
@@ -896,6 +918,23 @@ class PatrolEngine:
             [""],  # Fallback: just the empty browse
         )
 
+        # Rotate to ONE general-browse center this cycle (e.g. Madison this
+        # cycle, Appleton next). Keeps POST volume flat at one-center x
+        # N-categories while covering all configured metros across cycles —
+        # the $0 way to scan two metros without doubling GQL requests (which
+        # would trip FB's rate limit harder). Watchlist searches are
+        # unaffected; they carry their own per-item location.
+        browse_center = self._browse_locations[
+            self._browse_location_idx % len(self._browse_locations)
+        ]
+        self._browse_location_idx += 1
+        log.info(
+            "Anonymous GQL browse center",
+            center=browse_center,
+            rotation_idx=(self._browse_location_idx - 1) % len(self._browse_locations),
+            centers=len(self._browse_locations),
+        )
+
         # Parallelize category fetches with semaphore (same pattern as
         # _sweep_watchlist_items). Cuts category phase from ~120s to ~40-60s.
         concurrency = getattr(self._config, "patrol_graphql_concurrency", 2)
@@ -908,20 +947,19 @@ class PatrolEngine:
                 if self._graphql_client.is_rate_limited:
                     return []
                 try:
-                    # Thread the configured location into the browse query.
-                    # Without it, build_search_params falls through to the
-                    # hardcoded Appleton default (graphql_client DEFAULT_*),
-                    # so FB served Fox-Valley inventory ~100mi outside the
-                    # configured radius — the geo filter then discarded most
-                    # of it after it had already flooded the eval pool. The
-                    # watchlist path already threads this; the browse path
-                    # silently didn't. See
-                    # docs/incidents/browse-path-ignored-configured-location.
+                    # Thread THIS cycle's rotating browse center into the
+                    # query. Without a location, build_search_params falls
+                    # through to the hardcoded Appleton default (graphql_client
+                    # DEFAULT_*), so FB served inventory outside the configured
+                    # radius — the geo filter then discarded most of it after
+                    # it had already flooded the eval pool. The watchlist path
+                    # already threads location; the browse path silently
+                    # didn't. See
+                    # docs/incidents/browse-path-ignored-configured-location
+                    # and docs/decisions/multi-center-general-browse.
                     params = build_search_params(
                         query=category,
-                        location_slug=getattr(
-                            self._config, "marketplace_default_location", None,
-                        ),
+                        location_slug=browse_center,
                         radius_miles=self._config.patrol_base_radius_miles,
                         days_listed=self._config.patrol_days_since_listed,
                         count=self._config.scan_max_listings_per_query,
