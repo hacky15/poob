@@ -706,6 +706,31 @@ class PatrolEngine:
             self._canaries.check_batch(listings, source="anonymous_dom")
         return listings
 
+    async def _auth_dom_sweep(
+        self, result: PatrolCycleResult,
+    ) -> list[Listing]:
+        """Authenticated (logged-in) browser DOM sweep of the marketplace.
+
+        The anonymous feed serves mostly stale listings; the LOGGED-IN
+        marketplace "newest near you" feed is materially fresher. This sweeps
+        it via the authenticated main browser. Isolated for a per-step
+        timeout like the anon sweep. See
+        docs/decisions/authenticated-discovery-sweep.md.
+        """
+        auth_page = await self._browser.get_page()
+        listings = await self._sweep_categories(auth_page, result)
+        if listings:
+            log.info("Authenticated browser DOM sweep", count=len(listings))
+            log_sweep(
+                measure_sweep(
+                    listings,
+                    days_since_listed=self._config.patrol_days_since_listed,
+                ),
+                source="authenticated_dom",
+            )
+            self._canaries.check_batch(listings, source="authenticated_dom")
+        return listings
+
     async def _restart_anonymous_browser(self) -> None:
         """Tear down and recreate the anonymous browser session in-process.
 
@@ -813,23 +838,42 @@ class PatrolEngine:
             except Exception as exc:
                 log.warning("Anonymous browser sweep failed", error=str(exc)[:100])
 
-        # Merge: GQL + anonymous DOM (both depersonalized)
-        combined = list(anon_listings)
-        seen_ids = {l.external_id for l in combined}
-        for l in anon_dom_listings:
-            if l.external_id not in seen_ids:
-                seen_ids.add(l.external_id)
-                combined.append(l)
+        # Step 2b: Authenticated DOM sweep of the logged-in marketplace
+        # "newest near you" feed — materially fresher than the anonymous feed
+        # (which serves mostly >6h-old listings; measured 0 fresh of 12 on
+        # the anon path post-auth). Only runs when the main browser holds a
+        # confirmed session. See docs/decisions/authenticated-discovery-sweep.md.
+        auth_dom_listings: list[Listing] = []
+        if self._browser and getattr(self._browser, "is_authenticated", False):
+            try:
+                auth_dom_listings = await asyncio.wait_for(
+                    self._auth_dom_sweep(result), timeout=60.0,
+                )
+            except asyncio.TimeoutError:
+                log.warning("Authenticated browser DOM sweep timed out (60s)")
+            except Exception as exc:
+                log.warning("Authenticated browser sweep failed", error=str(exc)[:100])
+
+        # Merge: authenticated DOM (freshest) first, then anon GQL + anon DOM.
+        combined: list[Listing] = []
+        seen_ids: set[str] = set()
+        for src in (auth_dom_listings, anon_listings, anon_dom_listings):
+            for l in src:
+                if l.external_id not in seen_ids:
+                    seen_ids.add(l.external_id)
+                    combined.append(l)
 
         if combined:
             log.info(
-                "General browse complete (depersonalized)",
+                "General browse complete",
+                auth_count=len(auth_dom_listings),
                 gql_count=len(anon_listings),
                 dom_count=len(anon_dom_listings),
                 total=len(combined),
             )
             self._consecutive_empty_sweeps = 0
-            return combined, "anonymous_graphql"
+            source = "authenticated" if auth_dom_listings else "anonymous_graphql"
+            return combined, source
 
         # Step 3: Fall back to authenticated browser DOM (last resort).
         # Skip entirely if the main browser never came up — nothing below

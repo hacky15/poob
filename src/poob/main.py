@@ -732,6 +732,9 @@ async def startup() -> None:
                 ),
                 timeout=120.0,
             )
+            from poob.sites.facebook.auth import AuthStatus
+
+            browser_manager.mark_authenticated(auth_status is AuthStatus.LOGGED_IN)
             log.info("FB authentication result", status=auth_status.value)
         except asyncio.TimeoutError:
             log.warning(

@@ -91,6 +91,9 @@ def mock_browser_manager():
     session.new_page = AsyncMock(return_value=AsyncMock())
     session.close_page = AsyncMock()
     mgr.get_session = Mock(return_value=session)
+    # Default unauthenticated so the authenticated DOM sweep stays OFF unless
+    # a test opts in (a bare AsyncMock attr would be truthy and wrongly fire).
+    mgr.is_authenticated = False
     return mgr
 
 
@@ -1236,6 +1239,59 @@ class TestWatchlistSweepMultiConfig:
             listings = await patrol_engine._sweep_watchlist_items(MagicMock(), result)
 
             assert len(listings) == 1  # deduped
+
+
+class TestAuthenticatedDiscoverySweep:
+    """When the main browser holds a confirmed session, discovery runs an
+    authenticated DOM sweep of the logged-in marketplace (fresher than anon).
+    When unauthenticated, it must NOT run (anon path only)."""
+
+    @pytest.mark.asyncio
+    async def test_auth_sweep_runs_when_authenticated(self, patrol_engine):
+        from poob.scanner.patrol_engine import PatrolCycleResult
+
+        patrol_engine._browser.is_authenticated = True
+        page = await patrol_engine._browser.get_page()
+        auth_listing = _make_listing("auth-1", "Fresh from auth feed", 40.0)
+
+        with patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[],
+        ), patch.object(
+            patrol_engine, "_anon_dom_sweep", new_callable=AsyncMock, return_value=[],
+        ), patch.object(
+            patrol_engine, "_auth_dom_sweep", new_callable=AsyncMock,
+            return_value=[auth_listing],
+        ) as mock_auth:
+            listings, source = await patrol_engine._sweep_and_intercept(
+                page, PatrolCycleResult(),
+            )
+
+        mock_auth.assert_awaited_once()
+        assert source == "authenticated"
+        assert any(l.external_id == "auth-1" for l in listings)
+
+    @pytest.mark.asyncio
+    async def test_auth_sweep_skipped_when_unauthenticated(self, patrol_engine):
+        from poob.scanner.patrol_engine import PatrolCycleResult
+
+        patrol_engine._browser.is_authenticated = False
+        page = await patrol_engine._browser.get_page()
+
+        with patch.object(
+            patrol_engine, "_fetch_anonymous_graphql", new_callable=AsyncMock,
+            return_value=[_make_listing("gql-1")],
+        ), patch.object(
+            patrol_engine, "_anon_dom_sweep", new_callable=AsyncMock, return_value=[],
+        ), patch.object(
+            patrol_engine, "_auth_dom_sweep", new_callable=AsyncMock, return_value=[],
+        ) as mock_auth:
+            listings, source = await patrol_engine._sweep_and_intercept(
+                page, PatrolCycleResult(),
+            )
+
+        mock_auth.assert_not_awaited()
+        assert source == "anonymous_graphql"
 
 
 class TestEnrichmentCapDecoupled:

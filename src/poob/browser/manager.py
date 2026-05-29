@@ -69,6 +69,20 @@ class BrowserManager:
         self._cdp_permanently_broken: bool = False
         self._consecutive_cdp_failures: int = 0
         self._max_consecutive_cdp_failures: int = 3
+        # Set True once an authenticated FB session is confirmed (cookie
+        # import). Lets the patrol engine route a DISCOVERY sweep through
+        # this logged-in browser — the authenticated marketplace feed is
+        # fresher than the anonymous one (which serves mostly stale listings).
+        self._authenticated: bool = False
+
+    @property
+    def is_authenticated(self) -> bool:
+        """Whether this browser holds a confirmed authenticated session."""
+        return self._authenticated
+
+    def mark_authenticated(self, value: bool) -> None:
+        """Record the authenticated-session state (set after cookie import)."""
+        self._authenticated = bool(value)
 
     async def start(self, cookies_file: str | None = None) -> None:
         """Launch the browser with persistent profile config.
