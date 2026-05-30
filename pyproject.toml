@@ -26,6 +26,7 @@ dependencies = [
     "silero-vad>=6.0.0",            # Neural VAD for speech detection (replaces energy-based)
     "onnxruntime>=1.18.0",          # ONNX inference for Silero VAD + wake-word model
     "openwakeword>=0.6.0",          # Wake-word inference — loads data/hey_poob.onnx (trained model)
+    "model2vec>=0.3.0",             # Static-embedding semantic relevance signal in MultiSignalAddressDetector (potion-base-8M, ~30MB)
 
     # Configuration
     "pydantic>=2.5.0",

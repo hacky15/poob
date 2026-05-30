@@ -94,8 +94,10 @@ class MultiSignalAddressDetector:
         # Channel member names (for negative signal)
         self._member_names: set[str] = set()
 
-        # Model2Vec for semantic similarity (lazy-loaded)
+        # Model2Vec for semantic similarity (lazy-loaded). _embed_load_failed
+        # latches a failed import so we don't retry + re-warn every decision.
         self._embed_model = None
+        self._embed_load_failed = False
 
         # Signal weights (calibrated from research — Shriberg 2012, Webb 2025)
         self._weights = {
@@ -116,8 +118,15 @@ class MultiSignalAddressDetector:
         # Below 0.60 → don't respond (wake word is the only reliable path)
 
     def _ensure_model(self) -> None:
-        """Lazy-load Model2Vec on first use."""
-        if self._embed_model is not None:
+        """Lazy-load Model2Vec on first use.
+
+        Idempotent and self-limiting: a failed load sets ``_embed_load_failed``
+        so we don't retry the import (and re-log the warning) on every
+        addressee decision. The model is pre-baked into the image
+        (Dockerfile 4c); a failure here means the dep/model is genuinely
+        absent and semantic scoring stays disabled for the session.
+        """
+        if self._embed_model is not None or self._embed_load_failed:
             return
         try:
             from model2vec import StaticModel
@@ -126,6 +135,7 @@ class MultiSignalAddressDetector:
             )
             log.info("Model2Vec loaded for semantic scoring")
         except Exception as exc:
+            self._embed_load_failed = True
             log.warning("Model2Vec unavailable, semantic scoring disabled", error=str(exc)[:80])
 
     # ----- State update methods (called by VoiceSession) -----

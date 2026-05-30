@@ -59,6 +59,15 @@ RUN python -c "import openwakeword.utils; openwakeword.utils.download_models([])
 RUN python -c "from kokoro_onnx import Kokoro; Kokoro()" \
     || echo "warn: kokoro_onnx pre-download skipped; cascade will use cloud TTS"
 
+# 4c. Model2Vec static embedding (potion-base-8M, ~30 MB). Pre-download so
+# the MultiSignalAddressDetector's semantic-relevance signal loads from
+# cache on first voice utterance instead of fetching at runtime. Soft-fails
+# so the image still ships if the dep is absent — the detector degrades to
+# its other signals (wake-word, conversation-state) gracefully. See
+# docs/incidents/text-mode-rlhf-refusal-leak-2026-05-29.md.
+RUN python -c "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M')" \
+    || echo "warn: model2vec pre-download skipped; semantic addressee scoring disabled"
+
 # 5. Local package (volatile — every commit invalidates from here down).
 # setuptools' package-find reads `[tool.setuptools.packages.find] where=["src"]`
 # at install time, so src/ must exist before `pip install -e .`. The
