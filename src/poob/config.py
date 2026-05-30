@@ -127,6 +127,20 @@ class AppConfig(BaseSettings):
     # the 600s cycle timeout + per-listing 20s timeout + early-bail.
     # See docs/decisions/enrichment-cap-decoupled-from-eval-cap.md.
     patrol_enrichment_cap: int = 75
+    # Aggregate wall-clock budget for the detail-page enrichment phase. The
+    # candidate list is freshness-sorted (newest-first), so when a high-volume
+    # cycle would enrich more listings than fit in the cycle, this budget stops
+    # enrichment and proceeds with the freshest already enriched — turning a
+    # hard 600s cycle abandonment (which drops the WHOLE cycle, deals included)
+    # into graceful partial completion. 0 disables the bound. Sized well inside
+    # the 600s scheduler ceiling, leaving headroom for sweep + VLM + notify.
+    # See docs/incidents/enrichment-no-time-budget-cycle-abandonment.md.
+    patrol_enrichment_max_seconds: float = 300.0
+    # Aggregate wall-clock budget for the VLM evaluation phase (evaluate_batch).
+    # A degraded/rate-limited cascade on a full survivor batch could otherwise
+    # run past the 600s cycle ceiling. On timeout the cycle proceeds with no
+    # deals from this batch rather than being abandoned. 0 disables the bound.
+    patrol_evaluation_max_seconds: float = 180.0
 
     # --- Visual Enrichment (reverse image search) ---
     google_cloud_vision_api_key: str = ""  # Google Cloud Vision API key

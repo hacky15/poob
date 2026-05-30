@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass, field
@@ -1377,6 +1378,144 @@ class TestEnrichmentCapDecoupled:
 
         # Capped to the enrichment budget (75), NOT the eval cap (50).
         assert captured.get("count") == 75
+
+
+class TestEnrichmentTimeBudget:
+    """High-volume cycles must not blow the 600s scheduler ceiling. The
+    detail-enrichment phase has an aggregate wall-clock budget: when exhausted
+    it stops enriching and proceeds with what's done. Because the candidate
+    list is freshness-sorted (newest-first), the listings dropped by the budget
+    are the stalest/timestampless ones that can never satisfy a notification
+    freshness gate — so a hard cycle abandonment (which drops the WHOLE cycle,
+    deals included) becomes graceful partial completion.
+    See docs/incidents/enrichment-no-time-budget-cycle-abandonment.md."""
+
+    def test_budget_disabled_when_unset(self, patrol_engine):
+        # Spec'd mock provides no concrete value -> budget disabled (0.0 = no bound),
+        # preserving today's behavior wherever the config field is absent.
+        assert patrol_engine._enrichment_max_seconds == 0.0
+
+    def test_explicit_budget_honored(
+        self, mock_config, mock_browser_manager, mock_listing_repo,
+        mock_watchlist_repo, mock_deal_repo, mock_scan_log_repo,
+        mock_notifier, mock_smart_deal_radar, interest_matcher,
+    ):
+        from poob.scanner.patrol_engine import PatrolEngine
+
+        mock_config.patrol_enrichment_max_seconds = 250.0
+        engine = PatrolEngine(
+            browser_manager=mock_browser_manager, listing_repo=mock_listing_repo,
+            watchlist_repo=mock_watchlist_repo, deal_repo=mock_deal_repo,
+            scan_log_repo=mock_scan_log_repo, notifier=mock_notifier,
+            interest_matcher=interest_matcher, smart_deal_radar=mock_smart_deal_radar,
+            config=mock_config,
+        )
+        assert engine._enrichment_max_seconds == 250.0
+
+    @pytest.mark.asyncio
+    async def test_enrichment_stops_at_time_budget(self, patrol_engine):
+        """With the budget exhausted after the first batch, the loop breaks and
+        does NOT navigate the remaining detail pages."""
+        # 20 listings all needing enrichment (no description).
+        listings = [
+            _make_listing(
+                external_id=str(2000 + i), title=f"Item {i}", price=10.0,
+                location="Madison, WI",
+            )
+            for i in range(20)
+        ]
+        patrol_engine._enrichment_max_seconds = 3.0
+
+        calls = {"n": 0}
+
+        async def _extract(tab, listing):
+            calls["n"] += 1
+            return listing  # no new data
+
+        # Controllable monotonic clock: entry -> 100.0 (deadline=103.0);
+        # first loop-top -> 101.0 (<103, batch 1 runs); second loop-top ->
+        # 200.0 (>=103, break before batch 2). Tail repeats the last value.
+        ticks = [100.0, 101.0, 200.0]
+
+        def _mono():
+            return ticks.pop(0) if len(ticks) > 1 else ticks[0]
+
+        with patch(
+            "poob.sites.facebook.detail_extractor.extract_listing_details",
+            side_effect=_extract,
+        ), patch(
+            "poob.scanner.patrol_engine.random_delay", new_callable=AsyncMock,
+        ), patch(
+            "poob.scanner.patrol_engine.time.monotonic", side_effect=_mono,
+        ):
+            result = await patrol_engine._enrich_listings_from_detail_pages(
+                AsyncMock(), listings,
+            )
+
+        # Only the first concurrency=2 batch ran before the budget tripped.
+        assert calls["n"] == 2
+        # The full list is still returned (partially enriched), never dropped.
+        assert len(result) == 20
+
+    @pytest.mark.asyncio
+    async def test_no_budget_enriches_all(self, patrol_engine):
+        """Budget=0 disables the bound — every listing is enriched (today's
+        behavior preserved for the common, small-batch case)."""
+        listings = [
+            _make_listing(external_id=str(2100 + i), title=f"I{i}", price=5.0)
+            for i in range(6)
+        ]
+        patrol_engine._enrichment_max_seconds = 0.0
+
+        calls = {"n": 0}
+
+        async def _extract(tab, listing):
+            calls["n"] += 1
+            return listing
+
+        with patch(
+            "poob.sites.facebook.detail_extractor.extract_listing_details",
+            side_effect=_extract,
+        ), patch(
+            "poob.scanner.patrol_engine.random_delay", new_callable=AsyncMock,
+        ):
+            await patrol_engine._enrich_listings_from_detail_pages(
+                AsyncMock(), listings,
+            )
+
+        assert calls["n"] == 6
+
+
+class TestEvaluationTimeout:
+    """A degraded VLM cascade must not run the survivor batch past the 600s
+    cycle ceiling. evaluate_batch is bounded; on timeout the cycle proceeds
+    with no deals from this batch rather than being abandoned."""
+
+    def test_eval_budget_disabled_when_unset(self, patrol_engine):
+        assert patrol_engine._evaluation_max_seconds == 0.0
+
+    @pytest.mark.asyncio
+    async def test_evaluation_times_out_gracefully(
+        self, patrol_engine, mock_smart_deal_radar,
+    ):
+        from poob.scanner.patrol_engine import PatrolCycleResult
+
+        listings = [_make_listing(external_id=str(3000 + i)) for i in range(3)]
+        patrol_engine._evaluation_max_seconds = 0.05
+
+        async def _hang(*args, **kwargs):
+            await asyncio.sleep(5.0)
+            return []
+
+        mock_smart_deal_radar.evaluate_batch = AsyncMock(side_effect=_hang)
+
+        result = PatrolCycleResult()
+        eval_result, to_eval = await patrol_engine._evaluate(listings, result)
+
+        # No deals harvested, but the cycle returns cleanly instead of hanging.
+        assert eval_result.base_deals == []
+        assert eval_result.watchlist_deals == []
+        assert any("timed out" in e for e in result.errors)
 
 
 class TestBrowsePathLocationThreading:

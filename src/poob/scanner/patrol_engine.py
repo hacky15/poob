@@ -218,6 +218,18 @@ class PatrolEngine:
             _ec if isinstance(_ec, int) and _ec >= self._max_evaluations
             else self._max_evaluations
         )
+        # Aggregate wall-clock budgets for the two cycle-dominating phases.
+        # Bound enrichment and VLM evaluation by TIME (not just pool size) so a
+        # high-volume cycle completes-with-freshest instead of hitting the 600s
+        # scheduler abandon ceiling. 0/non-numeric => unbounded (legacy behavior).
+        _ems = getattr(config, "patrol_enrichment_max_seconds", None)
+        self._enrichment_max_seconds = (
+            float(_ems) if isinstance(_ems, (int, float)) and _ems > 0 else 0.0
+        )
+        _evms = getattr(config, "patrol_evaluation_max_seconds", None)
+        self._evaluation_max_seconds = (
+            float(_evms) if isinstance(_evms, (int, float)) and _evms > 0 else 0.0
+        )
 
         # Build unified filter chain (replaces hardcoded _ALLOWED_NOTIFY_STATES,
         # _EXCLUDED_CATEGORY_PATTERNS, triple-check pattern, and backlog bypass).
@@ -1559,6 +1571,14 @@ class PatrolEngine:
 
         all_tabs = [page, *extra_tabs]
         batch_count = 0
+        budget_exhausted = False
+        # Aggregate time budget: stop enriching once this phase's wall-clock
+        # budget is spent and proceed with the freshest already enriched.
+        # needs_enrichment is freshness-sorted, so the listings dropped here are
+        # the stalest/timestampless ones that can't pass a notification gate.
+        # Prevents a high-volume cycle from hitting the 600s scheduler ceiling.
+        budget_s = self._enrichment_max_seconds
+        deadline = (time.monotonic() + budget_s) if budget_s > 0 else None
         # Early bail: if the first N listings all fail to enrich, the
         # extraction method probably doesn't work on this session's pages.
         # Stop wasting time navigating to 50 pages that return nothing.
@@ -1567,6 +1587,17 @@ class PatrolEngine:
 
         # Process in batches of `concurrency` with staggered starts.
         for batch_start in range(0, len(needs_enrichment), len(all_tabs)):
+            # Aggregate time-budget check (freshest listings enriched first).
+            if deadline is not None and time.monotonic() >= deadline:
+                budget_exhausted = True
+                log.warning(
+                    "Detail enrichment time budget exhausted — proceeding with freshest",
+                    budget_s=budget_s,
+                    enriched=enriched_count,
+                    attempted=batch_start,
+                    remaining=len(needs_enrichment) - batch_start,
+                )
+                break
             # Early bail check
             if consecutive_misses >= _EARLY_BAIL_THRESHOLD:
                 skipped = len(needs_enrichment) - batch_start
@@ -1622,6 +1653,7 @@ class PatrolEngine:
             redirected=redirected_count,
             concurrency=len(all_tabs),
             batches=batch_count,
+            budget_exhausted=budget_exhausted,
         )
         if result is not None:
             result.enriched = enriched_count
@@ -1771,9 +1803,23 @@ class PatrolEngine:
         result.vlm_evaluated = len(to_evaluate)
 
         try:
-            pipeline_results = await self._smart_deal_radar.evaluate_batch(
+            eval_coro = self._smart_deal_radar.evaluate_batch(
                 to_evaluate, watchlist_items=interests
             )
+            if self._evaluation_max_seconds > 0:
+                pipeline_results = await asyncio.wait_for(
+                    eval_coro, timeout=self._evaluation_max_seconds
+                )
+            else:
+                pipeline_results = await eval_coro
+        except asyncio.TimeoutError:
+            log.error(
+                "Pipeline evaluation timed out — cycle proceeds without this batch's deals",
+                timeout_s=self._evaluation_max_seconds,
+                batch_size=len(to_evaluate),
+            )
+            result.errors.append("Pipeline: evaluation timed out")
+            return eval_result, to_evaluate
         except Exception as exc:
             log.error("Pipeline evaluation failed", error=str(exc))
             result.errors.append(f"Pipeline: {exc}")
