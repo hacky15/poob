@@ -46,6 +46,7 @@ Thumbs.db
 
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+.claude/agent-memory/
 
 # Stray Node.js artifacts from accidental `npm install` in the repo root.
 # Poob is Python-only; package.json and node_modules/ have no place here.
