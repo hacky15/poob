@@ -31,7 +31,7 @@ The tension: two metros want more coverage, but the rate limit demands fewer GQL
 
 - Each metro is scanned every *other* moderate cycle (~every 10 min at the 5-min moderate interval). Freshness per metro halves vs single-metro-every-cycle — an accepted tradeoff for covering two metros under the rate limit at $0.
 - The `LocationTextFilter` (state-centroid pre-check) needs no change: both Madison and Appleton are WI, so it already passes both and only rejects far states (CA/TX).
-- The `KnownFarLocationFilter` learned cache still works per-location-string; multi-center just means fewer strings get learned-as-far.
+- The `KnownFarLocationFilter` learned cache still works per-location-string; multi-center just means fewer strings get learned-as-far. **(CORRECTED 2026-05-30 — see [[known-far-location-cache-poisoning]]: keying the cache on the raw label is unsafe because a single FB town label straddles the radius boundary. The filter now also tracks an in-radius "near" veto so a boundary town like "Madison, WI" is never cached wholesale.)**
 - If the rate limit still dominates after this, the remaining levers are: fewer categories per cycle (rotate categories like the DOM tier), or a residential/Madison+Appleton egress proxy ($ — deferred, operator declined for now).
 - Adding a third metro later = one entry in `patrol_browse_locations`; the rotation and multi-center filter scale without code change (registry pattern).
 

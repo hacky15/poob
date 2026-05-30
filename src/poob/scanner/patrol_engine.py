@@ -263,6 +263,16 @@ class PatrolEngine:
         # are cached so they skip enrichment on subsequent cycles.
         self._known_far_filter = KnownFarLocationFilter()
 
+        # Held as an attribute (not just inline in the chain) so the learn
+        # site can reuse its exact verdict to detect confirmed in-radius pins
+        # without duplicating the haversine/centers logic.
+        self._geo_filter = GeoDistanceFilter(
+            center_lat=center_lat,
+            center_lon=center_lon,
+            radius_miles=float(config.patrol_base_radius_miles),
+            extra_centers=tuple(extra_centers),
+        )
+
         self._filter_chain = FilterChain([
             # --- PRE_ENRICHMENT stage ---
             SponsoredFilter(),
@@ -287,12 +297,7 @@ class PatrolEngine:
                 stage=FilterStage.POST_ENRICHMENT,
                 max_age_hours=config.listing_max_age_hours,
             ),
-            GeoDistanceFilter(
-                center_lat=center_lat,
-                center_lon=center_lon,
-                radius_miles=float(config.patrol_base_radius_miles),
-                extra_centers=tuple(extra_centers),
-            ),
+            self._geo_filter,
         ])
 
         # Sweep mode: "unified" (1 page load) or "categories" (multi-page)
@@ -578,12 +583,23 @@ class PatrolEngine:
                 tags_by_id=tags_by_id,
             )
 
-            # Learn: cache location strings rejected by geo_distance so
-            # future cycles skip enrichment for the same locations.
+            # Learn the geo cache from this cycle's POST results. A confirmed
+            # in-radius pin (geo_distance OK, not skipped) marks its town string
+            # as near — permanently vetoing it from the far-cache so a single
+            # borderline pin can't poison a boundary-straddling label like
+            # "Madison, WI". Far pins (geo_distance rejections) seed the cache.
+            # Near is learned first so it wins within a cycle.
+            # See docs/incidents/known-far-location-cache-poisoning.md.
+            for listing in new_listings:
+                if not listing.location:
+                    continue
+                geo_v = self._geo_filter(listing)
+                if geo_v.passed and geo_v.reason != "skipped:missing_data":
+                    self._known_far_filter.learn_near(listing.location)
             for listing, res in post_rejected:
                 for v in res.rejections:
                     if v.filter_name == "geo_distance" and listing.location:
-                        self._known_far_filter.learn(listing.location)
+                        self._known_far_filter.learn_far(listing.location)
 
             # Step 3: Evaluate (SmartDealRadar + InterestMatcher)
             eval_result, all_evaluated = await self._evaluate(new_listings, result)

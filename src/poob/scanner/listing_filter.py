@@ -162,35 +162,56 @@ _LISTED_AGO_RE = re.compile(r"listed\s+\d+\s*[hmd]\w*\s+ago")
 
 
 class KnownFarLocationFilter:
-    """Reject listings whose location text was previously rejected by GeoDistanceFilter.
+    """Skip enrichment on towns that are entirely outside the search radius,
+    learned from GeoDistanceFilter rejections.
 
-    This is a learned cache: the system discovers which location strings
-    map to out-of-range coordinates via GeoDistanceFilter post-enrichment,
-    then uses that knowledge to skip enrichment on subsequent cycles.
-    Persists within a session (resets on restart).
+    A single FB location label (e.g. "Madison, WI") can straddle the radius
+    boundary — pins labeled "Madison, WI" range 0-44mi from center. A town is
+    therefore cached as far ONLY while it has never been observed in-radius:
+    the first confirmed in-radius pin permanently vetoes the town from the
+    cache (and un-poisons it if already cached). This prevents one borderline
+    pin from rejecting a boundary-straddling town's many in-radius listings.
+    See docs/incidents/known-far-location-cache-poisoning.md.
+
+    Learned cache persists within a session (resets on restart).
     """
 
     name: str = "known_far_location"
     stage: FilterStage = FilterStage.PRE_ENRICHMENT
     exempt_tags: frozenset[str] = frozenset({"watchlist_geo_override"})
 
-    def __init__(self, known_far: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        known_far: set[str] | None = None,
+        known_near: set[str] | None = None,
+    ) -> None:
         self._known_far = known_far if known_far is not None else set()
+        self._known_near = known_near if known_near is not None else set()
 
-    def learn(self, location: str) -> None:
-        """Record a location string that was rejected by GeoDistanceFilter."""
+    def learn_far(self, location: str) -> None:
+        """Record a location whose pin GeoDistanceFilter rejected as
+        out-of-radius. No-op once the string has been observed in-radius."""
+        loc = location.strip().lower()
+        if loc and loc not in self._known_near:
+            self._known_far.add(loc)
+
+    def learn_near(self, location: str) -> None:
+        """Record a confirmed in-radius pin for this location string. Vetoes
+        the string from the far-cache permanently and un-poisons it if already
+        cached — a boundary-straddling town must never be skipped wholesale."""
         loc = location.strip().lower()
         if loc:
-            self._known_far.add(loc)
+            self._known_near.add(loc)
+            self._known_far.discard(loc)
 
     def __call__(self, listing: Listing) -> FilterVerdict:
         loc = (listing.location or "").strip().lower()
         if not loc:
             return FilterVerdict.skip(self.name)
-        if loc in self._known_far:
+        if loc in self._known_far and loc not in self._known_near:
             return FilterVerdict.reject(
                 self.name,
-                f"previously rejected by geo_distance: '{listing.location}'",
+                f"location entirely out of radius (no in-radius pin seen): '{listing.location}'",
             )
         return FilterVerdict.ok(self.name)
 

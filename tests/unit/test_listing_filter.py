@@ -19,6 +19,7 @@ from poob.scanner.listing_filter import (
     FreshnessFilter,
     GarbageFilter,
     GeoDistanceFilter,
+    KnownFarLocationFilter,
     SponsoredFilter,
 )
 from poob.storage.models import Listing
@@ -336,6 +337,53 @@ class TestFreshnessFilterPostEnrichmentRejectsNoTimestamp:
 # ===================================================================
 # GeoDistanceFilter
 # ===================================================================
+
+class TestKnownFarLocationFilter:
+    """Pre-enrichment learned cache of genuinely-far towns. Must NOT poison a
+    town label that straddles the radius boundary: a single FB label like
+    'Madison, WI' spans 0-44mi, so one out-of-radius pin must never reject the
+    town's many in-radius pins. See
+    docs/incidents/known-far-location-cache-poisoning.md."""
+
+    def test_learns_and_rejects_genuinely_far_town(self):
+        f = KnownFarLocationFilter()
+        f.learn_far("Plymouth, WI")  # a town where every pin is far
+        v = f(make_listing(location="Plymouth, WI"))
+        assert v.passed is False
+        assert v.filter_name == "known_far_location"
+
+    def test_passes_unlearned_location(self):
+        f = KnownFarLocationFilter()
+        assert f(make_listing(location="Madison, WI")).passed is True
+
+    def test_empty_location_skips(self):
+        f = KnownFarLocationFilter()
+        v = f(make_listing(location=""))
+        assert v.passed is True
+        assert v.reason == "skipped:missing_data"
+
+    def test_near_observation_vetoes_caching(self):
+        # Boundary-straddle regression: a town observed in-radius is permanently
+        # ineligible for the far-cache, even if a later far pin tries to learn it.
+        f = KnownFarLocationFilter()
+        f.learn_near("Madison, WI")  # an in-radius Madison pin observed
+        f.learn_far("Madison, WI")   # a 43.9mi Madison pin tries to poison
+        assert f(make_listing(location="Madison, WI")).passed is True
+
+    def test_near_observation_unpoisons_already_cached(self):
+        # If a string got cached far (first sighting only-far), a later
+        # confirmed in-radius pin un-poisons it permanently.
+        f = KnownFarLocationFilter()
+        f.learn_far("Oregon, WI")
+        assert f(make_listing(location="Oregon, WI")).passed is False  # cached
+        f.learn_near("Oregon, WI")
+        assert f(make_listing(location="Oregon, WI")).passed is True  # un-poisoned
+
+    def test_case_and_whitespace_insensitive(self):
+        f = KnownFarLocationFilter()
+        f.learn_far("  Plymouth, WI  ")
+        assert f(make_listing(location="plymouth, wi")).passed is False
+
 
 class TestGeoDistanceFilter:
     # Madison, WI center
