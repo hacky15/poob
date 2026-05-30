@@ -239,6 +239,22 @@ async def test_casual_fallback_saves_to_correct_guild_history() -> None:
 # System prompt guarantees
 # ---------------------------------------------------------------------------
 
+def test_system_prompt_forbids_unsolicited_marketplace() -> None:
+    """Operator directive: Poob must mention deals / marketplace / searching
+    ONLY when explicitly asked — never volunteer it. The constraint must be
+    present on every persona-prompt variant (casual + tool, voice + text),
+    so it holds regardless of which path generates the reply.
+    See docs/incidents/text-mode-rlhf-refusal-leak-2026-05-29.md (Fix 3)."""
+    from poob.brain.poob import _build_system_prompt
+    for voice in (True, False):
+        for with_tools in (True, False):
+            p = _build_system_prompt(level=5, voice=voice, with_tools=with_tools).lower()
+            ctx = f"voice={voice} with_tools={with_tools}"
+            assert "bring up" in p, f"missing don't-bring-up rule ({ctx})"
+            assert "marketplace" in p, f"missing marketplace term ({ctx})"
+            assert "unless" in p, f"missing 'unless they ask' qualifier ({ctx})"
+
+
 def test_system_prompt_lists_banned_refusal_phrases() -> None:
     """The NEVER block enumerates literal RLHF refusal phrases. Tightening
     this list is part of the same fix (docs/decisions/
