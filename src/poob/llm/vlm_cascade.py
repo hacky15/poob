@@ -743,6 +743,7 @@ def _is_permanent_error(exc: BaseException) -> bool:
     These indicate the provider is permanently unusable for this session:
     - 402 "Credit limit exceeded" (Together.ai — no payment method)
     - 404 "No endpoints found" (OpenRouter — model removed/renamed)
+    - 404 "NOT_FOUND" / "is not found for API version" (Google — retired model id)
     - 401 "Unauthorized" (invalid API key)
 
     Providers with permanent errors are disabled for 24h (effectively
@@ -755,8 +756,18 @@ def _is_permanent_error(exc: BaseException) -> bool:
         return True
     if "credit limit" in exc_str:
         return True
-    # OpenRouter model not found (removed or renamed)
-    if status == 404 or ("404" in exc_str and "no endpoints" in exc_str):
+    # Model not found / removed / renamed. OpenRouter exposes status_code or
+    # "no endpoints"; Google (langchain-google-genai) raises "404 NOT_FOUND" or
+    # "... is not found for API version ..." with NO status_code attribute — so
+    # match the message shape too, else a retired Google model id loops forever
+    # on the 600s recovery cooldown instead of being parked for the session.
+    if status == 404:
+        return True
+    if "404" in exc_str and (
+        "no endpoints" in exc_str or "not_found" in exc_str or "not found" in exc_str
+    ):
+        return True
+    if "is not found for api version" in exc_str:
         return True
     # Invalid API key
     if status == 401 or "unauthorized" in exc_str or "invalid api key" in exc_str:
@@ -881,78 +892,18 @@ def build_vlm_cascade(config: Any, *, kv_store: Any | None = None) -> VLMCascade
             )
         )
 
-    # 5b. Gemma 3 27B (rank 50, score 1158, 1000 RPD free — slow but diverse)
-    # Positioned after faster providers so voting panels prefer Groq + Flash Lite
-    # + Mistral for the first 3 slots.  Gemma is used when those are exhausted.
-    # Known issue: 5-12s response time means it's always cancelled in voting
-    # when faster providers agree first.  Still valuable as a fallback voter.
-    if config.google_api_key and config.gemma_vlm_model:
-        from langchain_google_genai import ChatGoogleGenerativeAI
+    # Three permanently-dead VLM rungs were removed in the 2026-05-30 cascade
+    # cleanup (retired / credit-limited / removed-upstream models that were
+    # masked only by early-exit consensus). The healthy top-3 — groq_vision
+    # (also the Meta-architecture voter), gemini_flash_lite, mistral_pixtral —
+    # carry delivered deals; the Nemotron rung below covers the OpenRouter/NVIDIA
+    # fallback. See docs/decisions/vlm-cascade-dead-rung-cleanup.md.
 
-        gemma = ChatGoogleGenerativeAI(
-            model=config.gemma_vlm_model,
-            google_api_key=config.google_api_key,
-            temperature=0.1,
-            max_retries=0,
-            convert_system_message_to_human=True,
-        )
-        providers.append(
-            VLMProviderConfig(
-                name="gemma_vlm",
-                chat_model=gemma,
-                daily_limit=config.gemma_vlm_rpd,
-                architecture="google_gemma",
-                ipm_limit=12,
-            )
-        )
-
-    # 6. Together.ai Llama-Vision-Free (dynamic rate, unlimited free tier)
-    # Auto-disabled if 402 "Credit limit exceeded" — permanent error detection
-    # handles this without wasting panel slots after the first failure.
-    together_api_key = getattr(config, "together_api_key", None)
-    if together_api_key:
-        from langchain_openai import ChatOpenAI
-
-        together_vlm = ChatOpenAI(
-            model="meta-llama/Llama-Vision-Free",
-            api_key=together_api_key,
-            base_url="https://api.together.xyz/v1",
-            temperature=0.1,
-            max_tokens=1000,
-            max_retries=0,
-        )
-        providers.append(
-            VLMProviderConfig(
-                name="together_vision",
-                chat_model=together_vlm,
-                daily_limit=0,  # Dynamic rate limiting, effectively unlimited
-                architecture="meta_together",
-            )
-        )
-
-    # 7. OpenRouter Mistral Small 3.1 24B (rank 64, score 1128, free VLM)
-    # Auto-disabled if 404 "No endpoints found" — model may be renamed/removed.
-    if config.openrouter_api_key and config.openrouter_enabled:
-        from langchain_openai import ChatOpenAI
-
-        openrouter_primary = ChatOpenAI(
-            model=config.openrouter_model,
-            api_key=config.openrouter_api_key,
-            base_url="https://openrouter.ai/api/v1",
-            temperature=0.1,
-            max_tokens=1000,
-            max_retries=0,
-        )
-        providers.append(
-            VLMProviderConfig(
-                name="openrouter_mistral",
-                chat_model=openrouter_primary,
-                daily_limit=200,
-                architecture="mistral",
-            )
-        )
-
-    # 8. Gemini 2.5 Pro (tiebreaker, rank 9, score 1248 — reserved for disagreements)
+    # 8. Gemini 2.5 Pro (rank 9, score 1248 — strong but Google-pool quota-limited)
+    # No longer the reserved tiebreaker: it was 100%-429 on disagreements (100 RPD
+    # shared with the flash-lite workhorse), so disagreements never actually
+    # tie-broke. With no tiebreaker, no-consensus uses the first responder — the
+    # documented, blessed behavior. Pro stays a normal voter when it has quota.
     if config.google_api_key:
         from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -968,7 +919,6 @@ def build_vlm_cascade(config: Any, *, kv_store: Any | None = None) -> VLMCascade
                 chat_model=pro,
                 daily_limit=config.gemini_pro_rpd,
                 architecture="google_pro",
-                is_tiebreaker=True,
                 ipm_limit=5,  # Pro has stricter limits
             )
         )

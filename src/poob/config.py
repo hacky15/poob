@@ -160,11 +160,10 @@ class AppConfig(BaseSettings):
     serpapi_monthly_quota: int = 250  # Free tier: 250 searches/month
 
     # --- VLM Evaluator ---
-    vlm_primary_provider: str = "gemini_flash"  # Primary VLM for deal evaluation
-    vlm_fallback_providers: list[str] = [
-        "gemma_vlm", "groq_vision", "openrouter_qwen3vl",
-        "gemini_pro", "openrouter_nemotron", "ollama_vision",
-    ]
+    # Cascade order/membership is authoritative in src/poob/llm/vlm_cascade.py
+    # (build_vlm_cascade); there is intentionally no provider-list config knob.
+    # Two unused provider-list fields were removed 2026-05-30 (they were never
+    # read — a no-op tuning trap). See docs/decisions/vlm-cascade-dead-rung-cleanup.md.
     vlm_max_images: int = 2  # Images per evaluation (2 = hero + detail, optimal)
     vlm_confidence_threshold: float = 0.6  # Below this, request second opinion
     vlm_second_opinion_enabled: bool = True  # Enable confidence-based escalation
@@ -181,12 +180,6 @@ class AppConfig(BaseSettings):
     # Gemini 3.1 Flash Lite: 15 RPM, 1000 RPD free — high-volume voter (rank 35, score 1188)
     gemini_flash_lite_model: str = "gemini-3.1-flash-lite-preview"
     gemini_flash_lite_rpd: int = 1000
-    # Gemma 3 27B: multimodal, 1000 RPD free on Google AI Studio
-    gemma_vlm_model: str = "gemma-3-27b-it"
-    gemma_vlm_rpd: int = 1000
-
-    # --- Together.ai (free Llama Vision, dynamic rate limiting) ---
-    together_api_key: str = ""
 
     # --- Mistral (Pixtral 12B, 1 RPS free tier) ---
     mistral_api_key: str = ""
@@ -200,7 +193,9 @@ class AppConfig(BaseSettings):
 
     # --- OpenRouter (multi-model aggregator, free tier available) ---
     openrouter_api_key: str = ""
-    openrouter_model: str = "mistralai/mistral-small-3.1-24b-instruct:free"  # Rank 64, score 1128, free VLM
+    # The primary OpenRouter VLM rung was removed 2026-05-30 (its model 404'd
+    # "No endpoints found"); the Nemotron secondary serves the OpenRouter/NVIDIA
+    # fallback. See docs/decisions/vlm-cascade-dead-rung-cleanup.md.
     openrouter_model_secondary: str = "nvidia/nemotron-nano-12b-v2-vl:free"  # v2 fallback
     openrouter_enabled: bool = True
 

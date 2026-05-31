@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from poob.llm.vlm_cascade import VLMCascade
+from poob.llm.vlm_cascade import VLMCascade, _is_permanent_error
 
 
 @dataclass
@@ -153,3 +153,47 @@ class TestPickMajorityResponse:
             "gemma_vlm": _json_response("good", 110.0),
         }
         assert cascade._pick_majority_response(responses, 0.5) == "groq_vision"
+
+
+class TestIsPermanentError:
+    """A permanently-dead provider (retired/removed model id, credit limit)
+    must be parked for the session, NOT looped on the transient cooldown.
+    The Google variant ('404 NOT_FOUND' / 'is not found for API version') has
+    no status_code attribute, which previously slipped through and made a
+    retired Gemma id re-fail every recovery cycle."""
+
+    def test_google_404_not_found_is_permanent(self):
+        exc = Exception(
+            "Error calling model 'gemma-3-27b-it' (NOT_FOUND): 404 NOT_FOUND. "
+            "{'error': {'code': 404, 'message': 'models/gemma-3-27b-it is not found'}}"
+        )
+        assert _is_permanent_error(exc) is True
+
+    def test_google_is_not_found_for_api_version_is_permanent(self):
+        exc = Exception(
+            "models/gemma-3-27b-it is not found for API version v1beta, or is "
+            "not supported for generateContent."
+        )
+        assert _is_permanent_error(exc) is True
+
+    def test_openrouter_no_endpoints_is_permanent(self):
+        exc = Exception(
+            "Error code: 404 - {'error': {'message': 'No endpoints found for "
+            "mistralai/mistral-small-3.1-24b-instruct:free.', 'code': 404}}"
+        )
+        assert _is_permanent_error(exc) is True
+
+    def test_together_credit_limit_is_permanent(self):
+        exc = Exception(
+            "Error code: 402 - {'error': {'message': 'Credit limit exceeded, "
+            "please add credits'}}"
+        )
+        assert _is_permanent_error(exc) is True
+
+    def test_rate_limit_429_is_not_permanent(self):
+        exc = Exception("429 RESOURCE_EXHAUSTED. {'error': {'code': 429}}")
+        assert _is_permanent_error(exc) is False
+
+    def test_503_unavailable_is_not_permanent(self):
+        exc = Exception("503 UNAVAILABLE. This model is experiencing high demand.")
+        assert _is_permanent_error(exc) is False
