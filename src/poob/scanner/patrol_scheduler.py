@@ -12,7 +12,9 @@ Applies Gaussian jitter (±20%, clamped to ±40%) to avoid detection.
 from __future__ import annotations
 
 import asyncio
+import os
 import random
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -47,6 +49,15 @@ class PatrolScheduler:
         self._trigger_event = asyncio.Event()
         self._last_scan_time: datetime | None = None
         self._next_scan_time: datetime | None = None
+        # Reliability watchdog: a wedged CDP get_page() does not honor
+        # asyncio.wait_for cancellation, so the per-cycle timeout abandons the
+        # cycle but cannot recover the browser — every subsequent cycle re-wedges
+        # (observed: ~18.5h of zero output, 2026-05-31). After this many
+        # CONSECUTIVE failed cycles the scheduler force-exits so the container
+        # restart policy brings up a fresh session.
+        _mcf = getattr(config, "patrol_max_consecutive_failures", 3)
+        self._max_consecutive_failures = _mcf if isinstance(_mcf, int) and _mcf > 0 else 3
+        self._consecutive_failures = 0
 
     @property
     def is_running(self) -> bool:
@@ -106,6 +117,34 @@ class PatrolScheduler:
             await self.start()
         log.info("Immediate patrol triggered")
         self._trigger_event.set()
+
+    def _record_cycle_outcome(self, *, succeeded: bool) -> None:
+        """Track consecutive cycle failures; force a process restart on a wedge.
+
+        A wedged CDP ``get_page()`` does not honor ``asyncio.wait_for``
+        cancellation, so the per-cycle timeout abandons the cycle but cannot
+        recover the browser — in-cycle timeouts are insufficient and the only
+        reliable recovery is restarting the process. After
+        ``_max_consecutive_failures`` consecutive failures (hang-abandon or
+        error) the scheduler force-exits; the container restart policy
+        (unless-stopped) brings up a fresh browser session. Bounds worst-case
+        zero-output time to N x the cycle timeout instead of unbounded.
+        See docs/incidents/main-browser-cdp-wedge-infinite-hang.md.
+        """
+        if succeeded:
+            self._consecutive_failures = 0
+            return
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._max_consecutive_failures:
+            log.critical(
+                "Patrol failed consecutively — browser/CDP appears wedged and "
+                "in-cycle timeouts cannot cancel it. Force-exiting so the "
+                "container restart policy recovers a fresh session.",
+                consecutive_failures=self._consecutive_failures,
+                threshold=self._max_consecutive_failures,
+            )
+            sys.stderr.flush()
+            os._exit(1)
 
     def _calculate_base_interval(self, hour: int) -> int:
         """Calculate the base interval in seconds for the given hour.
@@ -207,10 +246,13 @@ class PatrolScheduler:
                     deals=result.deals_found,
                     duration=f"{result.duration_seconds:.1f}s",
                 )
+                self._record_cycle_outcome(succeeded=True)
             except asyncio.TimeoutError:
                 log.error(
                     "Patrol cycle hung past 600s — abandoned, "
                     "scheduler continues to next interval",
                 )
+                self._record_cycle_outcome(succeeded=False)
             except Exception as exc:
                 log.error("Patrol cycle error in scheduler", error=str(exc))
+                self._record_cycle_outcome(succeeded=False)

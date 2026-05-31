@@ -187,3 +187,48 @@ class TestPausedBehavior:
         # Engine should NOT have been called while paused
         # (the initial start doesn't immediately run either)
         mock_engine.run_patrol_cycle.assert_not_called()
+
+
+class TestReliabilityWatchdog:
+    """A wedged CDP get_page() does NOT honor asyncio.wait_for cancellation, so
+    an in-cycle timeout cannot recover it — only restarting the process can.
+    After N consecutive cycle failures (hang-abandon or error) the scheduler
+    force-exits so the container restart policy recovers a fresh session,
+    bounding worst-case zero-output time.
+    See docs/incidents/main-browser-cdp-wedge-infinite-hang.md."""
+
+    def test_non_int_config_falls_back_to_default(self, scheduler):
+        # The default MagicMock config yields a non-int for the threshold; the
+        # scheduler must fall back to the safe default (3), not crash.
+        assert scheduler._max_consecutive_failures == 3
+
+    def test_explicit_threshold_from_config(self, mock_engine):
+        cfg = MagicMock(
+            patrol_peak_interval_seconds=120, patrol_moderate_interval_seconds=300,
+            patrol_offpeak_interval_seconds=600, patrol_dead_interval_seconds=900,
+            patrol_peak_hours_start=16, patrol_peak_hours_end=21,
+            display_timezone="America/Chicago", patrol_max_consecutive_failures=5,
+        )
+        sched = PatrolScheduler(engine=mock_engine, config=cfg)
+        assert sched._max_consecutive_failures == 5
+
+    def test_consecutive_failures_force_exit(self, scheduler):
+        scheduler._max_consecutive_failures = 3
+        with patch("poob.scanner.patrol_scheduler.os._exit") as mock_exit:
+            scheduler._record_cycle_outcome(succeeded=False)
+            scheduler._record_cycle_outcome(succeeded=False)
+            mock_exit.assert_not_called()
+            scheduler._record_cycle_outcome(succeeded=False)  # 3rd consecutive
+            mock_exit.assert_called_once_with(1)
+
+    def test_success_resets_failure_counter(self, scheduler):
+        scheduler._max_consecutive_failures = 3
+        with patch("poob.scanner.patrol_scheduler.os._exit") as mock_exit:
+            scheduler._record_cycle_outcome(succeeded=False)
+            scheduler._record_cycle_outcome(succeeded=False)
+            scheduler._record_cycle_outcome(succeeded=True)  # reset
+            scheduler._record_cycle_outcome(succeeded=False)
+            scheduler._record_cycle_outcome(succeeded=False)
+            mock_exit.assert_not_called()  # only 2 consecutive since reset
+            scheduler._record_cycle_outcome(succeeded=False)  # now 3rd
+            mock_exit.assert_called_once_with(1)

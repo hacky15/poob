@@ -141,6 +141,15 @@ class AppConfig(BaseSettings):
     # run past the 600s cycle ceiling. On timeout the cycle proceeds with no
     # deals from this batch rather than being abandoned. 0 disables the bound.
     patrol_evaluation_max_seconds: float = 180.0
+    # Reliability watchdog. A wedged CDP get_page() does NOT honor
+    # asyncio.wait_for cancellation, so the per-cycle timeout abandons a hung
+    # cycle but cannot recover the browser — every subsequent cycle re-wedges
+    # (observed: ~18.5h of zero output on 2026-05-31). After this many
+    # CONSECUTIVE failed cycles the scheduler force-exits the process so the
+    # container restart policy (unless-stopped) recovers a fresh session.
+    # Bounds worst-case zero-output to N x the cycle timeout (~N x 10min).
+    # See docs/incidents/main-browser-cdp-wedge-infinite-hang.md.
+    patrol_max_consecutive_failures: int = 3
 
     # --- Visual Enrichment (reverse image search) ---
     google_cloud_vision_api_key: str = ""  # Google Cloud Vision API key
