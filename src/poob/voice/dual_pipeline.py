@@ -550,6 +550,12 @@ class DualPipelineProcessor:
         self._bot_audio_active = bot_audio_active or (lambda: False)
         self._user_pipelines: dict[int, UserPipeline] = {}
         self._silence_counters: dict[int, int] = {}
+        # Per-user last addressed emission (normalized transcript, monotonic ts)
+        # for utterance-level dedup — guards a re-triggered/resent identical
+        # transcript from double-queuing a response. Complements the
+        # music-layer dedup in PoobBrain (which only covers play actions).
+        # See docs/plans/voice-pipeline-reliability.md.
+        self._last_emitted: dict[int, tuple[str, float]] = {}
         # Differential silence thresholds based on whether the wake
         # word fired. Once the user has addressed Poob, they need
         # patience to articulate the full request — natural mid-sentence
@@ -878,6 +884,14 @@ class DualPipelineProcessor:
         )
 
         if is_addressed:
+            if self._is_duplicate_emit(user_id, transcript):
+                log.info(
+                    "Duplicate addressed utterance suppressed",
+                    user=user_name or user_id,
+                    transcript=transcript[:60],
+                )
+                self._deepgram.reset_transcript(user_id)
+                return
             if self._on_addressed:
                 self._on_addressed(user_id, user_name, transcript)
         else:
@@ -885,6 +899,34 @@ class DualPipelineProcessor:
                 self._on_passive(user_id, user_name, transcript)
 
         self._deepgram.reset_transcript(user_id)
+
+    _EMIT_DEDUP_WINDOW_S: float = 8.0
+
+    def _is_duplicate_emit(self, user_id: int, transcript: str) -> bool:
+        """True if this addressed transcript repeats the user's previous
+        addressed emit within ``_EMIT_DEDUP_WINDOW_S``.
+
+        Guards against the same utterance being emitted twice (rapid
+        re-trigger or a Deepgram segment resend) double-queuing a
+        response. Scoped to addressed emits only — passive transcripts
+        feed rolling context where a repeat is harmless. ``getattr`` keeps
+        it safe under ``__new__``-constructed test instances.
+        """
+        norm = " ".join(transcript.lower().split())
+        if not norm:
+            return False
+        cache = getattr(self, "_last_emitted", None)
+        if cache is None:
+            cache = self._last_emitted = {}
+        now = time.monotonic()
+        prev = cache.get(user_id)
+        cache[user_id] = (norm, now)
+        if prev is None:
+            return False
+        prev_norm, prev_ts = prev
+        if now - prev_ts > self._EMIT_DEDUP_WINDOW_S:
+            return False
+        return prev_norm == norm
 
     def check_stale_buffers(self) -> None:
         """Check for users who stopped sending audio (packet gap detection)."""
