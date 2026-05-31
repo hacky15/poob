@@ -731,10 +731,15 @@ class DualPipelineProcessor:
             if pipeline.speech_started:
                 pipeline.is_active = True
                 pipeline.wake_word_time = time.monotonic()
+                # speech_to_wake_ms = time from utterance start to wake match,
+                # NOT detection-processing latency (which is per-frame, sub-100ms).
+                # A large value means the phrase landed late in a long/crosstalk
+                # utterance — not a perf regression. See
+                # docs/plans/voice-pipeline-reliability.md (Issue 1).
                 log.info(
                     "Wake word detected",
                     user=user_name or user_id,
-                    latency_ms=int((time.monotonic() - pipeline.speech_start_time) * 1000),
+                    speech_to_wake_ms=int((time.monotonic() - pipeline.speech_start_time) * 1000),
                 )
 
         # Handle new utterance start BEFORE sending to Deepgram.
