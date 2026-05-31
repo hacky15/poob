@@ -226,6 +226,13 @@ class DeepgramStreamManager:
     Uses raw websockets for maximum control and reliability.
     """
 
+    # Frames buffered per user while a stream is down/reconnecting, flushed
+    # in order once the socket is back. ~150 × 20ms ≈ 3s — bounds memory and
+    # staleness (buffering only happens during active speech, so the buffer
+    # holds recent contiguous audio, not gaps). See
+    # docs/plans/voice-pipeline-reliability.md (Issue 3).
+    _PENDING_MAX_FRAMES: int = 150
+
     def __init__(self, api_key: str, model: str = "nova-3") -> None:
         self._api_key = api_key
         self._model = model
@@ -234,6 +241,35 @@ class DeepgramStreamManager:
         self._last_connect_time: dict[int, float] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._keepalive_task: asyncio.Task | None = None
+        self._pending_audio: dict[int, collections.deque[bytes]] = {}
+
+    def _buffer_pending(self, user_id: int, frame: bytes) -> None:
+        """Queue an audio frame that couldn't be sent (stream down /
+        reconnecting / throttled) so it survives until the socket is back.
+        Bounded ring — past the cap the oldest frame is dropped, keeping
+        the most recent ~3s of the current utterance."""
+        buf = self._pending_audio.get(user_id)
+        if buf is None:
+            buf = self._pending_audio[user_id] = collections.deque(
+                maxlen=self._PENDING_MAX_FRAMES,
+            )
+        buf.append(frame)
+
+    async def _flush_pending(self, user_id: int, stream: "_UserStream") -> None:
+        """Send any buffered frames in order over the (now-connected) socket.
+        On send failure, mark disconnected and re-buffer the failed frame so
+        the next reconnect retries it."""
+        buf = self._pending_audio.get(user_id)
+        if not buf:
+            return
+        while buf:
+            frame = buf.popleft()
+            try:
+                await stream.ws.send(frame)
+            except Exception:
+                stream.connected = False
+                buf.appendleft(frame)
+                return
 
     def start_keepalive_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Start a background task that sends keepalive to all active streams.
@@ -369,13 +405,18 @@ class DeepgramStreamManager:
         stream = self._streams.get(user_id)
 
         if stream is None or not stream.connected:
-            # Need to connect/reconnect — use lock to prevent races
+            # Stream down. Buffer this frame so the start of the utterance
+            # isn't lost to the reconnect window, then attempt a (throttled,
+            # lazy) reconnect. The throttle + lazy-on-audio cost guard is
+            # preserved — buffering only prevents data loss within it.
+            self._buffer_pending(user_id, pcm_16k_mono)
+
             if user_id not in self._connect_locks:
                 self._connect_locks[user_id] = asyncio.Lock()
 
             lock = self._connect_locks[user_id]
             if lock.locked():
-                return  # Another coroutine is already connecting — skip this frame
+                return  # Another coroutine is connecting — it will flush the buffer
 
             async with lock:
                 stream = self._streams.get(user_id)
@@ -386,19 +427,26 @@ class DeepgramStreamManager:
                     now = asyncio.get_event_loop().time()
                     last = self._last_connect_time.get(user_id, 0.0)
                     if now - last < 5.0:
-                        return
+                        return  # Frame is buffered; flushed when reconnect lands
                     self._last_connect_time[user_id] = now
                     if stream is not None:
                         log.info("Deepgram stream reconnecting", user=user_id)
                     stream = await self._connect_user(user_id)
 
-        if not stream.connected or stream.ws is None:
+                if stream is not None and stream.connected and stream.ws is not None:
+                    # Back up — flush the buffered frames (includes this one).
+                    await self._flush_pending(user_id, stream)
             return
 
+        # Already connected — drain any stragglers first to keep order, then
+        # send the current frame.
+        if self._pending_audio.get(user_id):
+            await self._flush_pending(user_id, stream)
         try:
             await stream.ws.send(pcm_16k_mono)
         except Exception:
             stream.connected = False
+            self._buffer_pending(user_id, pcm_16k_mono)
 
     def get_transcript(self, user_id: int) -> tuple[str, bool]:
         """Get current transcript for a user.
