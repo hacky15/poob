@@ -150,6 +150,18 @@ class AppConfig(BaseSettings):
     # Bounds worst-case zero-output to N x the cycle timeout (~N x 10min).
     # See docs/incidents/main-browser-cdp-wedge-infinite-hang.md.
     patrol_max_consecutive_failures: int = 3
+    # Memory-pressure guard. Chromium leaks renderer processes over hours
+    # (audit 2026-05-30: ~5.6 GB across ~22 procs, climbing to the 4 GiB cap),
+    # which both risks an OOM-kill AND degrades the CDP session into the wedge
+    # above. browser-use spawns chromium internally, so surgical process reaping
+    # would be a fragile heuristic that could kill the LIVE browser; instead,
+    # when container memory crosses this fraction of the cgroup limit the
+    # scheduler force-exits between cycles so the restart policy brings up a
+    # fresh process with fresh chromium (memory reset). 0 disables the guard.
+    patrol_memory_restart_pct: float = 0.85
+    # Don't trigger the memory guard within this many seconds of process start
+    # (avoids any startup-spike restart loop; the leak builds over hours).
+    patrol_memory_restart_min_uptime_s: float = 600.0
 
     # --- Visual Enrichment (reverse image search) ---
     google_cloud_vision_api_key: str = ""  # Google Cloud Vision API key

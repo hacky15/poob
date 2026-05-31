@@ -15,7 +15,9 @@ import asyncio
 import os
 import random
 import sys
+import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
@@ -26,6 +28,37 @@ if TYPE_CHECKING:
     from poob.scanner.patrol_engine import PatrolEngine
 
 log = get_logger("scanner.patrol_scheduler")
+
+
+def _read_cgroup_memory_fraction(root: str = "/sys/fs/cgroup") -> float | None:
+    """Return container memory usage as a fraction of its cgroup limit.
+
+    Supports cgroup v2 (``memory.current`` / ``memory.max``) and v1
+    (``memory/memory.usage_in_bytes`` / ``memory.limit_in_bytes``). Returns
+    None when the limit is unset/unlimited or the files are unavailable (e.g.
+    running outside a container) so the caller can skip the guard gracefully.
+    """
+    base = Path(root)
+    # cgroup v2
+    try:
+        mx = (base / "memory.max").read_text().strip()
+        if mx != "max":
+            limit = int(mx)
+            if limit > 0:
+                cur = int((base / "memory.current").read_text().strip())
+                return cur / limit
+    except (OSError, ValueError):
+        pass
+    # cgroup v1
+    try:
+        limit = int((base / "memory" / "memory.limit_in_bytes").read_text().strip())
+        # v1 "unlimited" is a near-2^63 sentinel — treat as no limit.
+        if 0 < limit < (1 << 62):
+            cur = int((base / "memory" / "memory.usage_in_bytes").read_text().strip())
+            return cur / limit
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 class PatrolScheduler:
@@ -58,6 +91,15 @@ class PatrolScheduler:
         _mcf = getattr(config, "patrol_max_consecutive_failures", 3)
         self._max_consecutive_failures = _mcf if isinstance(_mcf, int) and _mcf > 0 else 3
         self._consecutive_failures = 0
+        # Memory-pressure guard: proactively restart the process before the
+        # chromium leak OOMs the container or degrades CDP into a wedge.
+        _mrp = getattr(config, "patrol_memory_restart_pct", 0.85)
+        self._memory_restart_pct = float(_mrp) if isinstance(_mrp, (int, float)) else 0.85
+        _mru = getattr(config, "patrol_memory_restart_min_uptime_s", 600.0)
+        self._memory_restart_min_uptime_s = (
+            float(_mru) if isinstance(_mru, (int, float)) and _mru >= 0 else 600.0
+        )
+        self._started_monotonic = time.monotonic()
 
     @property
     def is_running(self) -> bool:
@@ -146,6 +188,34 @@ class PatrolScheduler:
             sys.stderr.flush()
             os._exit(1)
 
+    def _maybe_restart_on_memory_pressure(self) -> None:
+        """Force a process restart when container memory nears the cgroup cap.
+
+        Chromium leaks renderer processes over hours; browser-use spawns them
+        internally, so we cannot safely reap individual processes without
+        risking the live browser. Instead, when memory crosses the configured
+        fraction of the cgroup limit, force-exit between cycles so the container
+        restart policy brings up a fresh process with fresh chromium (memory
+        reset). Skipped during the first ``_memory_restart_min_uptime_s`` so a
+        startup spike can't loop. See
+        docs/incidents/main-browser-cdp-wedge-infinite-hang.md.
+        """
+        if self._memory_restart_pct <= 0:
+            return
+        if (time.monotonic() - self._started_monotonic) < self._memory_restart_min_uptime_s:
+            return
+        frac = _read_cgroup_memory_fraction()
+        if frac is None or frac < self._memory_restart_pct:
+            return
+        log.critical(
+            "Container memory above restart threshold — force-exiting to reclaim "
+            "leaked chromium memory before OOM; restart policy recovers a fresh session.",
+            memory_pct=round(frac * 100, 1),
+            threshold_pct=round(self._memory_restart_pct * 100, 1),
+        )
+        sys.stderr.flush()
+        os._exit(1)
+
     def _calculate_base_interval(self, hour: int) -> int:
         """Calculate the base interval in seconds for the given hour.
 
@@ -221,6 +291,10 @@ class PatrolScheduler:
 
             if self._is_paused:
                 continue
+
+            # Proactively restart before the chromium leak OOMs the container
+            # or degrades CDP into a wedge (checked between cycles).
+            self._maybe_restart_on_memory_pressure()
 
             # Per-cycle hard timeout. Without this a single hung browser
             # call can silently kill the entire scheduler (observed in
