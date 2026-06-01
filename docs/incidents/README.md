@@ -14,6 +14,10 @@ Resolved incidents stay `status: resolved`. Open ones stay `status: active`. If 
 
 ## Entries
 
+### 2026-06
+
+- [[voice-4014-reconnect-event-loop-wedge]] — voice WS 4014 force-disconnect → DAVE MLS re-key ran unlocked on the shared event-loop thread → native `davey` FFI wedge froze voice + text + patrol for 8 min; recovered by restart. Root: the serialization lock dropped in the Pycord migration (2026-06-01, active — fix planned)
+
 ### 2026-05
 
 - [[text-mode-rlhf-refusal-leak-2026-05-29]] — Poob answering as bland RLHF assistant in Discord text: non-empty gpt-oss routing text (refusals + markdown) returned verbatim; the 2026-05-06 casual fallback only covered the empty case (2026-05-29, resolved)
