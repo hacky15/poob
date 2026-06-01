@@ -622,8 +622,23 @@ async def startup() -> None:
             max_speech_duration_ms=config.voice_max_utterance_seconds * 1000,
         )
 
-        # Generate filler audio clips for latency masking
-        filler_paths = await generate_fillers(voice=config.voice_tts_voice)
+        # Generate filler "thinking noise" clips for latency masking, in
+        # Poob's own Google voice (cached once; runtime just plays the file).
+        # Falls back to Edge inside generate_fillers if Google is unavailable.
+        filler_paths: list = []
+        if config.voice_filler_enabled:
+            from poob.voice.tts import GoogleCloudTTS
+
+            filler_voice = config.voice_filler_voice or config.voice_google_tts_voice
+            filler_synth = GoogleCloudTTS(
+                api_key=config.google_cloud_vision_api_key,
+                voice=filler_voice,
+                speaking_rate=config.voice_google_tts_rate,
+            )
+            filler_paths = await generate_fillers(
+                synthesizer=filler_synth if filler_synth.is_available() else None,
+                edge_fallback_voice=config.voice_tts_voice,
+            )
         filler_player = FillerPlayer(filler_paths)
 
         # Dual pipeline config (OpenWakeWord + Deepgram streaming).

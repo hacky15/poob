@@ -373,6 +373,12 @@ class AppConfig(BaseSettings):
     voice_tts_rate: str = "+35%"  # Speech rate for Edge TTS (fallback, match Fenrir pacing)
     voice_google_tts_voice: str = "en-US-Chirp3-HD-Fenrir"  # Google Chirp3-HD — natural, expressive
     voice_google_tts_rate: float = 1.25  # Faster for natural conversational pacing
+    # Latency-mask "thinking noise" filler (Phase 2). Pre-generated once at
+    # startup and cached; played before a response to mask LLM+TTS delay.
+    # Generated in Poob's own Google voice by default so the noise sounds like
+    # Poob, not a stranger. Operator knobs (test without code changes):
+    voice_filler_enabled: bool = True
+    voice_filler_voice: str = ""  # empty → use voice_google_tts_voice (Fenrir)
     voice_silence_threshold_ms: int = 350  # Silence duration before utterance ends (snappier turn-taking)
     voice_energy_threshold: float = 150.0  # RMS energy threshold for speech detection
     voice_min_speech_ms: int = 200  # Minimum speech duration to avoid spurious triggers
