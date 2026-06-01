@@ -54,6 +54,18 @@ class VoiceCog(commands.Cog, name="Voice"):
         self.bot = bot
         self._session_factory = session_factory
         self._sessions: dict[int, VoiceSession] = {}  # guild_id → session
+        # Persist VC membership so a redeploy auto-rejoins (Poob "just works"
+        # after a restart without a fresh /join). See
+        # docs/decisions/voice-auto-rejoin-on-restart.md.
+        from poob.voice.voice_state_store import VoiceStateStore
+        _data_dir = getattr(getattr(bot, "config", None), "database_path", None)
+        _state_path = (
+            _data_dir.parent / "voice_state.json"
+            if _data_dir is not None
+            else __import__("pathlib").Path("data/voice_state.json")
+        )
+        self._state_store = VoiceStateStore(_state_path)
+        self._restored = False  # restore_sessions runs once per process
 
     def _stop_tasks(self) -> None:
         """Stop background tasks."""
@@ -62,6 +74,10 @@ class VoiceCog(commands.Cog, name="Voice"):
     async def _force_disconnect(self, guild: discord.Guild) -> None:
         """Force-disconnect any existing voice client for this guild."""
         guild_id = guild.id
+        # Drop persisted membership so we don't auto-rejoin a channel we
+        # deliberately left. (Re-recorded by setup_session_for_vc if we
+        # immediately reconnect, e.g. /join's pre-connect cleanup.)
+        self._state_store.forget(guild_id)
 
         if guild_id in self._sessions:
             session = self._sessions.pop(guild_id)
@@ -87,6 +103,66 @@ class VoiceCog(commands.Cog, name="Voice"):
         if session and session.voice_client.is_connected():
             return session
         return None
+
+    async def restore_sessions(self) -> None:
+        """Auto-rejoin the voice channels Poob was in before a restart.
+
+        Called once from ``on_ready`` so a redeploy/crash-restart resumes
+        voice without a fresh ``/join``. Best-effort and never raises — boot
+        must not depend on it. Forgets a channel only when it's gone;
+        transient connect/setup failures stay persisted so the next restart
+        retries. See docs/decisions/voice-auto-rejoin-on-restart.md.
+        """
+        if self._restored:
+            return
+        self._restored = True
+        pairs = self._state_store.load()
+        if not pairs:
+            return
+        log.info("Auto-rejoin: restoring voice sessions", count=len(pairs))
+        for guild_id, channel_id in pairs:
+            try:
+                channel = self.bot.get_channel(channel_id)
+                if not isinstance(
+                    channel, (discord.VoiceChannel, discord.StageChannel)
+                ):
+                    log.warning(
+                        "Auto-rejoin: channel gone, forgetting",
+                        guild=guild_id, channel=channel_id,
+                    )
+                    self._state_store.forget(guild_id)
+                    continue
+                guild = channel.guild
+                if guild_id in self._sessions or (
+                    guild.voice_client is not None
+                    and guild.voice_client.is_connected()
+                ):
+                    continue  # already connected
+                vc = await channel.connect(timeout=15.0)
+                session = await self.setup_session_for_vc(
+                    vc, channel,
+                    is_stage=self._is_stage_channel(channel),
+                    play_entrance=False,
+                )
+                if session is None:
+                    try:
+                        await vc.disconnect(force=True)
+                    except Exception:
+                        pass
+                    log.warning(
+                        "Auto-rejoin: setup failed (kept for retry)",
+                        guild=guild_id,
+                    )
+                else:
+                    log.info(
+                        "Auto-rejoin: restored",
+                        guild=guild_id, channel=channel.name,
+                    )
+            except Exception as exc:
+                log.warning(
+                    "Auto-rejoin failed (kept for retry)",
+                    guild=guild_id, channel=channel_id, error=str(exc)[:120],
+                )
 
     async def _promote_to_speaker(self, guild: discord.Guild) -> None:
         """Promote the bot to Speaker in a stage channel."""
@@ -153,6 +229,8 @@ class VoiceCog(commands.Cog, name="Voice"):
             session.is_stage = is_stage
             session._last_utterance_time = time.monotonic()
             self._sessions[guild_id] = session
+            # Persist for auto-rejoin on restart.
+            self._state_store.record(guild_id, int(getattr(channel, "id", 0)))
 
             # Wait for DAVE E2EE handshake to settle. See
             # incidents/dave-timeout-fail-hard-regression for why we

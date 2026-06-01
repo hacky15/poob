@@ -228,6 +228,16 @@ class ScraperBot(commands.Bot):
 
         log.info("Bot is ready", user=str(self.user), guilds=len(self.guilds))
 
+        # Auto-rejoin any voice channels Poob was in before this restart, so a
+        # redeploy "just works" without a fresh /join. Once per process,
+        # best-effort. See docs/decisions/voice-auto-rejoin-on-restart.md.
+        voice_cog = self.get_cog("Voice")
+        if voice_cog is not None:
+            try:
+                await voice_cog.restore_sessions()
+            except Exception as exc:
+                log.warning("Voice auto-rejoin failed", error=str(exc)[:120])
+
         # Wire the deals notification channel and bot reference
         if self.notifier:
             self.notifier.set_bot(self)
