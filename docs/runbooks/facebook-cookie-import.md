@@ -84,8 +84,13 @@ were stale/invalid — re-export (Step 1) with a freshly-logged-in session.
 
 - **No CAPTCHA risk from import** — we only inject cookies; there is no login
   event. (A login event is the #1 checkpoint trigger; that's why we avoid it.)
-- **Refresh cadence:** FB sessions last weeks. When it expires, repeat Steps
-  1–3. Until then it's fully hands-off.
+- **Refresh cadence:** the patrol engine now **self-refreshes** the session —
+  it periodically writes Facebook's rolled cookies back to `cookies.json` so
+  restarts reuse the freshest token instead of this one-time snapshot (see
+  [[fb-session-cookie-persistence]]). So this import should be a **rare**
+  re-seed, not a routine. If `status=failed` still recurs within days *after*
+  persistence is live, that points to server-side invalidation (proxy/identity
+  territory), not local expiry — flag it rather than just re-importing.
 - **Fallback is intact:** if there's no valid session, the scanner runs on the
   anonymous path (no breakage), just with the staler anon feed.
 - **Never solve a CAPTCHA programmatically** — if FB ever shows a checkpoint,

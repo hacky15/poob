@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -360,6 +361,68 @@ class BrowserManager:
         except Exception as exc:
             log.warning("Cookie injection failed", error=str(exc)[:120])
             return 0
+
+    async def _read_all_cookies(self) -> list[dict]:
+        """Read all cookies from the live session via CDP (best-effort).
+
+        Prefers the modern ``Storage.getCookies``; falls back to
+        ``Network.getAllCookies`` for older CDP builds. Returns [] on failure.
+        """
+        if self._browser is None:
+            return []
+        cdp = await self._browser.get_or_create_cdp_session()
+        client = self._browser.cdp_client
+        try:
+            res = await client.send.Storage.getCookies(
+                params={}, session_id=cdp.session_id,
+            )
+        except Exception:
+            res = await client.send.Network.getAllCookies(session_id=cdp.session_id)
+        if isinstance(res, dict):
+            return list(res.get("cookies", []) or [])
+        return []
+
+    async def persist_cookies(self, path: Path) -> int:
+        """Capture the live FB session cookies and write them to ``path``.
+
+        Facebook rolls the session token as the authenticated browser is used.
+        We import a one-time snapshot, so without persisting the rolled token
+        the session reverts to the stale original on every restart and dies in
+        days. This writes the CURRENT cookies (in the import format
+        ``parse_cookie_export`` round-trips) so the next restart reloads the
+        freshest session — keeping auth alive like a real browser. Best-effort;
+        returns the count written, 0 on failure. Never logs cookie values.
+
+        Guards against clobbering a good file: only writes when a session
+        cookie (``xs``) is present, i.e. the browser is actually logged in.
+        """
+        if self._browser is None:
+            return 0
+        try:
+            cookies = await self._read_all_cookies()
+        except Exception as exc:
+            log.warning("Cookie persist read failed", error=str(exc)[:120])
+            return 0
+        fb = [
+            c for c in cookies
+            if isinstance(c, dict)
+            and "facebook.com" in str(c.get("domain") or "")
+            and c.get("name") and c.get("value") is not None
+        ]
+        if not any(c.get("name") == "xs" for c in fb):
+            # No session cookie — don't overwrite a valid file with a
+            # logged-out cookie set.
+            return 0
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(fb), encoding="utf-8")
+            tmp.replace(path)  # atomic swap
+        except OSError as exc:
+            log.warning("Cookie persist write failed", error=str(exc)[:120])
+            return 0
+        log.info("Persisted live FB session cookies", count=len(fb))
+        return len(fb)
 
     def get_session(self) -> BrowserSession:
         """Get the underlying BrowserSession for CDP access.

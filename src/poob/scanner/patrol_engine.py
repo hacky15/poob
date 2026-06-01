@@ -230,6 +230,14 @@ class PatrolEngine:
         self._evaluation_max_seconds = (
             float(_evms) if isinstance(_evms, (int, float)) and _evms > 0 else 0.0
         )
+        # FB session self-refresh: periodically persist the live (FB-rolled)
+        # cookies so restarts reuse the freshest session instead of the stale
+        # one-time export. Throttled by this interval. 0 disables.
+        _cpi = getattr(config, "patrol_cookie_persist_interval_s", 1800)
+        self._cookie_persist_interval_s = (
+            float(_cpi) if isinstance(_cpi, (int, float)) and _cpi > 0 else 0.0
+        )
+        self._last_cookie_persist = 0.0
 
         # Build unified filter chain (replaces hardcoded _ALLOWED_NOTIFY_STATES,
         # _EXCLUDED_CATEGORY_PATTERNS, triple-check pattern, and backlog bypass).
@@ -612,6 +620,10 @@ class PatrolEngine:
         except Exception as exc:
             log.error("Patrol cycle failed", error=str(exc))
             result.errors.append(str(exc))
+
+        # Persist FB's rolled session so restarts reuse the freshest token
+        # (keeps auth alive for weeks instead of dying on the next restart).
+        await self._maybe_persist_session()
 
         result.duration_seconds = time.monotonic() - start_time
 
@@ -1680,6 +1692,30 @@ class PatrolEngine:
     # Garbage/stale/category/location filtering is now handled by the unified
     # FilterChain (see listing_filter.py). The old _filter_garbage_listings,
     # _filter_stale, and _filter_excluded_categories methods have been removed.
+
+    async def _maybe_persist_session(self) -> None:
+        """Persist FB's rolled session cookies so a restart reuses the freshest
+        token instead of the stale one-time export.
+
+        Throttled by ``patrol_cookie_persist_interval_s``; only runs when the
+        main browser holds a confirmed authenticated session. This is what
+        keeps the imported session alive for weeks (like a real browser)
+        instead of dying on the next restart when it reverts to the original
+        export. See docs/decisions/fb-session-cookie-persistence.md.
+        """
+        if self._cookie_persist_interval_s <= 0:
+            return
+        if not (self._browser and getattr(self._browser, "is_authenticated", False)):
+            return
+        now = time.monotonic()
+        if now - self._last_cookie_persist < self._cookie_persist_interval_s:
+            return
+        self._last_cookie_persist = now
+        try:
+            path = self._config.browser_profiles_dir / "facebook" / "cookies.json"
+            await self._browser.persist_cookies(path)
+        except Exception as exc:
+            log.debug("session cookie persist skipped", error=str(exc)[:100])
 
     async def _evaluate(
         self, listings: list[Listing], result: PatrolCycleResult

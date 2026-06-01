@@ -334,3 +334,60 @@ class TestHeadlessAutoDetect:
         assert BrowserManager(headless=True)._headless is True
         monkeypatch.setenv("DISPLAY", ":0")
         assert BrowserManager(headless=True)._headless is True
+
+
+class TestPersistCookies:
+    """Persisting FB's rolled session keeps auth alive across restarts instead
+    of reverting to the stale one-time export (which dies in days). See
+    docs/decisions/fb-session-cookie-persistence.md."""
+
+    @pytest.mark.asyncio
+    async def test_writes_facebook_cookies_and_round_trips(self, tmp_path):
+        mgr = BrowserManager(headless=True)
+        mgr._browser = MagicMock()  # non-None so persist proceeds
+        mgr._read_all_cookies = AsyncMock(return_value=[
+            {"name": "xs", "value": "sess123", "domain": ".facebook.com",
+             "path": "/", "secure": True, "httpOnly": True,
+             "expires": 1900000000.0, "sameSite": "None"},
+            {"name": "c_user", "value": "100", "domain": ".facebook.com", "path": "/"},
+            {"name": "other", "value": "x", "domain": ".google.com"},  # dropped (non-FB)
+        ])
+        path = tmp_path / "facebook" / "cookies.json"
+        n = await mgr.persist_cookies(path)
+        assert n == 2  # only the 2 facebook cookies
+        import json
+        written = json.loads(path.read_text())
+        assert {c["name"] for c in written} == {"xs", "c_user"}
+        # Round-trips through the real import parser used on the next restart.
+        from poob.sites.facebook.auth import parse_cookie_export
+        parsed = parse_cookie_export(path.read_text())
+        assert any(c["name"] == "xs" and c["value"] == "sess123" for c in parsed)
+
+    @pytest.mark.asyncio
+    async def test_skips_write_when_no_session_cookie(self, tmp_path):
+        mgr = BrowserManager(headless=True)
+        mgr._browser = MagicMock()
+        # Logged-out: device cookies present but no `xs` session token.
+        mgr._read_all_cookies = AsyncMock(return_value=[
+            {"name": "datr", "value": "d", "domain": ".facebook.com"},
+        ])
+        path = tmp_path / "cookies.json"
+        n = await mgr.persist_cookies(path)
+        assert n == 0
+        assert not path.exists()  # never clobbers with a logged-out set
+
+    @pytest.mark.asyncio
+    async def test_returns_zero_when_browser_not_started(self, tmp_path):
+        mgr = BrowserManager(headless=True)  # _browser is None
+        assert await mgr.persist_cookies(tmp_path / "cookies.json") == 0
+
+    @pytest.mark.asyncio
+    async def test_does_not_clobber_existing_on_read_failure(self, tmp_path):
+        mgr = BrowserManager(headless=True)
+        mgr._browser = MagicMock()
+        mgr._read_all_cookies = AsyncMock(side_effect=RuntimeError("cdp down"))
+        path = tmp_path / "cookies.json"
+        path.write_text('[{"name":"xs","value":"good"}]')
+        n = await mgr.persist_cookies(path)
+        assert n == 0
+        assert "good" in path.read_text()  # untouched

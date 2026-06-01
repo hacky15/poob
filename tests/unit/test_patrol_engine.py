@@ -1518,6 +1518,59 @@ class TestEvaluationTimeout:
         assert any("timed out" in e for e in result.errors)
 
 
+class TestSessionPersistence:
+    """The engine persists FB's rolled cookies once per interval while
+    authenticated, so a restart reuses the freshest session instead of the
+    stale one-time export. See docs/decisions/fb-session-cookie-persistence.md."""
+
+    @pytest.mark.asyncio
+    async def test_persists_when_authenticated_and_interval_elapsed(
+        self, patrol_engine, mock_browser_manager,
+    ):
+        from pathlib import Path
+
+        mock_browser_manager.is_authenticated = True
+        mock_browser_manager.persist_cookies = AsyncMock(return_value=3)
+        patrol_engine._config.browser_profiles_dir = Path("browser_profiles")
+        patrol_engine._cookie_persist_interval_s = 1800.0
+        patrol_engine._last_cookie_persist = 0.0
+        with patch("poob.scanner.patrol_engine.time.monotonic", return_value=10000.0):
+            await patrol_engine._maybe_persist_session()
+        mock_browser_manager.persist_cookies.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_skips_when_not_authenticated(
+        self, patrol_engine, mock_browser_manager,
+    ):
+        mock_browser_manager.is_authenticated = False
+        mock_browser_manager.persist_cookies = AsyncMock()
+        patrol_engine._cookie_persist_interval_s = 1800.0
+        await patrol_engine._maybe_persist_session()
+        mock_browser_manager.persist_cookies.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_throttled_within_interval(
+        self, patrol_engine, mock_browser_manager,
+    ):
+        mock_browser_manager.is_authenticated = True
+        mock_browser_manager.persist_cookies = AsyncMock()
+        patrol_engine._cookie_persist_interval_s = 1800.0
+        with patch("poob.scanner.patrol_engine.time.monotonic", return_value=1000.0):
+            patrol_engine._last_cookie_persist = 999.0  # 1s ago — within interval
+            await patrol_engine._maybe_persist_session()
+        mock_browser_manager.persist_cookies.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_disabled_when_interval_zero(
+        self, patrol_engine, mock_browser_manager,
+    ):
+        mock_browser_manager.is_authenticated = True
+        mock_browser_manager.persist_cookies = AsyncMock()
+        patrol_engine._cookie_persist_interval_s = 0.0
+        await patrol_engine._maybe_persist_session()
+        mock_browser_manager.persist_cookies.assert_not_called()
+
+
 class TestBrowsePathLocationThreading:
     """The general-browse GQL path must center queries on the configured
     location. A prior bug (audited 2026-05-29) omitted location_slug, so

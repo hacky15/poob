@@ -162,6 +162,15 @@ class AppConfig(BaseSettings):
     # Don't trigger the memory guard within this many seconds of process start
     # (avoids any startup-spike restart loop; the leak builds over hours).
     patrol_memory_restart_min_uptime_s: float = 600.0
+    # FB session self-refresh. Facebook rolls the session token as the
+    # authenticated browser is used; a real browser stays logged in for weeks
+    # because it keeps the rolled token. We import a one-time cookie snapshot,
+    # so without this the session reverts to the stale original on every
+    # restart and dies in days. This interval throttles how often the patrol
+    # engine captures the LIVE (rolled) cookies back to the volume so restarts
+    # reload the freshest session. 0 disables.
+    # See docs/decisions/fb-session-cookie-persistence.md.
+    patrol_cookie_persist_interval_s: int = 1800
 
     # --- Visual Enrichment (reverse image search) ---
     google_cloud_vision_api_key: str = ""  # Google Cloud Vision API key
