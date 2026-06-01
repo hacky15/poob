@@ -1518,6 +1518,91 @@ class TestEvaluationTimeout:
         assert any("timed out" in e for e in result.errors)
 
 
+class TestCycleSoftBudget:
+    """Per-phase budgets (enrichment + eval) can sum past the 600s scheduler
+    ceiling on a heavy cycle. A shared cycle soft-deadline clamps BOTH so the
+    cycle completes-partial (deferring leftovers to backlog) instead of
+    abandoning — losing deals on the highest-value cycles.
+    See docs/incidents/cycle-phase-budgets-exceed-ceiling.md."""
+
+    def test_soft_budget_defaults(self, patrol_engine):
+        # Spec'd mock provides no concrete value -> default 540.
+        assert patrol_engine._cycle_soft_budget == 540.0
+
+    @pytest.mark.asyncio
+    async def test_eval_skipped_when_cycle_deadline_passed(
+        self, patrol_engine, mock_smart_deal_radar,
+    ):
+        from poob.scanner.patrol_engine import PatrolCycleResult
+
+        listings = [_make_listing(external_id=str(4000 + i)) for i in range(3)]
+        patrol_engine._cycle_deadline = time.monotonic() - 1.0  # no time left
+        mock_smart_deal_radar.evaluate_batch = AsyncMock(return_value=[])
+        result = PatrolCycleResult()
+        eval_result, _ = await patrol_engine._evaluate(listings, result)
+        # Eval is skipped entirely so the cycle can complete under the ceiling.
+        mock_smart_deal_radar.evaluate_batch.assert_not_called()
+        assert eval_result.base_deals == []
+        assert any("skipped (cycle budget)" in e for e in result.errors)
+
+    @pytest.mark.asyncio
+    async def test_eval_clamped_to_remaining_cycle_time(
+        self, patrol_engine, mock_smart_deal_radar,
+    ):
+        from poob.scanner.patrol_engine import PatrolCycleResult
+
+        listings = [_make_listing(external_id=str(4100 + i)) for i in range(3)]
+        patrol_engine._evaluation_max_seconds = 999.0  # phase budget huge
+        patrol_engine._cycle_deadline = time.monotonic() + 0.05  # ~0.05s of cycle left
+
+        async def _hang(*args, **kwargs):
+            await asyncio.sleep(5.0)
+            return []
+
+        mock_smart_deal_radar.evaluate_batch = AsyncMock(side_effect=_hang)
+        result = PatrolCycleResult()
+        eval_result, _ = await patrol_engine._evaluate(listings, result)
+        # Clamped to the ~0.05s cycle remainder, not the 999s phase budget.
+        assert eval_result.base_deals == []
+        assert any("timed out" in e for e in result.errors)
+
+    @pytest.mark.asyncio
+    async def test_enrichment_stops_at_cycle_deadline(self, patrol_engine):
+        listings = [
+            _make_listing(external_id=str(4200 + i), location="Madison, WI")
+            for i in range(20)
+        ]
+        patrol_engine._enrichment_max_seconds = 9999.0  # phase budget huge
+
+        calls = {"n": 0}
+
+        async def _extract(tab, listing):
+            calls["n"] += 1
+            return listing
+
+        # monotonic: entry 100 (phase deadline 100+9999, clamped to cycle 103);
+        # iter1 101 (<103 -> batch 1 runs); iter2 200 (>=103 -> break).
+        ticks = [100.0, 101.0, 200.0]
+
+        def _mono():
+            return ticks.pop(0) if len(ticks) > 1 else ticks[0]
+
+        with patch(
+            "poob.sites.facebook.detail_extractor.extract_listing_details",
+            side_effect=_extract,
+        ), patch(
+            "poob.scanner.patrol_engine.random_delay", new_callable=AsyncMock,
+        ), patch(
+            "poob.scanner.patrol_engine.time.monotonic", side_effect=_mono,
+        ):
+            patrol_engine._cycle_deadline = 103.0  # earlier than the phase budget
+            await patrol_engine._enrich_listings_from_detail_pages(
+                AsyncMock(), listings,
+            )
+        # The cycle deadline (not the huge phase budget) stopped enrichment.
+        assert calls["n"] == 2
+
+
 class TestSessionPersistence:
     """The engine persists FB's rolled cookies once per interval while
     authenticated, so a restart reuses the freshest session instead of the

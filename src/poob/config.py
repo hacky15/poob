@@ -141,6 +141,14 @@ class AppConfig(BaseSettings):
     # run past the 600s cycle ceiling. On timeout the cycle proceeds with no
     # deals from this batch rather than being abandoned. 0 disables the bound.
     patrol_evaluation_max_seconds: float = 180.0
+    # Cycle-level soft deadline (under the 600s scheduler hard ceiling). The
+    # per-phase budgets above are independent, so on a HEAVY cycle (lots of
+    # fresh inventory) sweep + enrichment + eval can sum past 600s and the
+    # cycle is abandoned — losing its deals on exactly the highest-value
+    # cycles. Clamping enrichment AND eval to this shared deadline guarantees
+    # the cycle completes-partial (deferring leftovers to backlog) instead of
+    # abandoning. Keep < the scheduler's 600s timeout with margin. 0 disables.
+    patrol_cycle_soft_budget_seconds: float = 540.0
     # Reliability watchdog. A wedged CDP get_page() does NOT honor
     # asyncio.wait_for cancellation, so the per-cycle timeout abandons a hung
     # cycle but cannot recover the browser — every subsequent cycle re-wedges

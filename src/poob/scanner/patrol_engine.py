@@ -230,6 +230,14 @@ class PatrolEngine:
         self._evaluation_max_seconds = (
             float(_evms) if isinstance(_evms, (int, float)) and _evms > 0 else 0.0
         )
+        # Shared cycle-level soft deadline that bounds enrichment + eval together
+        # so a heavy cycle completes-partial under the 600s scheduler ceiling
+        # instead of abandoning. Set per cycle in run_patrol_cycle.
+        _csb = getattr(config, "patrol_cycle_soft_budget_seconds", 540.0)
+        self._cycle_soft_budget = (
+            float(_csb) if isinstance(_csb, (int, float)) and _csb > 0 else 0.0
+        )
+        self._cycle_deadline: float | None = None
         # FB session self-refresh: periodically persist the live (FB-rolled)
         # cookies so restarts reuse the freshest session instead of the stale
         # one-time export. Throttled by this interval. 0 disables.
@@ -359,6 +367,9 @@ class PatrolEngine:
             PatrolCycleResult with cycle statistics.
         """
         start_time = time.monotonic()
+        self._cycle_deadline = (
+            start_time + self._cycle_soft_budget if self._cycle_soft_budget > 0 else None
+        )
         started_at = datetime.now(timezone.utc)
         result = PatrolCycleResult()
 
@@ -1607,6 +1618,13 @@ class PatrolEngine:
         # Prevents a high-volume cycle from hitting the 600s scheduler ceiling.
         budget_s = self._enrichment_max_seconds
         deadline = (time.monotonic() + budget_s) if budget_s > 0 else None
+        # Never run past the cycle's shared soft deadline, so sweep + enrichment
+        # + eval fit under the 600s scheduler ceiling on heavy cycles.
+        if self._cycle_deadline is not None:
+            deadline = (
+                self._cycle_deadline if deadline is None
+                else min(deadline, self._cycle_deadline)
+            )
         # Early bail: if the first N listings all fail to enrich, the
         # extraction method probably doesn't work on this session's pages.
         # Stop wasting time navigating to 50 pages that return nothing.
@@ -1854,20 +1872,37 @@ class PatrolEngine:
 
         result.vlm_evaluated = len(to_evaluate)
 
+        # Bound eval by the smaller of its own budget and the time left in the
+        # cycle's soft deadline. On a heavy cycle whose enrichment consumed the
+        # budget, skip eval entirely (defer to backlog) so the cycle COMPLETES
+        # under the 600s ceiling instead of being abandoned mid-eval.
+        eval_timeout = self._evaluation_max_seconds
+        if self._cycle_deadline is not None:
+            remaining = self._cycle_deadline - time.monotonic()
+            eval_timeout = remaining if eval_timeout <= 0 else min(eval_timeout, remaining)
+            if eval_timeout <= 0:
+                log.warning(
+                    "Skipping VLM eval — cycle soft budget spent by enrichment; "
+                    "deferring to next cycle's backlog",
+                    batch_size=len(to_evaluate),
+                )
+                result.errors.append("Pipeline: skipped (cycle budget)")
+                return eval_result, to_evaluate
+
         try:
             eval_coro = self._smart_deal_radar.evaluate_batch(
                 to_evaluate, watchlist_items=interests
             )
-            if self._evaluation_max_seconds > 0:
+            if eval_timeout > 0:
                 pipeline_results = await asyncio.wait_for(
-                    eval_coro, timeout=self._evaluation_max_seconds
+                    eval_coro, timeout=eval_timeout
                 )
             else:
                 pipeline_results = await eval_coro
         except asyncio.TimeoutError:
             log.error(
                 "Pipeline evaluation timed out — cycle proceeds without this batch's deals",
-                timeout_s=self._evaluation_max_seconds,
+                timeout_s=eval_timeout,
                 batch_size=len(to_evaluate),
             )
             result.errors.append("Pipeline: evaluation timed out")
