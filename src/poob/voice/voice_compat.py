@@ -21,6 +21,7 @@ import asyncio
 import logging
 import os
 import struct
+import threading
 from typing import Any, Dict, Tuple
 
 import aiohttp
@@ -42,6 +43,20 @@ except Exception:
 
 
 logger = logging.getLogger(__name__)
+
+# Serializes ALL access to a davey.DaveSession across the three threads that
+# touch it: the recv thread (decrypt), the AudioPlayer thread (encrypt_opus),
+# and the event-loop thread (MLS re-keying on handshake/reconnect). Concurrent
+# access to the MLS ratcheting tree across the Rust FFI boundary deadlocks /
+# panics — and a native deadlock on the loop thread pins the whole event loop
+# (voice + text + patrol freeze). The discord.py-era patch documented this lock
+# as required (dave_patch.py:33-37); the Pycord migration dropped it, which
+# caused the 2026-06-01 8-minute wedge. See
+# docs/incidents/voice-4014-reconnect-event-loop-wedge.md and
+# docs/gotchas/davey-session-needs-serialization-lock.md.
+# MUST be a threading.Lock (decrypt/encrypt run on real threads) and MUST NOT
+# be held across an `await`.
+_dave_lock = threading.Lock()
 
 
 _PATCH_APPLIED = False
@@ -146,12 +161,31 @@ async def _voiceclient_reinit_dave_session(self: VoiceClient) -> None:
             raise RuntimeError(
                 "davey library is required for DAVE voice protocol but is not installed"
             )
+
+        # On a re-key (reconnect / 4014), drop stale epoch transitions so the
+        # MLS rebuild starts clean instead of wedging on a half-applied commit
+        # carried across the force-disconnect. No-op on first join.
         if self.dave_session is not None:
-            self.dave_session.reinit(version, int(self.user.id), int(self.channel.id))
-        else:
-            self.dave_session = davey.DaveSession(
-                version, int(self.user.id), int(self.channel.id)
-            )
+            getattr(self, "dave_pending_transitions", {}).clear()
+
+        # The native MLS re-key (reinit / DaveSession construction /
+        # get_serialized_key_package) is synchronous Rust FFI. Run it OFF the
+        # event loop so a native stall can't pin the loop thread, and hold the
+        # davey lock for the whole rebuild so it serializes against the
+        # recv/player threads' decrypt/encrypt calls.
+        user_id = int(self.user.id)
+        channel_id = int(self.channel.id)
+
+        def _rekey_native() -> bytes:
+            with _dave_lock:
+                if self.dave_session is not None:
+                    self.dave_session.reinit(version, user_id, channel_id)
+                else:
+                    self.dave_session = davey.DaveSession(version, user_id, channel_id)
+                return self.dave_session.get_serialized_key_package()
+
+        loop = asyncio.get_running_loop()
+        key_package = await loop.run_in_executor(None, _rekey_native)
 
         ws = getattr(self, "ws", None)
         if ws in (None, utils.MISSING):
@@ -162,13 +196,11 @@ async def _voiceclient_reinit_dave_session(self: VoiceClient) -> None:
             )
             return
 
-        await ws.send_binary(
-            DiscordVoiceWebSocket.MLS_KEY_PACKAGE,
-            self.dave_session.get_serialized_key_package(),
-        )
+        await ws.send_binary(DiscordVoiceWebSocket.MLS_KEY_PACKAGE, key_package)
     elif self.dave_session is not None:
-        self.dave_session.reset()
-        self.dave_session.set_passthrough_mode(True, 10)
+        with _dave_lock:
+            self.dave_session.reset()
+            self.dave_session.set_passthrough_mode(True, 10)
 
 
 async def _voiceclient_recover_from_invalid_commit(
@@ -203,7 +235,8 @@ async def _voiceclient_execute_transition(self: VoiceClient, transition_id: int)
     elif transition_id > 0 and self.dave_downgraded:
         self.dave_downgraded = False
         if self.dave_session is not None:
-            self.dave_session.set_passthrough_mode(True, 10)
+            with _dave_lock:
+                self.dave_session.set_passthrough_mode(True, 10)
         logger.debug("[VoiceCompat] DAVE session upgraded")
 
 
@@ -293,18 +326,24 @@ async def _patched_received_binary_message(
     if session is None or not _HAS_DAVEY:
         return
 
+    # Every native davey call below is guarded by _dave_lock (serializes
+    # against the recv/player decrypt/encrypt threads), but the lock is
+    # released before any `await` — holding a threading.Lock across an await
+    # would deadlock the loop. See docs/gotchas/davey-session-needs-serialization-lock.
     if op == self.MLS_EXTERNAL_SENDER:
-        session.set_external_sender(msg[3:])
+        with _dave_lock:
+            session.set_external_sender(msg[3:])
     elif op == self.MLS_PROPOSALS:
         if len(msg) < 4:
             return
         optype = msg[3]
-        result = session.process_proposals(
-            davey.ProposalsOperationType.append
-            if optype == 0
-            else davey.ProposalsOperationType.revoke,
-            msg[4:],
-        )
+        with _dave_lock:
+            result = session.process_proposals(
+                davey.ProposalsOperationType.append
+                if optype == 0
+                else davey.ProposalsOperationType.revoke,
+                msg[4:],
+            )
         if isinstance(result, davey.CommitWelcome):
             commit = result.commit
             welcome = result.welcome if result.welcome else b""
@@ -314,7 +353,8 @@ async def _patched_received_binary_message(
             return
         transition_id = struct.unpack_from(">H", msg, 3)[0]
         try:
-            session.process_commit(msg[5:])
+            with _dave_lock:
+                session.process_commit(msg[5:])
             if transition_id != 0:
                 state.dave_pending_transitions[transition_id] = int(
                     getattr(state, "dave_protocol_version", 0) or 0
@@ -327,7 +367,8 @@ async def _patched_received_binary_message(
             return
         transition_id = struct.unpack_from(">H", msg, 3)[0]
         try:
-            session.process_welcome(msg[5:])
+            with _dave_lock:
+                session.process_welcome(msg[5:])
             if transition_id != 0:
                 state.dave_pending_transitions[transition_id] = int(
                     getattr(state, "dave_protocol_version", 0) or 0
@@ -392,7 +433,8 @@ async def _patched_received_message(
             await state._execute_transition(transition_id)
         else:
             if protocol_version == 0 and state.dave_session is not None:
-                state.dave_session.set_passthrough_mode(True, 120)
+                with _dave_lock:
+                    state.dave_session.set_passthrough_mode(True, 120)
             await self.send_transition_ready(transition_id)
     elif op == self.DAVE_EXECUTE_TRANSITION:
         transition_id = int(data["transition_id"])
@@ -468,11 +510,12 @@ def _patched_unpack_audio(self: VoiceClient, data: bytes) -> None:
             return
 
         try:
-            frame.decrypted_data = session.decrypt(
-                int(user_id),
-                davey.MediaType.audio,
-                bytes(frame.decrypted_data),
-            )
+            with _dave_lock:
+                frame.decrypted_data = session.decrypt(
+                    int(user_id),
+                    davey.MediaType.audio,
+                    bytes(frame.decrypted_data),
+                )
         except Exception:
             logger.debug(
                 "[VoiceCompat] DAVE decrypt failed (ssrc=%s user=%s)",
@@ -573,7 +616,8 @@ def apply_voice_compat_patches() -> None:
         session = getattr(self, "dave_session", None)
         if session is not None and getattr(self, "can_encrypt", False):
             try:
-                packet = session.encrypt_opus(data)
+                with _dave_lock:
+                    packet = session.encrypt_opus(data)
             except Exception:
                 logger.exception("[VoiceCompat] Failed to DAVE-encrypt opus packet")
         return original_get_voice_packet(self, packet)

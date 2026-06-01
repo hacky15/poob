@@ -1269,7 +1269,33 @@ class VoiceSession:
             vc = self.voice_client
             vc.play(source, after=after_play)
             log.info("Playback started", file=tmp_path)
-            await play_done
+
+            # Await completion, but bail if the voice client force-disconnects
+            # mid-playback (WS 4014). On a forced disconnect Pycord's
+            # AudioPlayer parks on _connected.wait(), so after_play never fires
+            # and `play_done` would never resolve — hanging this coroutine and
+            # holding the caller's _response_lock forever (permanent mute).
+            # wait_for + shield returns immediately on normal completion (no
+            # added latency) and only polls connection state on timeout.
+            # See docs/incidents/voice-4014-reconnect-event-loop-wedge.md.
+            while not play_done.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(play_done), timeout=1.0)
+                except asyncio.TimeoutError:
+                    if not vc.is_connected():
+                        log.warning(
+                            "Voice disconnected mid-playback — releasing play wait"
+                        )
+                        self._is_speaking = False
+                        try:
+                            vc.stop()
+                        except Exception:
+                            pass
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+                        break
 
         except Exception as exc:
             self._is_speaking = False
