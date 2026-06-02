@@ -514,6 +514,12 @@ class PoobBrain:
     cerebras_model: str = "llama-3.3-70b"
     nvidia_api_key: str = ""
     nvidia_model: str = "qwen/qwen3-next-80b-a3b-instruct"
+    # Gemini tool-router rung — RPD-limited, NO daily token cap, so it carries
+    # routing when Groq's per-day token cap is spent mid-session. Reaches Gemini
+    # via its OpenAI-compatible endpoint (reuses the OpenAI-compat code path).
+    # See docs/decisions/gemini-tool-router-rung.md.
+    google_api_key: str = ""
+    gemini_router_model: str = "gemini-2.5-flash-lite"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3:8b"
     max_history: int = 15
@@ -1928,7 +1934,15 @@ class PoobBrain:
         #    llama-3.3-70b parser regression if that model is ever set.
         if self.groq_api_key:
             providers.append(("groq", self.groq_model))
-        # 2. NVIDIA NIM — different provider, sidesteps Groq rate limits.
+        # 2. Gemini Flash-Lite — RPD-limited, NO daily token cap, reliable
+        #    OpenAI-format function-calling (benchmarked 8/8 on real tool defs).
+        #    Carries routing when Groq's per-day token cap is spent mid-session,
+        #    the failure mode that degraded routing to the weaker NVIDIA rung.
+        #    See docs/decisions/gemini-tool-router-rung.md +
+        #    docs/gotchas/groq-daily-token-cap-degrades-routing.
+        if self.google_api_key:
+            providers.append(("gemini", self.gemini_router_model))
+        # 3. NVIDIA NIM — different provider, sidesteps Groq rate limits.
         if self.nvidia_api_key:
             providers.append(("nvidia", self.nvidia_model))
         # 4. Groq Scout 17B — LAST resort only. Fast but routes too aggressively
@@ -2113,6 +2127,17 @@ class PoobBrain:
             body = {
                 "model": model, "messages": messages,
                 "tools": tools, "max_tokens": max_tokens,
+            }
+        elif provider == "gemini":
+            # Gemini's OpenAI-compatibility endpoint — same request/response
+            # shape as the providers above, so it reuses the shared post+parse
+            # below. temp=0 for deterministic routing.
+            url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+            headers = {"Authorization": f"Bearer {self.google_api_key}"}
+            body = {
+                "model": model, "messages": messages,
+                "tools": tools, "tool_choice": "auto",
+                "max_tokens": max_tokens, "temperature": 0.0,
             }
         else:
             raise ValueError(f"Unknown provider: {provider}")

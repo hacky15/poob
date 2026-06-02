@@ -567,6 +567,8 @@ async def startup() -> None:
         cerebras_model=config.cerebras_model,
         nvidia_api_key=config.nvidia_api_key,
         nvidia_model=config.agent_nvidia_model,
+        google_api_key=config.google_api_key,
+        gemini_router_model=config.agent_google_model,
         ollama_base_url=config.ollama_base_url,
         ollama_model=config.ollama_model,
         max_history=config.voice_conversation_max_history,
