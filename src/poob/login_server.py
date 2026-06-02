@@ -51,6 +51,13 @@ _NOVNC_PORT = int(os.environ.get("POOB_LOGIN_NOVNC_PORT", "6080"))
 _LOGIN_DEADLINE_S = float(os.environ.get("POOB_LOGIN_TIMEOUT_S", "1800"))
 # Where novnc's web assets live in the image (set by the apt 'novnc' package).
 _NOVNC_WEB = os.environ.get("POOB_NOVNC_WEB", "/usr/share/novnc")
+# Inside the container websockify must bind ALL interfaces: Docker's host-side
+# `-p 127.0.0.1:<port>:<port>` publish forwards to the container's eth0, not its
+# loopback, so a 127.0.0.1 bind here is unreachable from the host. The
+# localhost-only security boundary is the host publish, NOT this bind. Override
+# with POOB_LOGIN_BIND=127.0.0.1 only when running directly on a host (no Docker).
+# See docs/runbooks/facebook-remote-login.md.
+_BIND = os.environ.get("POOB_LOGIN_BIND", "0.0.0.0")
 
 
 def _spawn(cmd: list[str]) -> subprocess.Popen:
@@ -75,10 +82,12 @@ def _start_display_stack() -> list[subprocess.Popen]:
         "-forever", "-shared", "-rfbport", str(_VNC_PORT), "-quiet",
     ]))
     time.sleep(1.0)
-    # noVNC web client, localhost-only — reach via SSH tunnel.
+    # noVNC web client. Binds _BIND (0.0.0.0 in Docker) so the host-localhost
+    # publish can reach it; never expose the host port to 0.0.0.0 — reach it via
+    # the SSH/Tailscale tunnel only.
     procs.append(_spawn([
         "websockify", "--web", _NOVNC_WEB,
-        f"127.0.0.1:{_NOVNC_PORT}", f"localhost:{_VNC_PORT}",
+        f"{_BIND}:{_NOVNC_PORT}", f"localhost:{_VNC_PORT}",
     ]))
     return procs
 
