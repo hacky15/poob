@@ -169,6 +169,13 @@ class AppConfig(BaseSettings):
     # stop/start is safe) BEFORE it wedges, re-importing+persisting the live
     # cookies so the fresh session stays authenticated. 0 disables.
     patrol_main_browser_max_age_s: float = 14400.0  # 4h, below the ~7h wedge age
+    # Proactive health heartbeat: DM the owner when the scanner is structurally
+    # dark — recovered-from-forced-restart, FB auth FAILED (fresh feed dark,
+    # needs a cookie re-seed), or a long delivery silence — so a 15h dark-out is
+    # never silent again. discord_owner_user_id==0 disables it.
+    # See docs/decisions/proactive-health-heartbeat.md.
+    patrol_health_check_interval_s: int = 300
+    patrol_no_delivery_alert_hours: float = 6.0
     # Memory-pressure guard. Chromium leaks renderer processes over hours
     # (audit 2026-05-30: ~5.6 GB across ~22 procs, climbing to the 4 GiB cap),
     # which both risks an OOM-kill AND degrades the CDP session into the wedge

@@ -82,6 +82,20 @@ class PatrolScheduler:
         self._trigger_event = asyncio.Event()
         self._last_scan_time: datetime | None = None
         self._next_scan_time: datetime | None = None
+        # Durable health store: record WHY we force-exit so the next boot can
+        # DM the owner (an in-process alert can't fire — os._exit is a hard
+        # kill). Best-effort; never blocks the recovery restart.
+        self._health_kv = None
+        from pathlib import Path as _Path
+
+        _qdb = getattr(config, "quota_db_path", None)
+        if isinstance(_qdb, (str, _Path)):
+            try:
+                from poob.quota.persistent_limiter import PersistentKV
+
+                self._health_kv = PersistentKV(db_path=_Path(_qdb))
+            except Exception:
+                self._health_kv = None
         # Reliability watchdog: a wedged CDP get_page() does not honor
         # asyncio.wait_for cancellation, so the per-cycle timeout abandons the
         # cycle but cannot recover the browser — every subsequent cycle re-wedges
@@ -185,6 +199,9 @@ class PatrolScheduler:
                 consecutive_failures=self._consecutive_failures,
                 threshold=self._max_consecutive_failures,
             )
+            if self._health_kv is not None:
+                from poob.scanner.health_monitor import record_force_exit
+                record_force_exit(self._health_kv, "watchdog: CDP wedge")
             sys.stderr.flush()
             os._exit(1)
 
@@ -213,6 +230,9 @@ class PatrolScheduler:
             memory_pct=round(frac * 100, 1),
             threshold_pct=round(self._memory_restart_pct * 100, 1),
         )
+        if self._health_kv is not None:
+            from poob.scanner.health_monitor import record_force_exit
+            record_force_exit(self._health_kv, "memory-pressure restart")
         sys.stderr.flush()
         os._exit(1)
 

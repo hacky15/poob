@@ -770,9 +770,48 @@ async def startup() -> None:
     else:
         log.info("Patrol scheduler NOT auto-started (patrol_scheduler_auto_start=False)")
 
+    # Proactive health heartbeat (the no-more-silent-dark-outs guarantee).
+    # An in-process alert can't fire on os._exit, so the scanner records health
+    # to durable PersistentKV (force-exit reason, last delivery) and this loop —
+    # which waits for the bot to connect — DMs the owner on the dark-out
+    # fingerprints. Delivery uses the bot client here; discord_bot/ is untouched.
+    async def _health_dm_loop() -> None:
+        owner_id = getattr(config, "discord_owner_user_id", 0)
+        if not owner_id:
+            return
+        import time as _time
+
+        from poob.scanner.health_monitor import pending_health_alerts
+
+        try:
+            await bot.wait_until_ready()
+        except Exception:
+            return
+        no_delivery_s = float(getattr(config, "patrol_no_delivery_alert_hours", 6.0)) * 3600.0
+        interval = int(getattr(config, "patrol_health_check_interval_s", 300))
+        # First check uses the boot-time ground-truth auth result; later checks
+        # use the live flag (best-effort until per-cycle re-validation lands).
+        auth_ok = browser_manager.is_authenticated
+        while True:
+            try:
+                alerts = pending_health_alerts(
+                    kv_store, auth_ok=auth_ok, now=_time.time(),
+                    no_delivery_alert_s=no_delivery_s,
+                )
+                if alerts:
+                    user = bot.get_user(owner_id) or await bot.fetch_user(owner_id)
+                    for msg in alerts:
+                        await user.send(msg)
+                        log.info("Health alert DM sent to owner")
+            except Exception as exc:
+                log.warning("Health heartbeat check failed", error=str(exc)[:120])
+            auth_ok = browser_manager.is_authenticated
+            await asyncio.sleep(interval)
+
     try:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(bot.start(config.discord_bot_token))
+            tg.create_task(_health_dm_loop())
     finally:
         await browser_manager.stop()
         if anonymous_browser:

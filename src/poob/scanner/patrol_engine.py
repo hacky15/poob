@@ -259,6 +259,21 @@ class PatrolEngine:
             float(_mba) if isinstance(_mba, (int, float)) and _mba > 0 else 0.0
         )
         self._main_browser_started = time.monotonic()
+        # Durable health-signal store (survives os._exit) for the heartbeat:
+        # record each delivery so the monitor can detect a dark-out. Only built
+        # for a real path (a spec'd-mock config yields a MagicMock, which must
+        # NOT trigger real disk I/O at construction).
+        self._health_kv = None
+        from pathlib import Path as _Path
+
+        _qdb = getattr(config, "quota_db_path", None)
+        if isinstance(_qdb, (str, _Path)):
+            try:
+                from poob.quota.persistent_limiter import PersistentKV
+
+                self._health_kv = PersistentKV(db_path=_Path(_qdb))
+            except Exception:
+                self._health_kv = None
 
         # Build unified filter chain (replaces hardcoded _ALLOWED_NOTIFY_STATES,
         # _EXCLUDED_CATEGORY_PATTERNS, triple-check pattern, and backlog bypass).
@@ -1334,17 +1349,14 @@ class PatrolEngine:
                 # MAIN browser, whose CDP wedges over hours — and it was the ONE
                 # unprotected CDP path: an unbounded sweep_search hung the whole
                 # 600s cycle and caused the ~7h watchdog force-exits (the
-                # 2026-06-02 dark-out). Bound it like the auth/anon DOM sweeps,
-                # and only run it when authenticated (an unauthenticated main
-                # browser yields nothing useful here and is the likeliest to be
-                # CDP-degraded). The consecutive-timeout counter feeds the
-                # main-browser self-heal. See
-                # docs/incidents/watchlist-sweep-unprotected-cdp-wedge.md.
+                # 2026-06-02 dark-out). Bound it with a timeout like the
+                # auth/anon DOM sweeps; the consecutive-timeout counter feeds the
+                # main-browser self-heal. (No is_authenticated requirement — an
+                # anonymous marketplace search is still useful, and the timeout
+                # is what protects against the CDP wedge regardless of auth.)
+                # See docs/incidents/watchlist-sweep-unprotected-cdp-wedge.md.
                 dom_listings: list[Listing] = []
-                _main_ok = page is not None and getattr(
-                    self._browser, "is_authenticated", False
-                )
-                if len(gql_listings) < 5 and _main_ok:
+                if len(gql_listings) < 5 and page is not None:
                     try:
                         dom_listings = await asyncio.wait_for(
                             self._scanner.sweep_search(
@@ -2103,6 +2115,9 @@ class PatrolEngine:
                     await self._notifier.send_deal(deal, listing)
                     await self._deal_repo.mark_notified(deal.id)
                     result.deals_notified += 1
+                    if self._health_kv is not None:
+                        from poob.scanner.health_monitor import record_delivery
+                        record_delivery(self._health_kv)
             except Exception as exc:
                 log.error(
                     "Public deal notification failed",
@@ -2195,6 +2210,9 @@ class PatrolEngine:
                 )
                 await self._deal_repo.mark_notified(deal.id)
                 result.deals_notified += 1
+                if self._health_kv is not None:
+                    from poob.scanner.health_monitor import record_delivery
+                    record_delivery(self._health_kv)
             except Exception as exc:
                 log.error(
                     "Watchlist DM notification failed",
