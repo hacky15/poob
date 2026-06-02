@@ -246,6 +246,19 @@ class PatrolEngine:
             float(_cpi) if isinstance(_cpi, (int, float)) and _cpi > 0 else 0.0
         )
         self._last_cookie_persist = 0.0
+        # Main-browser CDP health: bound the watchlist DOM sweep (the one
+        # previously-unprotected CDP path) and track consecutive failures to
+        # trigger the main-browser self-heal / preemptive recycle.
+        _wdt = getattr(config, "patrol_watchlist_dom_timeout_s", 60.0)
+        self._watchlist_dom_timeout_s = (
+            float(_wdt) if isinstance(_wdt, (int, float)) and _wdt > 0 else 60.0
+        )
+        self._main_browser_cdp_failures = 0
+        _mba = getattr(config, "patrol_main_browser_max_age_s", 14400.0)
+        self._main_browser_max_age_s = (
+            float(_mba) if isinstance(_mba, (int, float)) and _mba > 0 else 0.0
+        )
+        self._main_browser_started = time.monotonic()
 
         # Build unified filter chain (replaces hardcoded _ALLOWED_NOTIFY_STATES,
         # _EXCLUDED_CATEGORY_PATTERNS, triple-check pattern, and backlog bypass).
@@ -896,14 +909,24 @@ class PatrolEngine:
         # confirmed session. See docs/decisions/authenticated-discovery-sweep.md.
         auth_dom_listings: list[Listing] = []
         if self._browser and getattr(self._browser, "is_authenticated", False):
+            auth_sweep_ok = False
             try:
                 auth_dom_listings = await asyncio.wait_for(
                     self._auth_dom_sweep(result), timeout=60.0,
                 )
+                auth_sweep_ok = True
             except asyncio.TimeoutError:
                 log.warning("Authenticated browser DOM sweep timed out (60s)")
             except Exception as exc:
                 log.warning("Authenticated browser sweep failed", error=str(exc)[:100])
+            if auth_sweep_ok:
+                # The auth sweep returned, so CDP is provably alive RIGHT NOW —
+                # the safe moment to capture FB's rolled token. This runs BEFORE
+                # the wedge-prone enrichment phase, so a later wedge cannot
+                # starve persistence (the cycle-end persist at run_patrol_cycle
+                # is unreachable on an abandoned cycle — the bug that froze the
+                # token and caused the 2026-06-02 dark-out). Throttled inside.
+                await self._maybe_persist_session()
 
         # Merge: authenticated DOM (freshest) first, then anon GQL + anon DOM.
         combined: list[Listing] = []
@@ -1307,26 +1330,50 @@ class PatrolEngine:
                     or getattr(self._config, "marketplace_default_location", None)
                 )
 
-                # DOM fallback only when GQL got < 5 results AND the auth
-                # browser page is actually available. If the main browser
-                # failed to start, GQL-only results stand alone.
+                # DOM fallback only when GQL got < 5 results. This drives the
+                # MAIN browser, whose CDP wedges over hours — and it was the ONE
+                # unprotected CDP path: an unbounded sweep_search hung the whole
+                # 600s cycle and caused the ~7h watchdog force-exits (the
+                # 2026-06-02 dark-out). Bound it like the auth/anon DOM sweeps,
+                # and only run it when authenticated (an unauthenticated main
+                # browser yields nothing useful here and is the likeliest to be
+                # CDP-degraded). The consecutive-timeout counter feeds the
+                # main-browser self-heal. See
+                # docs/incidents/watchlist-sweep-unprotected-cdp-wedge.md.
                 dom_listings: list[Listing] = []
-                if len(gql_listings) < 5 and page is not None:
-                    dom_listings = await self._scanner.sweep_search(
-                        page,
-                        item.interest,
-                        max_price=cfg.get("max_price", item.max_price),
-                        min_price=cfg.get("min_price"),
-                        location_slug=location,
-                        condition=cfg.get("condition"),
-                        radius_miles=cfg.get("radius_miles"),
-                    )
-                    dom_searches += 1
-                    # Stealth delay only for browser-based searches
-                    await random_delay(
-                        self._config.patrol_inter_category_delay_min_ms,
-                        self._config.patrol_inter_category_delay_max_ms,
-                    )
+                _main_ok = page is not None and getattr(
+                    self._browser, "is_authenticated", False
+                )
+                if len(gql_listings) < 5 and _main_ok:
+                    try:
+                        dom_listings = await asyncio.wait_for(
+                            self._scanner.sweep_search(
+                                page,
+                                item.interest,
+                                max_price=cfg.get("max_price", item.max_price),
+                                min_price=cfg.get("min_price"),
+                                location_slug=location,
+                                condition=cfg.get("condition"),
+                                radius_miles=cfg.get("radius_miles"),
+                            ),
+                            timeout=self._watchlist_dom_timeout_s,
+                        )
+                        self._main_browser_cdp_failures = 0
+                        dom_searches += 1
+                        # Stealth delay only for successful browser searches.
+                        await random_delay(
+                            self._config.patrol_inter_category_delay_min_ms,
+                            self._config.patrol_inter_category_delay_max_ms,
+                        )
+                    except asyncio.TimeoutError:
+                        self._main_browser_cdp_failures += 1
+                        log.warning(
+                            "Watchlist DOM sweep timed out — main browser CDP "
+                            "may be wedged",
+                            interest=item.interest,
+                            timeout_s=self._watchlist_dom_timeout_s,
+                            consecutive_cdp_failures=self._main_browser_cdp_failures,
+                        )
 
                 # Merge: GraphQL primary, DOM fills gaps
                 merged: list[Listing] = list(gql_listings)

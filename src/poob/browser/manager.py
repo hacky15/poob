@@ -410,8 +410,17 @@ class BrowserManager:
             and c.get("name") and c.get("value") is not None
         ]
         if not any(c.get("name") == "xs" for c in fb):
-            # No session cookie — don't overwrite a valid file with a
-            # logged-out cookie set.
+            # No session cookie in the live read — don't overwrite a valid file
+            # with a logged-out set. CRITICAL: this is NOT benign — it means the
+            # rolled token isn't being captured, so on-disk cookies freeze and
+            # the session dies on the next restart. Log it (was a silent return
+            # 0 that hid a 15.5h dark-out on 2026-06-02). A persistent stream of
+            # these while is_authenticated=True signals session death in flight.
+            log.warning(
+                "Cookie persist skipped — no 'xs' in live read (session not "
+                "logged in or xs not surfaced by CDP); on-disk token NOT refreshed",
+                fb_cookies=len(fb),
+            )
             return 0
         try:
             path.parent.mkdir(parents=True, exist_ok=True)

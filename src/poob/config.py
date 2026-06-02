@@ -158,6 +158,17 @@ class AppConfig(BaseSettings):
     # Bounds worst-case zero-output to N x the cycle timeout (~N x 10min).
     # See docs/incidents/main-browser-cdp-wedge-infinite-hang.md.
     patrol_max_consecutive_failures: int = 3
+    # The watchlist DOM fallback drives the MAIN browser and was the ONE
+    # unprotected CDP path — an unbounded navigation hung the whole 600s cycle
+    # when the main browser's CDP wedged (~every 7h), causing repeated watchdog
+    # force-exits and a 15.5h dark-out (2026-06-02). Bound it like the other
+    # DOM sweeps. See docs/incidents/watchlist-sweep-unprotected-cdp-wedge.md.
+    patrol_watchlist_dom_timeout_s: float = 60.0
+    # Preemptive main-browser recycle. The main browser's CDP session ages into
+    # a wedge over ~5.5-7h; recycle it on this interval (BETWEEN cycles, where
+    # stop/start is safe) BEFORE it wedges, re-importing+persisting the live
+    # cookies so the fresh session stays authenticated. 0 disables.
+    patrol_main_browser_max_age_s: float = 14400.0  # 4h, below the ~7h wedge age
     # Memory-pressure guard. Chromium leaks renderer processes over hours
     # (audit 2026-05-30: ~5.6 GB across ~22 procs, climbing to the 4 GiB cap),
     # which both risks an OOM-kill AND degrades the CDP session into the wedge
