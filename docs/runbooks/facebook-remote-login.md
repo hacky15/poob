@@ -78,9 +78,14 @@ cycle (`Persisted live FB session cookies count=N`), so it self-maintains.
 
 ## Notes
 
-- **Security:** VNC (5900) and noVNC (6080) bind to localhost in the container;
-  the published port is `127.0.0.1:6080` on the homelab, reached only through the
-  SSH tunnel. Never publish to `0.0.0.0`.
+- **Security:** x11vnc (5900) binds localhost *inside* the container. noVNC/
+  websockify (6080) binds `0.0.0.0` **inside the container** — required, because
+  Docker's `-p 127.0.0.1:6080:6080` publish forwards to the container's eth0, not
+  its loopback, so an in-container `127.0.0.1` bind is unreachable from the host
+  (symptom: HTTP 000 on the host while `vnc.html=200` inside the container). The
+  localhost boundary is the **host publish** (`127.0.0.1:6080` on the homelab),
+  reached only through the SSH tunnel. Never publish the *host* port to `0.0.0.0`.
+  (Outside Docker, set `POOB_LOGIN_BIND=127.0.0.1`.)
 - **No automated login, ever** — this is a human logging in once; we never script
   credentials (ToS / account-safety, per the standing legality rules).
 - **If it still dies within days** despite a fresh login, that points to
