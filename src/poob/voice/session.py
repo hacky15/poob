@@ -284,15 +284,45 @@ class VoiceSession:
         return self._is_speaking
 
     async def play_entrance(self) -> None:
-        """Synthesize and play Poob's entrance catchphrase."""
-        catchphrase = "Its poob here, auuuuuughhhhh yeahhhhhhhh"
+        """Play a weighted-random Poob join catchphrase (cringe quip + moan).
+
+        Picks from ``JOIN_PHRASES`` and synthesizes in Fenrir at ``JOIN_RATE``
+        (the workshopped 0.85) so the moan tail lands. The entrance isn't
+        latency-critical, so live synth is fine. See
+        docs/decisions/poob-noise-fillers.md.
+        """
+        from poob.voice.fillers import JOIN_RATE, pick_join_phrase
+
+        catchphrase = pick_join_phrase()
         try:
-            audio = await self._synthesize(catchphrase)
+            audio = await self._synthesize_at_rate(catchphrase, JOIN_RATE)
             if audio:
                 await self._play_audio(audio)
-                log.info("Entrance catchphrase played")
+                log.info("Entrance catchphrase played", phrase=catchphrase)
         except Exception as exc:
             log.warning("Entrance catchphrase failed", error=str(exc)[:80])
+
+    async def _synthesize_at_rate(self, text: str, rate: float) -> bytes:
+        """Synthesize in Poob's Google voice at a specific speaking rate.
+
+        Mirrors the Toob/Boob pattern (build a rate-specific GoogleCloudTTS
+        from the active provider). Falls back to the default cascade (rate not
+        preserved) if no Google provider is configured.
+        """
+        from poob.voice.tts import GoogleCloudTTS
+
+        for provider in self.tts_providers:
+            if isinstance(provider, GoogleCloudTTS):
+                rated = GoogleCloudTTS(
+                    api_key=provider._api_key,
+                    voice=provider._voice_name,
+                    speaking_rate=rate,
+                )
+                audio = await rated.synthesize(text)
+                if audio:
+                    return audio
+                break
+        return await self._synthesize(text)
 
     def _resolve_user_name(self, user_id: int) -> str:
         """Resolve a Discord user ID to their display name.

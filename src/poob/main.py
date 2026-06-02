@@ -632,13 +632,18 @@ async def startup() -> None:
             from poob.voice.tts import GoogleCloudTTS
 
             filler_voice = config.voice_filler_voice or config.voice_google_tts_voice
-            filler_synth = GoogleCloudTTS(
-                api_key=config.google_cloud_vision_api_key,
-                voice=filler_voice,
-                speaking_rate=config.voice_google_tts_rate,
-            )
+            filler_key = config.google_cloud_vision_api_key
+
+            # Per-phrase rate: fillers are synthesized at each phrase's own
+            # speaking_rate (slow moans vs quick affirms), so we hand
+            # generate_fillers a factory instead of a fixed-rate synth.
+            def _filler_synth(rate: float) -> GoogleCloudTTS:
+                return GoogleCloudTTS(
+                    api_key=filler_key, voice=filler_voice, speaking_rate=rate
+                )
+
             filler_paths = await generate_fillers(
-                synthesizer=filler_synth if filler_synth.is_available() else None,
+                synth_factory=_filler_synth if filler_key else None,
                 edge_fallback_voice=config.voice_tts_voice,
             )
         filler_player = FillerPlayer(filler_paths)

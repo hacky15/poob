@@ -1,11 +1,11 @@
 """Tests for Poob-noise filler generation.
 
-Fillers are pre-generated once at startup and cached. They must be
-synthesized via the supplied voice (Poob's Google Fenrir) so the
-"thinking noise" sounds like Poob, cache-keyed by (voice, phrase) so a
-voice/phrase change regenerates, and stale clips must be pruned (so old
-word-fillers don't linger on the volume). See
-docs/decisions/poob-noise-fillers.md.
+Fillers are pre-generated once at startup and cached. Each phrase carries its
+own ``(rate, weight)``: clips are synthesized via a rate-aware factory (Poob's
+Google Fenrir) so the "thinking noise" sounds like Poob, cache-keyed by
+``(voice, rate, phrase)`` so a voice/rate/phrase change regenerates, stale clips
+are pruned, and the same phrase at two rates is two distinct clips. The player
+selects weighted-randomly. See docs/decisions/poob-noise-fillers.md.
 """
 
 from __future__ import annotations
@@ -13,15 +13,22 @@ from __future__ import annotations
 import pytest
 
 import poob.voice.fillers as fillers
-from poob.voice.fillers import FILLER_PHRASES, generate_fillers
+from poob.voice.fillers import (
+    FILLER_PHRASES,
+    JOIN_PHRASES,
+    FillerPlayer,
+    generate_fillers,
+    pick_join_phrase,
+)
 
 
 class _FakeSynth:
     """Minimal TTSProvider double: records calls, returns deterministic bytes."""
 
-    def __init__(self, name: str = "google_tts:en-US-Chirp3-HD-Fenrir") -> None:
+    def __init__(self, name: str = "google_tts:en-US-Chirp3-HD-Fenrir",
+                 calls: list[str] | None = None) -> None:
         self._name = name
-        self.calls: list[str] = []
+        self.calls = calls if calls is not None else []
 
     @property
     def name(self) -> str:
@@ -35,6 +42,17 @@ class _FakeSynth:
         return True
 
 
+def _factory(name: str = "google_tts:en-US-Chirp3-HD-Fenrir"):
+    """Return (synth_factory, shared_calls_list). The factory builds a synth
+    per rate that all append to one shared call log."""
+    calls: list[str] = []
+    return (lambda rate: _FakeSynth(name=name, calls=calls)), calls
+
+
+def _phrases() -> set[str]:
+    return {p for p, _r, _w in FILLER_PHRASES}
+
+
 @pytest.fixture(autouse=True)
 def _tmp_filler_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(fillers, "FILLER_DIR", tmp_path)
@@ -42,54 +60,80 @@ def _tmp_filler_dir(tmp_path, monkeypatch):
 
 
 def test_phrases_are_noises_not_words() -> None:
-    # The whole point of the change: noises, not the old helpdesk words.
-    joined = " ".join(FILLER_PHRASES).lower()
+    phrases = _phrases()
+    joined = " ".join(phrases).lower()
+    # The old helpdesk word-fillers must not return.
     assert "let me think" not in joined
     assert "good question" not in joined
-    # Should contain Poob-style vocalizations.
-    assert any("hmm" in p.lower() or "augh" in p.lower() or "mmm" in p.lower()
-               for p in FILLER_PHRASES)
+    # Approved vocalizations dominate (augh / ohh / ugh families). Pure "mmm"
+    # fillers were rejected — none should be a bare mmm.
+    assert any("augh" in p.lower() for p in phrases)
+    assert not any(p.lower().strip(".").replace("m", "") == "" for p in phrases), \
+        "a pure-mmm filler regressed (operator rejected those)"
+
+
+def test_each_phrase_carries_rate_and_weight() -> None:
+    for entry in FILLER_PHRASES:
+        phrase, rate, weight = entry  # shape contract
+        assert isinstance(phrase, str) and phrase
+        assert 0.5 <= rate <= 1.5
+        assert weight > 0
+
+
+def test_hero_phrase_is_weighted_heaviest() -> None:
+    """`Aughhhh.` is the operator's ~30% hero — it must carry the top weight."""
+    by_weight = sorted(FILLER_PHRASES, key=lambda e: e[2], reverse=True)
+    assert by_weight[0][0] == "Aughhhh."
 
 
 @pytest.mark.asyncio
-async def test_generates_one_clip_per_phrase_via_synth(_tmp_filler_dir) -> None:
-    synth = _FakeSynth()
-    paths = await generate_fillers(synthesizer=synth)
-    assert len(paths) == len(FILLER_PHRASES)
-    assert set(synth.calls) == set(FILLER_PHRASES)  # each phrase synthesized
-    for p in paths:
-        assert p.exists() and p.read_bytes().startswith(b"MP3:")
+async def test_generates_one_clip_per_phrase_via_factory(_tmp_filler_dir) -> None:
+    factory, calls = _factory()
+    results = await generate_fillers(synth_factory=factory)
+    assert len(results) == len(FILLER_PHRASES)
+    assert set(calls) == _phrases()  # every phrase synthesized
+    for path, weight in results:
+        assert path.exists() and path.read_bytes().startswith(b"MP3:")
+        assert weight > 0
+
+
+@pytest.mark.asyncio
+async def test_same_phrase_different_rate_are_distinct_clips(_tmp_filler_dir) -> None:
+    """Two entries with the same phrase but different rate must produce two
+    files (rate is in the cache key) — e.g. the kept `Aaaughhh.` at 0.7 and 0.8."""
+    factory, _calls = _factory()
+    phrases = [("Aaaughhh.", 0.7, 1.0), ("Aaaughhh.", 0.8, 1.0)]
+    results = await generate_fillers(synth_factory=factory, phrases=phrases)
+    paths = {p for p, _w in results}
+    assert len(paths) == 2  # distinct files despite identical phrase text
 
 
 @pytest.mark.asyncio
 async def test_idempotent_skips_existing(_tmp_filler_dir) -> None:
-    synth = _FakeSynth()
-    await generate_fillers(synthesizer=synth)
-    first = list(synth.calls)
-    synth.calls.clear()
-    await generate_fillers(synthesizer=synth)  # second run
-    assert synth.calls == []  # nothing re-synthesized (all cached)
-    assert first  # sanity: first run did work
+    factory, calls = _factory()
+    await generate_fillers(synth_factory=factory)
+    assert calls
+    calls.clear()
+    await generate_fillers(synth_factory=factory)  # second run, all cached
+    assert calls == []
 
 
 @pytest.mark.asyncio
 async def test_voice_change_regenerates_and_prunes(_tmp_filler_dir) -> None:
-    await generate_fillers(synthesizer=_FakeSynth(name="google_tts:fenrir"))
+    f1, _ = _factory(name="google_tts:fenrir")
+    await generate_fillers(synth_factory=f1)
     before = set(_tmp_filler_dir.glob("filler_*.mp3"))
     assert before
-    # Different voice → different hash → new files, old ones pruned.
-    new_synth = _FakeSynth(name="google_tts:enceladus")
-    paths = await generate_fillers(synthesizer=new_synth)
+    f2, _ = _factory(name="google_tts:enceladus")
+    results = await generate_fillers(synth_factory=f2)
     after = set(_tmp_filler_dir.glob("filler_*.mp3"))
-    assert len(paths) == len(FILLER_PHRASES)
-    # No stale clips from the old voice remain.
-    assert after == set(paths)
-    assert before.isdisjoint(after)
+    assert len(results) == len(FILLER_PHRASES)
+    assert after == {p for p, _w in results}
+    assert before.isdisjoint(after)  # old voice's clips pruned
 
 
 @pytest.mark.asyncio
 async def test_falls_back_to_edge_when_synth_unavailable(_tmp_filler_dir, monkeypatch) -> None:
-    # Synthesizer fails every clip → must fall back to Edge.
     class _DeadSynth:
         name = "google_tts:dead"
 
@@ -109,19 +153,102 @@ async def test_falls_back_to_edge_when_synth_unavailable(_tmp_filler_dir, monkey
     import poob.voice.tts as tts
     monkeypatch.setattr(tts, "EdgeTTS", _FakeEdge)
 
-    paths = await generate_fillers(synthesizer=_DeadSynth())
-    assert set(edge_calls) == set(FILLER_PHRASES)  # edge produced every clip
-    assert all(p.read_bytes().startswith(b"EDGE:") for p in paths)
+    results = await generate_fillers(synth_factory=lambda rate: _DeadSynth())
+    assert set(edge_calls) == _phrases()
+    assert all(p.read_bytes().startswith(b"EDGE:") for p, _w in results)
 
 
 @pytest.mark.asyncio
-async def test_no_synth_and_no_edge_yields_no_clips(_tmp_filler_dir, monkeypatch) -> None:
-    # No synthesizer and Edge import fails → graceful empty, no crash.
+async def test_no_factory_and_no_edge_yields_no_clips(_tmp_filler_dir, monkeypatch) -> None:
     import poob.voice.tts as tts
 
     def _boom(*a, **k):
         raise ImportError("no edge")
 
     monkeypatch.setattr(tts, "EdgeTTS", _boom)
-    paths = await generate_fillers(synthesizer=None)
-    assert paths == []
+    results = await generate_fillers(synth_factory=None)
+    assert results == []
+
+
+# ---------------------------------------------------------------------------
+# FillerPlayer — weighted selection + backward-compatible bare-Path input.
+# ---------------------------------------------------------------------------
+
+
+def test_player_accepts_bare_paths(tmp_path) -> None:
+    """Legacy callers pass bare Paths (equal weight) — must still work."""
+    clips = [tmp_path / "a.mp3", tmp_path / "b.mp3"]
+    for c in clips:
+        c.write_bytes(b"x")
+    player = FillerPlayer(filler_paths=clips)
+    assert player.available
+    assert player.get_random_filler() in clips
+
+
+def test_player_weighted_selection_favors_heavy(tmp_path, monkeypatch) -> None:
+    """A heavily-weighted clip dominates random selection."""
+    light = tmp_path / "light.mp3"
+    heavy = tmp_path / "heavy.mp3"
+    for c in (light, heavy):
+        c.write_bytes(b"x")
+    player = FillerPlayer(filler_paths=[(light, 1.0), (heavy, 99.0)])
+
+    counts = {light: 0, heavy: 0}
+    seq = iter([])  # force varied last_index by sampling many times
+
+    for _ in range(400):
+        # reset last_index occasionally so both stay eligible
+        player._last_index = -1
+        counts[player.get_random_filler()] += 1
+    assert counts[heavy] > counts[light] * 5  # heavy clearly dominates
+
+
+def test_player_avoids_immediate_repeat(tmp_path) -> None:
+    a, b = tmp_path / "a.mp3", tmp_path / "b.mp3"
+    for c in (a, b):
+        c.write_bytes(b"x")
+    player = FillerPlayer(filler_paths=[(a, 1.0), (b, 1.0)])
+    first = player.get_random_filler()
+    second = player.get_random_filler()
+    assert first != second  # two-clip case never repeats consecutively
+
+
+def test_player_empty_is_unavailable() -> None:
+    player = FillerPlayer(filler_paths=[])
+    assert not player.available
+    assert player.get_random_filler() is None
+    assert player.get_filler_bytes() is None
+
+
+# ---------------------------------------------------------------------------
+# JOIN_PHRASES — the weighted entrance "join noise" pool (cringe quip + moan).
+# ---------------------------------------------------------------------------
+
+
+def test_join_phrases_shape_and_weights() -> None:
+    for phrase, weight in JOIN_PHRASES:
+        assert isinstance(phrase, str) and phrase
+        assert weight > 0
+    by_weight = sorted(JOIN_PHRASES, key=lambda e: e[1], reverse=True)
+    assert by_weight[0][0] == "Daddy's home, ohhh yeah."  # ~25%
+    assert by_weight[1][0] == "Poob has arrived, aaaughhh."  # ~10%
+
+
+def test_join_phrases_dropped_spelled_out_tails() -> None:
+    """The tails that spelled out at 0.85 ('...rrraugh', '...ughhh') were
+    replaced — they must not appear; the corrected phrases must."""
+    joined = " ".join(p for p, _w in JOIN_PHRASES)
+    assert "rrraugh" not in joined            # i06 tail fixed
+    assert "Poob, ughhh" not in joined        # i09 tail fixed
+    assert "Poob in the house, auugh." in {p for p, _w in JOIN_PHRASES}
+    assert "It's ya boy Poob, ohhh." in {p for p, _w in JOIN_PHRASES}
+    assert "Guess who? Poob! Aughh." in {p for p, _w in JOIN_PHRASES}  # i04 reworded
+
+
+def test_pick_join_phrase_is_weighted(monkeypatch) -> None:
+    counts: dict[str, int] = {}
+    for _ in range(600):
+        p = pick_join_phrase()
+        counts[p] = counts.get(p, 0) + 1
+    # The 25% phrase should clearly beat an ~8% phrase.
+    assert counts.get("Daddy's home, ohhh yeah.", 0) > counts.get("Poob's back, ohhh.", 0)

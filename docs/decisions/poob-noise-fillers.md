@@ -33,3 +33,14 @@ Key finding: **no.** Fillers are pre-generated once at startup and cached as MP3
 - **Open quality question to validate in prod:** whether Google Chirp3-HD Fenrir renders `"aughhh"`/`"hmmmm"` as a believable moan vs. something flat. This is a test-after-deploy item; if it lands poorly, flip `voice_filler_voice` to a different voice or tweak `FILLER_PHRASES` — no code change needed for the voice.
 - A one-time ~8-clip Google TTS call at each boot where the cache is cold (negligible quota; idempotent thereafter).
 - Old `data/voice_fillers/filler_00..07.mp3` word-clips are pruned on first run of the new code.
+
+## Update 2026-06-02 — workshopped: per-phrase rate + weights, and a separate join-noise pool
+
+The "open quality question" above was resolved by an operator listening session (synthesizing candidate spellings through real Fenrir and rating them). Findings:
+
+- **Fenrir spells out some repeated-letter combos** (`"Hmmmm"` → "h-m-m-m", `"Aargh"`, and — critically rate-dependent — `"rrraugh"`/`"ughhh"` spell out at 0.85 even though they render fine at 1.25). **Real-word fillers** ("Welp", "Whoa", "Yeah yeah") and **pure `mmm`** were all rejected. Winners are vowel-heavy moan clusters: `Aughhhh`, `Auugh`, `Auuughhh`, `Aaaughhh`, `Ohhh(hh)`, plus a few quick utility noises (`Mm-hmm`, `Uhh`).
+- **Slower = moanier.** The best moans render at **0.7–0.85**, not Poob's 1.25 speaking rate. So `FILLER_PHRASES` is now `(phrase, rate, weight)` — each clip synthesized at **its own** rate (`generate_fillers` takes a rate-aware `synth_factory`; cache key is now `(voice, rate, phrase)` so the same spelling at two rates is two clips). `FillerPlayer` does **weighted** selection (`random.choices`), so the hero `"Aughhhh."` surfaces ~30%.
+- **Join "catchphrases" are a separate weighted pool**, NOT latency fillers. `session.play_entrance()` previously synthesized ONE hardcoded line (`"Its poob here, auuuuuughhhhh yeahhhhhhhh"`) live on join. It now picks weighted-randomly from `JOIN_PHRASES` (cringe 2–3 word quip + an approved moan tail, e.g. "Daddy's home, ohhh yeah." ~25%, "Poob has arrived, aaaughhh." ~10%) and synthesizes in Fenrir at `JOIN_RATE = 0.85` via the new `_synthesize_at_rate` helper (same build-a-rate-specific-Google-synth pattern as Toob/Boob). Played only on a real entrance (`play_entrance=True` — `/join`), never on music auto-join or restart auto-rejoin.
+- **Hazard (durable):** never put a moan tail that spells out into a join phrase. `rrraugh`/`ughhh` spell at 0.85; use `aughh`/`auugh`/`ohhh`/`aaaughhh`/`auuughhh`/`uuughhh` (verified to vocalize). Test `test_join_phrases_dropped_spelled_out_tails` guards this.
+
+Tests: `tests/unit/test_fillers.py` (rate/weight shape, rate-keyed cache distinctness, weighted selection, bare-Path back-compat, join-pool weighting + fixed-tail guard).
