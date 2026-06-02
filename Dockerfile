@@ -20,6 +20,9 @@ WORKDIR /app
 # - libsodium23: PyNaCl runtime (Discord voice encryption)
 # - build-essential + libffi-dev: compile native wheels (PyNaCl, onnxruntime, etc.)
 # - curl/wget/gnupg/ca-certificates: general scraping + Playwright installer
+# - xvfb/x11vnc/novnc/websockify/fluxbox: one-time remote FB login (poob.login_server)
+#   — a virtual display + VNC bridge so the operator logs in ONCE through a
+#   screen instead of pasting cookie files. See docs/runbooks/facebook-remote-login.md.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     wget \
@@ -29,6 +32,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsodium23 \
     build-essential \
     libffi-dev \
+    xvfb \
+    x11vnc \
+    novnc \
+    websockify \
+    fluxbox \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Python deps from pyproject.toml ONLY. Writing deps to a requirements
