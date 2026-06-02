@@ -322,6 +322,15 @@ class AppConfig(BaseSettings):
     # #facebook-marketplace channel must be posted within this many minutes.
     # This is the "just listed AND clearly worth something" product rule.
     public_notification_max_age_minutes: int = 10
+    # Adaptive public freshness when the authenticated feed is DOWN. The strict
+    # 10-min "just-listed" bar above is only achievable from the authenticated
+    # "newest near you" feed; when that feed is unavailable (dead session) the
+    # only live source is the staler anonymous feed, so the strict bar yields
+    # ZERO notifications. When auth is down, relax to this window so INCREDIBLE
+    # deals still reach the channel (operator-chosen graceful degradation,
+    # 2026-06-02) instead of nothing. See
+    # docs/decisions/adaptive-public-freshness-when-auth-down.md.
+    public_notification_max_age_no_auth_minutes: int = 60
     # Watchlist DM cutoff: a watchlist match DMed to the interest owner must
     # be within this many minutes old. Slightly laxer than public because
     # missing a watchlist match hurts the user more than a stale public post.

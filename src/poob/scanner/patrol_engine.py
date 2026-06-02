@@ -2054,8 +2054,17 @@ class PatrolEngine:
         watchlist_min = DealScore(
             getattr(self._config, "deal_watchlist_min_score", "good")
         )
+        # Adaptive public freshness: keep the strict "just-listed" bar when the
+        # authenticated feed is available (it provides the <10min listings), but
+        # relax when auth is DOWN — then the only live source is the staler anon
+        # feed, and the strict bar yields zero notifications. Operator chose
+        # graceful degradation (2026-06-02) over going dark. See
+        # docs/decisions/adaptive-public-freshness-when-auth-down.md.
+        _auth_up = bool(getattr(self._browser, "is_authenticated", False))
         public_max_age_min = float(getattr(
             self._config, "public_notification_max_age_minutes", 10,
+        )) if _auth_up else float(getattr(
+            self._config, "public_notification_max_age_no_auth_minutes", 60,
         ))
         watchlist_max_age_min = float(getattr(
             self._config, "watchlist_notification_max_age_minutes", 30,

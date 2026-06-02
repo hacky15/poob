@@ -568,6 +568,63 @@ class TestEvaluation:
 # --- Notify ---
 
 
+class TestAdaptivePublicFreshness:
+    """When the authenticated feed is down (is_authenticated False), the public
+    freshness gate relaxes (default 60min) so anon INCREDIBLE deals still notify
+    instead of the channel going dark; the strict <10min bar stays when auth is
+    up. Operator-chosen graceful degradation (2026-06-02).
+    See docs/decisions/adaptive-public-freshness-when-auth-down.md."""
+
+    async def _notify_incredible_aged(self, engine, mock_browser_manager, *, auth_up, age_min):
+        from datetime import timedelta
+
+        from poob.scanner.patrol_engine import EvaluationResult, PatrolCycleResult
+
+        mock_browser_manager.is_authenticated = auth_up
+        posted = datetime.now(timezone.utc) - timedelta(minutes=age_min)
+        listing = _make_listing("111", posted_at=posted)
+        deal = Deal(
+            listing_id="listing-111",
+            score=DealScore.INCREDIBLE,
+            estimated_market_price=150.0,
+            discount_pct=66.0,
+        )
+        eval_result = EvaluationResult()
+        eval_result.base_deals = [deal]
+        result = PatrolCycleResult()
+        await engine._notify(eval_result, [listing], result)
+
+    @pytest.mark.asyncio
+    async def test_auth_down_relaxes_gate_notifies_older_incredible(
+        self, patrol_engine, mock_browser_manager, mock_notifier,
+    ):
+        # 30min old, auth DOWN -> relaxed 60min -> notified (was the dark-out fix).
+        await self._notify_incredible_aged(
+            patrol_engine, mock_browser_manager, auth_up=False, age_min=30,
+        )
+        mock_notifier.send_deal.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_auth_up_keeps_strict_gate_skips_older_incredible(
+        self, patrol_engine, mock_browser_manager, mock_notifier,
+    ):
+        # 30min old, auth UP -> strict 10min -> skipped (just-listed bar holds).
+        await self._notify_incredible_aged(
+            patrol_engine, mock_browser_manager, auth_up=True, age_min=30,
+        )
+        mock_notifier.send_deal.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_auth_down_still_rejects_truly_stale(
+        self, patrol_engine, mock_browser_manager, mock_notifier,
+    ):
+        # 90min old, auth DOWN -> still beyond the 60min relaxed window -> skipped.
+        await self._notify_incredible_aged(
+            patrol_engine, mock_browser_manager, auth_up=False, age_min=90,
+        )
+        mock_notifier.send_deal.assert_not_called()
+
+
 class TestNotify:
     @pytest.mark.asyncio
     async def test_public_channel_notifies_incredible_deals(
