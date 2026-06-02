@@ -122,20 +122,65 @@ async def test_tool_call_skips_casual_fallback() -> None:
 
 
 @pytest.mark.asyncio
-async def test_casual_fallback_empty_falls_through_to_deal_agent() -> None:
-    """Last-resort: if llama also returns empty, deal_agent still catches."""
+async def test_casual_empty_does_not_fall_to_deal_agent() -> None:
+    """Deals must NEVER be the fallback. A 429/empty-routing on a casual
+    message falls to ``_fallback_generate`` — the deal agent stays untouched.
+    Operator directive: deals/marketplace only when deliberately requested.
+    See docs/incidents/groq-429-fallback-routed-to-deals.md.
+    """
     deal_agent = AsyncMock()
     deal_agent.run = AsyncMock(return_value="deal-agent reply")
     brain = _make_brain(deal_agent=deal_agent)
 
     with patch.object(brain, "_groq_with_tools", new=AsyncMock(return_value=("", None, None))), \
-         patch.object(brain, "_casual_text_fallback", new=AsyncMock(return_value="")):
+         patch.object(brain, "_casual_text_fallback", new=AsyncMock(return_value="")), \
+         patch.object(brain, "_fallback_generate", new=AsyncMock(return_value="poob here augh")):
 
         out = await brain.respond("anything", user_id="u1", guild_id=10)
 
-    # Empty casual → next safety net (deal_agent) runs.
-    assert out == "deal-agent reply"
-    deal_agent.run.assert_called_once()
+    assert out == "poob here augh"
+    deal_agent.run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_groq_failure_casual_routes_casual_not_deal() -> None:
+    """Groq raising (e.g. 429) on a casual message routes through the casual
+    fallback, never the deal agent. See
+    docs/incidents/groq-429-fallback-routed-to-deals.md.
+    """
+    deal_agent = AsyncMock()
+    deal_agent.run = AsyncMock(return_value="DEAL")
+    brain = _make_brain(deal_agent=deal_agent)
+
+    with patch.object(brain, "_groq_with_tools", new=AsyncMock(side_effect=RuntimeError("429"))), \
+         patch.object(brain, "_casual_text_fallback", new=AsyncMock(return_value="yo whats good")):
+
+        out = await brain.respond("how are you", user_id="u1", guild_id=10)
+
+    assert out == "yo whats good"
+    deal_agent.run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_groq_failure_music_request_routes_music_not_deal() -> None:
+    """Groq raising (e.g. 429) on a clear "play X" routes to music via the
+    safety net — not the deal agent. The query is re-derived from the raw
+    message so degraded routing can't lose it.
+    See docs/incidents/groq-429-fallback-routed-to-deals.md.
+    """
+    deal_agent = AsyncMock()
+    deal_agent.run = AsyncMock(return_value="DEAL")
+    brain = _make_brain(deal_agent=deal_agent)
+    brain._music_handler = object()  # non-None so the safety net runs
+
+    with patch.object(brain, "_groq_with_tools", new=AsyncMock(side_effect=RuntimeError("429"))), \
+         patch.object(brain, "_handle_music", new=AsyncMock(return_value="now playing tiki tiki")) as handle_music:
+
+        out = await brain.respond("play tiki tiki", user_id="u1", guild_id=10)
+
+    assert out == "now playing tiki tiki"
+    handle_music.assert_called_once()
+    deal_agent.run.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -269,3 +314,58 @@ def test_system_prompt_lists_banned_refusal_phrases() -> None:
         "I'm a large language model",
     ):
         assert phrase in prompt, f"missing banned phrase from NEVER list: {phrase!r}"
+
+
+# ---------------------------------------------------------------------------
+# Hallucination guard: re-extract from the raw message, don't drop a clear
+# "play X". See docs/gotchas/tool-hallucination-from-passive-context.md.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_hallucinated_query_reextracted_from_raw_message() -> None:
+    """The LLM routes a play with a query lifted from stale context
+    ("panda desiigner") while the user actually said "play tiki tiki".
+    The guard must re-derive "tiki tiki" from the raw message and play THAT,
+    not drop with "I didn't catch a music request there."
+    """
+    brain = _make_brain()
+    captured: dict[str, Any] = {}
+
+    async def _capture_handler(message, uid, gid, *, voice, tool_args):  # type: ignore[no-untyped-def]
+        captured["tool_args"] = tool_args
+        return "Playing tiki tiki [3:00]"
+
+    brain.set_music_handler(_capture_handler)
+
+    out = await brain._handle_music(
+        "play tiki tiki", "123", voice=False, max_tok=200,
+        tool_args={"action": "play", "query": "panda desiigner"}, guild_id=10,
+    )
+
+    assert captured["tool_args"]["query"] == "tiki tiki"
+    assert "didn't catch" not in out.lower()
+    assert "tiki tiki" in out
+
+
+@pytest.mark.asyncio
+async def test_hallucinated_query_still_dropped_when_no_play_intent() -> None:
+    """The guard must STILL drop when the raw message carries no play-intent —
+    re-extraction is a backstop for clear "play X", not a way to play random
+    context. "how's the weather" + a hallucinated play query → no music.
+    """
+    brain = _make_brain()
+    called = {"hit": False}
+
+    async def _handler(message, uid, gid, *, voice, tool_args):  # type: ignore[no-untyped-def]
+        called["hit"] = True
+        return "Playing something"
+
+    brain.set_music_handler(_handler)
+
+    out = await brain._handle_music(
+        "how's the weather", "123", voice=False, max_tok=200,
+        tool_args={"action": "play", "query": "panda desiigner"}, guild_id=10,
+    )
+
+    assert called["hit"] is False
+    assert "didn't catch a music request" in out.lower()

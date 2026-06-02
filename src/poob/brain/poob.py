@@ -867,15 +867,30 @@ class PoobBrain:
             except Exception as exc:
                 log.warning("Groq failed for Poob", error=str(exc)[:100])
 
-        if self.deal_agent:
-            try:
-                log.info("poob.groq_down_deal_fallback", message=clean_message[:50])
-                return await self._handle_deal(
-                    clean_message, user_id, channel_id, messages,
-                    voice, max_tok, guild_id=guild_id,
-                )
-            except Exception as exc:
-                log.warning("Deal agent fallback failed", error=str(exc)[:100])
+        # Routing failed (e.g. Groq 429 during heavy use) or produced nothing
+        # usable. Do NOT fall to the deal agent here — that surfaced
+        # marketplace talk on music / volume / casual requests whenever Groq
+        # was rate-limited (the 429→deals bug). Deals run ONLY when the router
+        # explicitly picks deal_assistant. Catch obvious music intent from the
+        # RAW message so "play X" still works under degraded routing (and
+        # without the hallucinated-query problem); otherwise answer casually.
+        # See docs/incidents/groq-429-fallback-routed-to-deals.md.
+        if self._music_handler is not None:
+            mn_tool, mn_args = self._music_safety_net(clean_message, None, None)
+            if mn_tool == "music_assistant":
+                try:
+                    log.info("poob.groq_down_music_safety_net", message=clean_message[:50])
+                    return await self._handle_music(
+                        clean_message, user_id, voice, max_tok,
+                        tool_args=mn_args, guild_id=guild_id,
+                    )
+                except Exception as exc:
+                    log.warning("Music safety-net route failed", error=str(exc)[:100])
+
+        casual = await self._casual_text_fallback(messages, max_tok, guild_id=guild_id)
+        if casual:
+            self._save_response(guild_id, user_id, casual)
+            return casual
 
         response = await self._fallback_generate(messages, max_tok)
         self._save_response(guild_id, user_id, response)
@@ -1282,13 +1297,32 @@ class PoobBrain:
                     if t not in _STOPWORDS
                 }
                 if query_tokens and not (query_tokens & msg_tokens):
-                    log.warning(
-                        "music.play hallucinated from context — drop",
-                        current_message=original_message[:120],
-                        hallucinated_query=query[:80],
-                        user=user_id,
+                    # The LLM pulled a song from stale context, not this turn
+                    # (common under degraded/429 routing). Don't play the wrong
+                    # thing — but don't drop a clear "play X" either. Re-derive
+                    # the query straight from THIS message; if it carries
+                    # play-intent, use that faithful query instead of giving up.
+                    # See gotchas/tool-hallucination-from-passive-context and
+                    # incidents/groq-429-fallback-routed-to-deals.
+                    sn_tool, sn_args = self._music_safety_net(
+                        original_message, None, None,
                     )
-                    return "" if voice else "I didn't catch a music request there."
+                    sn_query = (sn_args or {}).get("query", "") if sn_tool == "music_assistant" else ""
+                    if len(sn_query) >= 2:
+                        log.info(
+                            "music.play re-extracted from raw after hallucination drop",
+                            raw=original_message[:80], requery=sn_query[:60], user=user_id,
+                        )
+                        query = sn_query
+                        tool_args = {**tool_args, "query": query}
+                    else:
+                        log.warning(
+                            "music.play hallucinated from context — drop",
+                            current_message=original_message[:120],
+                            hallucinated_query=query[:80],
+                            user=user_id,
+                        )
+                        return "" if voice else "I didn't catch a music request there."
 
             # Duplicate-play suppression — per (guild, user). The same
             # user with Poob in multiple servers can play the same song
@@ -1611,13 +1645,31 @@ class PoobBrain:
                     if t not in _STOPWORDS
                 }
                 if query_tokens and not (query_tokens & msg_tokens):
-                    log.warning(
-                        "music.play hallucinated from context — drop",
-                        current_message=original_message[:120],
-                        hallucinated_query=query[:80],
-                        user=user_id,
+                    # Stale-context hallucination: re-derive the query straight
+                    # from THIS message before giving up, so a clear "play X"
+                    # under degraded routing still plays the right thing rather
+                    # than silently dropping. See
+                    # gotchas/tool-hallucination-from-passive-context and
+                    # incidents/groq-429-fallback-routed-to-deals.
+                    sn_tool, sn_args = self._music_safety_net(
+                        original_message, None, None,
                     )
-                    return
+                    sn_query = (sn_args or {}).get("query", "") if sn_tool == "music_assistant" else ""
+                    if len(sn_query) >= 2:
+                        log.info(
+                            "music.play re-extracted from raw after hallucination drop",
+                            raw=original_message[:80], requery=sn_query[:60], user=user_id,
+                        )
+                        query = sn_query
+                        tool_args = {**tool_args, "query": query}
+                    else:
+                        log.warning(
+                            "music.play hallucinated from context — drop",
+                            current_message=original_message[:120],
+                            hallucinated_query=query[:80],
+                            user=user_id,
+                        )
+                        return
 
             if self._is_duplicate_play(guild_id, user_id, query):
                 log.warning(
