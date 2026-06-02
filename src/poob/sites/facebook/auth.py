@@ -20,7 +20,9 @@ docs/runbooks/facebook-cookie-import.md.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 from enum import Enum
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -32,6 +34,18 @@ from poob.utils.logging import get_logger
 log = get_logger("sites.facebook.auth")
 
 _FB_HOME = "https://www.facebook.com/"
+
+# FB home is an async-hydrated SPA. The logged-in chrome can take many seconds
+# to render — especially at boot, when the auth check races container startup
+# (model loads) on a CPU-only host. A single fixed-delay probe false-negatives a
+# valid session there, leaving the patrol anonymous until the next restart (see
+# docs/incidents/fb-auth-boot-render-race.md). So we POLL the auth signals until
+# a conclusive verdict instead of trusting one delayed snapshot. A login form is
+# a conclusive negative (we stop); "neither form nor chrome" means still
+# hydrating (we keep waiting). Tunable via env for slow/fast hosts.
+_AUTH_SETTLE_HOME_S = float(os.environ.get("POOB_FB_AUTH_SETTLE_HOME_S", "12"))
+_AUTH_SETTLE_POST_S = float(os.environ.get("POOB_FB_AUTH_SETTLE_POST_S", "25"))
+_AUTH_POLL_S = float(os.environ.get("POOB_FB_AUTH_POLL_S", "1.0"))
 
 
 class AuthStatus(str, Enum):
@@ -142,24 +156,51 @@ def load_cookie_file(path: str | Path) -> list[dict]:
         return []
 
 
-async def _detect_state(page: object, *, label: str = "") -> AuthStatus | None:
-    """Read the current page's auth signals (logs URL+flags, never creds)."""
-    try:
-        raw = await page.evaluate(_DETECT_STATE_JS)
-        signals = parse_evaluate_result(raw) or {}
-        log.info(
-            "FB auth signals",
-            phase=label,
-            url=str(signals.get("url", ""))[:120],
-            has_login_form=signals.get("hasLoginForm"),
-            checkpoint=signals.get("checkpoint"),
-            has_app_chrome=signals.get("hasAppChrome"),
-            logged_in=signals.get("loggedIn"),
-        )
-        return classify_auth_state(signals)
-    except Exception as exc:
-        log.debug("auth state detection failed", error=str(exc)[:100])
-        return None
+def _log_signals(label: str, signals: dict, *, settled_s: float, timed_out: bool = False) -> None:
+    log.info(
+        "FB auth signals",
+        phase=label,
+        settled_s=round(settled_s, 1),
+        timed_out=timed_out or None,
+        url=str(signals.get("url", ""))[:120],
+        has_login_form=signals.get("hasLoginForm"),
+        checkpoint=signals.get("checkpoint"),
+        has_app_chrome=signals.get("hasAppChrome"),
+        logged_in=signals.get("loggedIn"),
+    )
+
+
+async def _detect_state(
+    page: object, *, label: str = "", settle_timeout_s: float = _AUTH_SETTLE_POST_S
+) -> AuthStatus | None:
+    """Poll the page's auth signals until a conclusive verdict or timeout.
+
+    Short-circuits the instant the page is conclusive: LOGGED_IN / CHECKPOINT
+    (positive) or a visible login form (negative). "Neither form nor chrome"
+    means the logged-in SPA is still hydrating, so we keep polling rather than
+    declaring failure on a fixed delay — that fixed-delay snapshot was the
+    boot-render race that left valid sessions unauthenticated. Logs URL+flags,
+    never credentials.
+    """
+    iterations = max(1, int(settle_timeout_s / _AUTH_POLL_S))
+    signals: dict = {}
+    for i in range(iterations):
+        try:
+            signals = parse_evaluate_result(await page.evaluate(_DETECT_STATE_JS)) or {}
+        except Exception as exc:
+            log.debug("auth state detection failed", error=str(exc)[:100])
+            await asyncio.sleep(_AUTH_POLL_S)
+            continue
+        state = classify_auth_state(signals)
+        if state is not None:  # LOGGED_IN or CHECKPOINT — conclusive positive
+            _log_signals(label, signals, settled_s=i * _AUTH_POLL_S)
+            return state
+        if signals.get("hasLoginForm"):  # conclusive negative — chrome isn't coming
+            _log_signals(label, signals, settled_s=i * _AUTH_POLL_S)
+            return None
+        await asyncio.sleep(_AUTH_POLL_S)  # inconclusive — still hydrating, re-poll
+    _log_signals(label, signals, settled_s=settle_timeout_s, timed_out=True)
+    return classify_auth_state(signals)
 
 
 async def ensure_logged_in(
@@ -187,8 +228,8 @@ async def ensure_logged_in(
     Returns:
         The resulting AuthStatus.
     """
-    await navigate_and_wait(page, _FB_HOME, wait_ms=2500)
-    state = await _detect_state(page, label="home")
+    await navigate_and_wait(page, _FB_HOME, wait_ms=800)
+    state = await _detect_state(page, label="home", settle_timeout_s=_AUTH_SETTLE_HOME_S)
     if state is AuthStatus.LOGGED_IN:
         log.info("FB session valid — reusing persisted/imported cookies")
         return AuthStatus.LOGGED_IN
@@ -213,8 +254,8 @@ async def ensure_logged_in(
         log.warning("FB cookie import failed", error=str(exc)[:120])
         return AuthStatus.NO_SESSION
 
-    await navigate_and_wait(page, _FB_HOME, wait_ms=2500)
-    state = await _detect_state(page, label="post_cookies")
+    await navigate_and_wait(page, _FB_HOME, wait_ms=800)
+    state = await _detect_state(page, label="post_cookies", settle_timeout_s=_AUTH_SETTLE_POST_S)
     if state is AuthStatus.LOGGED_IN:
         log.info("FB session established from imported cookies")
         return AuthStatus.LOGGED_IN

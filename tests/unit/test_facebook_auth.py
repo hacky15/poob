@@ -13,8 +13,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from poob.sites.facebook import auth as fb_auth
 from poob.sites.facebook.auth import (
     AuthStatus,
+    _detect_state,
     classify_auth_state,
     ensure_logged_in,
     load_cookie_file,
@@ -211,3 +213,65 @@ class TestEnsureLoggedIn:
             page, cookies_path=_cookie_file(tmp_path), load_cookies=None,
         )
         assert status is AuthStatus.NO_SESSION
+
+    @pytest.mark.asyncio
+    async def test_import_succeeds_after_slow_hydration(self, tmp_path, monkeypatch):
+        # home shows a login form (fast negative) -> import -> the post-cookie
+        # page hydrates slowly: two inconclusive frames (no form, no chrome)
+        # then the logged-in chrome. The boot-render race regressed exactly
+        # this: the old fixed-delay probe declared FAILED on the blank frame.
+        monkeypatch.setattr(fb_auth.asyncio, "sleep", AsyncMock())
+        page = _make_page([
+            {"hasLoginForm": True},                                   # home
+            {"hasLoginForm": False, "hasAppChrome": False, "loggedIn": False},  # post t0
+            {"hasLoginForm": False, "hasAppChrome": False, "loggedIn": False},  # post t1
+            {"loggedIn": True, "hasAppChrome": True},                 # post t2
+        ])
+        status = await ensure_logged_in(
+            page, cookies_path=_cookie_file(tmp_path),
+            load_cookies=AsyncMock(return_value=6),
+        )
+        assert status is AuthStatus.LOGGED_IN
+
+
+# --- _detect_state polling (the boot-render-race fix) ---
+
+
+class TestDetectStatePolling:
+    @pytest.mark.asyncio
+    async def test_polls_through_hydration_until_chrome(self, monkeypatch):
+        monkeypatch.setattr(fb_auth.asyncio, "sleep", AsyncMock())
+        page = _make_page([
+            {"hasLoginForm": False, "hasAppChrome": False, "loggedIn": False},
+            {"hasLoginForm": False, "hasAppChrome": False, "loggedIn": False},
+            {"loggedIn": True, "hasAppChrome": True},
+        ])
+        state = await _detect_state(page, label="post_cookies", settle_timeout_s=10)
+        assert state is AuthStatus.LOGGED_IN
+        assert page.evaluate.await_count == 3  # waited out hydration, didn't false-negative
+
+    @pytest.mark.asyncio
+    async def test_login_form_short_circuits_negative(self, monkeypatch):
+        sleep = AsyncMock()
+        monkeypatch.setattr(fb_auth.asyncio, "sleep", sleep)
+        page = _make_page([{"hasLoginForm": True}])
+        state = await _detect_state(page, label="home", settle_timeout_s=30)
+        assert state is None
+        assert page.evaluate.await_count == 1  # a visible login form ends the poll at once
+        sleep.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_short_circuits(self, monkeypatch):
+        monkeypatch.setattr(fb_auth.asyncio, "sleep", AsyncMock())
+        page = _make_page([{"checkpoint": True}])
+        state = await _detect_state(page, label="home", settle_timeout_s=30)
+        assert state is AuthStatus.CHECKPOINT
+        assert page.evaluate.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_inconclusive_times_out_to_none(self, monkeypatch):
+        monkeypatch.setattr(fb_auth.asyncio, "sleep", AsyncMock())
+        page = _make_page([{"hasLoginForm": False, "hasAppChrome": False, "loggedIn": False}])
+        state = await _detect_state(page, label="post_cookies", settle_timeout_s=3)
+        assert state is None  # never conclusive -> times out negative
+        assert page.evaluate.await_count == 3  # 3s / 1s poll
