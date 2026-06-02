@@ -317,6 +317,65 @@ def test_system_prompt_lists_banned_refusal_phrases() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Music-routing prompt: thoughtful classification, no hardcoded play==music.
+# See docs/decisions/music-routing-prompt-thoughtfulness.md.
+# ---------------------------------------------------------------------------
+
+def test_music_prompt_has_negative_examples() -> None:
+    """The tool block must teach the model that 'play' isn't always music —
+    negative examples prevent false positives like playing 'a game'.
+    Only present on the with_tools variant (the routing call)."""
+    from poob.brain.poob import _build_system_prompt
+    p = _build_system_prompt(level=5, voice=False, with_tools=True).lower()
+    assert "play a game" in p, "missing 'play a game' negative example"
+    assert "good play" in p or "nice play" in p, "missing praise negative example"
+    assert "isn't always" in p, "missing the 'play isn't always music' caveat"
+
+
+def test_music_prompt_current_turn_only() -> None:
+    """The tool block must instruct current-turn-only song extraction — the
+    anti-hallucination guidance at the source. See
+    docs/incidents/music-tool-hallucination.md."""
+    from poob.brain.poob import _build_system_prompt
+    p = _build_system_prompt(level=5, voice=False, with_tools=True).lower()
+    assert "this message only" in p, "missing current-turn-only extraction rule"
+    assert "earlier turns" in p or "earlier in the conversation" in p, (
+        "missing 'never from earlier turns' rule"
+    )
+
+
+def test_music_prompt_nonsense_name_is_the_song() -> None:
+    """A nonsense-sounding name after 'play' must still be treated as the song
+    (the false-negative the operator hit: 'play tiki tiki' / 'cheeky cheeky')."""
+    from poob.brain.poob import _build_system_prompt
+    p = _build_system_prompt(level=5, voice=False, with_tools=True).lower()
+    assert "nonsense" in p, "missing the nonsense-name-is-the-song guidance"
+    assert "cheeky cheeky" in p or "tiki tiki" in p, "missing the nonsense example"
+
+
+def test_music_tool_query_description_is_current_turn_only() -> None:
+    """MUSIC_TOOL.query must say extract from the CURRENT message and never
+    from earlier context — the tool-def half of the anti-hallucination fix."""
+    from poob.brain.poob import MUSIC_TOOL
+    desc = MUSIC_TOOL["function"]["parameters"]["properties"]["query"]["description"].lower()
+    assert "current message" in desc, "query desc missing 'current message'"
+    assert "never" in desc and "earlier" in desc, (
+        "query desc missing 'never a title from earlier' rule"
+    )
+
+
+def test_music_prompt_drops_anything_music_adjacent_overreach() -> None:
+    """The old 'if the user says ANYTHING that could be a request ... you MUST'
+    wording compounded hallucination (docs/incidents/music-tool-hallucination.md)
+    and was replaced with scoped guidance. Guard against its return."""
+    from poob.brain.poob import _build_system_prompt
+    p = _build_system_prompt(level=5, voice=False, with_tools=True).lower()
+    assert "anything that could be" not in p, (
+        "the over-aggressive 'ANYTHING that could be' wording regressed"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Hallucination guard: re-extract from the raw message, don't drop a clear
 # "play X". See docs/gotchas/tool-hallucination-from-passive-context.md.
 # ---------------------------------------------------------------------------

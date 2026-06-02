@@ -28,6 +28,8 @@ This is provider-cascade stability, not intent routing. It does NOT bypass the L
 
 The `tool_signals` list is English-only and hardcoded — novel phrasings ("hey check on my wishes") won't trigger cascade retry. In practice the first Groq model usually routes correctly; this is a safety net for weeks when Groq 70B is degraded. Acceptable to leave; expand only if tool-miss telemetry shows a miss rate worth the cost.
 
+**Update 2026-06-02 — telemetry arrived, but we did NOT expand `tool_signals`.** A 24h audit showed a ~24% LLM mishandle rate on *music* requests (8 missed, 3 hallucinated) while the primary router was down on its daily token cap ([[groq-daily-token-cap-degrades-routing]]). That meets the "worth the cost" bar — but adding music keywords here is the hardcoded-`play==music` path the operator explicitly rejected, and unconditional cascade-retry would push casual chat into Scout's over-routing. We fixed routing at the **prompt/tool-description** layer instead ([[music-routing-prompt-thoughtfulness]]), which improves every cascade model with no keyword list. `tool_signals` stays deal-only and unchanged.
+
 ## Consequences
 
 - Casual chat is unaffected: single Groq call, no cascade.

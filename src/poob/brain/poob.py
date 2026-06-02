@@ -170,17 +170,27 @@ def _build_system_prompt(
     if with_tools:
         prompt += (
             "\n\nYou have a deal_assistant tool for shopping stuff. Only use when explicitly asked.\n"
-            "You have a music_assistant tool for playing music. "
-            "CRITICAL: If the user says ANYTHING that could be a request to play, queue, "
-            "skip, pause, stop, or control music, you MUST call music_assistant. "
-            "Do NOT talk about music instead of playing it. Do NOT comment on the request. "
-            "Do NOT ask clarifying questions. Just call the tool.\n"
-            "Examples that MUST trigger music_assistant:\n"
+            "You have a music_assistant tool for playing music. When the CURRENT "
+            "message asks to play, queue, skip, pause, stop, or control music, "
+            "call music_assistant — don't talk about the request, don't comment, "
+            "don't ask clarifying questions, just call it.\n"
+            "Whatever follows play / put on / queue IS the song — even if it "
+            "sounds like nonsense or a made-up name. Take those words from THIS "
+            "message only; never pull a song title from earlier turns or from "
+            "what other people said.\n"
+            "Real song requests (call the tool):\n"
             "- 'play some jazz' → action=play, query='jazz'\n"
             "- 'play something chill' → action=play, query='chill music'\n"
-            "- 'play whimsical music' → action=play, query='whimsical music'\n"
             "- 'put on some beats' → action=play, query='beats'\n"
-            "When in doubt, call the tool. Never respond with text about a music request."
+            "- 'play cheeky cheeky' → action=play, query='cheeky cheeky'\n"
+            "- 'play tiki tiki' → action=play, query='tiki tiki'\n"
+            "NOT music — do NOT call the tool ('play' isn't always about music):\n"
+            "- 'let's play a game' / 'wanna play Among Us' (playing a game)\n"
+            "- 'good play' / 'nice play' (praising what someone did)\n"
+            "- 'play it cool' / 'stop playing with me' (figures of speech)\n"
+            "'play' means music ONLY when they're asking to hear a song, artist, "
+            "or genre. When it genuinely is a song request, call the tool — "
+            "never respond with text about a real music request."
         )
 
     if voice:
@@ -289,8 +299,11 @@ MUSIC_TOOL = {
                     "type": "string",
                     "description": (
                         "The song name, artist, or search query. Only required "
-                        "for 'play' action. Extract JUST the song/artist name, "
-                        "not the full user message."
+                        "for 'play' action. Extract JUST the song/artist name "
+                        "from the user's CURRENT message — not the full message, "
+                        "and NEVER a song title from earlier in the conversation "
+                        "or from what other people said. If the current message "
+                        "names no song, do not borrow one from context."
                     ),
                 },
                 "tracks": {
