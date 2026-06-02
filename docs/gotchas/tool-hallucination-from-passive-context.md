@@ -35,6 +35,8 @@ Post-validate tool-call arguments against the current user transcript before dis
 
 The re-extract step (added 2026-06-01, see [[groq-429-fallback-routed-to-deals]]) matters because degraded routing (Groq 429) makes the model emit stale/hallucinated queries even for a crystal-clear "play tiki tiki" — the old drop-only guard turned those into "I didn't catch a music request there." The guard's job is to reject the LLM's *wrong query*, not to refuse the user's plainly-stated request. Both guards (`_handle_music` text + `_handle_music_voice_streaming`) do this.
 
+**Any re-derived query must go through `_scrub_music_query` too.** The safety net (`_music_safety_net`) strips only the *first* leading verb, so a doubled/nested form ("play play tiki") re-extracts to "play tiki" — still verb-polluted. ytdl must never receive "play X" (it returns "Play X (Official)" misses), so the single scrub-at-the-boundary contract applies to the re-derived query exactly as it does to the LLM's original. Scrub before the length gate so a degenerate "play play" collapses to no-intent and drops cleanly.
+
 Keep the stopword list short. A long list risks masking legitimate short queries ("play Run" by OneRepublic).
 
 This pattern applies to any tool whose arguments come from the user's intent, not from code. Voice addressee, watchlist item names, deal queries — any tool that could legitimately pull from context can also illegitimately pull from context.

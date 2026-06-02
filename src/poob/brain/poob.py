@@ -1307,7 +1307,14 @@ class PoobBrain:
                     sn_tool, sn_args = self._music_safety_net(
                         original_message, None, None,
                     )
-                    sn_query = (sn_args or {}).get("query", "") if sn_tool == "music_assistant" else ""
+                    # Scrub the re-derived query through the same boundary
+                    # sanitizer as the happy path — the safety net strips only
+                    # ONE leading verb, so doubled/nested forms ("play play
+                    # tiki" → "play tiki") would otherwise reach ytdl un-scrubbed.
+                    # Keep the single documented scrub-at-the-boundary contract.
+                    sn_query = self._scrub_music_query(
+                        (sn_args or {}).get("query", "") if sn_tool == "music_assistant" else ""
+                    )
                     if len(sn_query) >= 2:
                         log.info(
                             "music.play re-extracted from raw after hallucination drop",
@@ -1654,7 +1661,14 @@ class PoobBrain:
                     sn_tool, sn_args = self._music_safety_net(
                         original_message, None, None,
                     )
-                    sn_query = (sn_args or {}).get("query", "") if sn_tool == "music_assistant" else ""
+                    # Scrub the re-derived query through the same boundary
+                    # sanitizer as the happy path — the safety net strips only
+                    # ONE leading verb, so doubled/nested forms ("play play
+                    # tiki" → "play tiki") would otherwise reach ytdl un-scrubbed.
+                    # Keep the single documented scrub-at-the-boundary contract.
+                    sn_query = self._scrub_music_query(
+                        (sn_args or {}).get("query", "") if sn_tool == "music_assistant" else ""
+                    )
                     if len(sn_query) >= 2:
                         log.info(
                             "music.play re-extracted from raw after hallucination drop",

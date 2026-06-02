@@ -44,7 +44,9 @@ Both fixes live at the brain layer, source-side, no text-regex band-aids — the
   - `test_groq_failure_music_request_routes_music_not_deal` — Groq raises on "play tiki tiki" → music via safety net, no deal agent.
   - `test_hallucinated_query_reextracted_from_raw_message` — hallucinated `{query: "panda desiigner"}` + raw "play tiki tiki" → handler receives `query="tiki tiki"`, no "didn't catch".
   - `test_hallucinated_query_still_dropped_when_no_play_intent` — hallucinated query + "how's the weather" → still drops, handler not called.
-- Full brain + boob + music-handler suites green (77).
+  - `test_reextracted_query_is_scrubbed_of_nested_verbs` — doubled-verb "play play tiki" re-extracts then scrubs to "tiki" (see below).
+- **Adversarial-review follow-up:** a multi-lens review of the commit flagged that the re-derived query bypassed `_scrub_music_query` — the safety net strips only the first leading verb, so "play play tiki" → "play tiki" would reach ytdl un-scrubbed ("Play X (Official)" miss). Fixed: both re-extract sites now wrap the re-derived query in `_scrub_music_query` before the length gate, preserving the single scrub-at-the-boundary contract. The other two raised findings (deal-session-follow-up regression, directive over-correction) were rejected on verification as non-issues.
+- Full brain + boob + music-handler suites green (77+).
 - Watch in prod: under 429 clusters, `poob.groq_down_music_safety_net` and `music.play re-extracted…` should appear; `poob.groq_down_deal_fallback` is gone; no marketplace talk on music/volume/casual turns.
 
 ## Follow-ups

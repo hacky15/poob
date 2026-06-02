@@ -348,6 +348,31 @@ async def test_hallucinated_query_reextracted_from_raw_message() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reextracted_query_is_scrubbed_of_nested_verbs() -> None:
+    """The safety net strips only ONE leading verb, so a doubled/nested form
+    ("play play tiki") re-extracts to "play tiki". That must be scrubbed
+    through _scrub_music_query before reaching the handler — ytdl must never
+    get "play X". See docs/gotchas/tool-hallucination-from-passive-context.md.
+    """
+    brain = _make_brain()
+    captured: dict[str, Any] = {}
+
+    async def _capture_handler(message, uid, gid, *, voice, tool_args):  # type: ignore[no-untyped-def]
+        captured["tool_args"] = tool_args
+        return "Playing tiki [3:00]"
+
+    brain.set_music_handler(_capture_handler)
+
+    out = await brain._handle_music(
+        "play play tiki", "123", voice=False, max_tok=200,
+        tool_args={"action": "play", "query": "panda desiigner"}, guild_id=10,
+    )
+
+    assert captured["tool_args"]["query"] == "tiki"
+    assert "didn't catch" not in out.lower()
+
+
+@pytest.mark.asyncio
 async def test_hallucinated_query_still_dropped_when_no_play_intent() -> None:
     """The guard must STILL drop when the raw message carries no play-intent —
     re-extraction is a backstop for clear "play X", not a way to play random
