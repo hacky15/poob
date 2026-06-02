@@ -731,7 +731,16 @@ class GuildMusicPlayer:
             return True
 
     async def stop(self) -> None:
-        """Stop playback and clear the queue."""
+        """Stop playback and clear the queue.
+
+        Disables autoplay too: without this, "stop" clears the queue and
+        halts the current track, but the player loop wakes, finds the queue
+        empty, and (autoplay still on) immediately injects a fresh track —
+        so "stop" never actually stops. Disabling here is the right layer:
+        it covers every stop path (text "stop", the now-playing button,
+        and "leave"). See docs/incidents/stop-does-not-disable-autoplay.md.
+        """
+        self.autoplay_enabled = False
         # Clean up temp files for current and queued tracks
         if self.queue.current:
             AsyncYTDL.cleanup_track_file(self.queue.current)

@@ -183,3 +183,22 @@ def test_autoplay_can_be_toggled_on_and_off() -> None:
     assert player.autoplay_enabled is True
     player.autoplay_enabled = False
     assert player.autoplay_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_stop_disables_autoplay() -> None:
+    """``stop`` must turn autoplay OFF. Otherwise stop clears the queue and
+    halts the track, but the player loop wakes, sees an empty queue, and
+    (autoplay still on) injects a fresh track — so "stop" never actually
+    stops and reports a transient "no music" during the refill race.
+    See docs/incidents/stop-does-not-disable-autoplay.md.
+    """
+    from poob.music.player import GuildMusicPlayer
+
+    vc = MagicMock()
+    vc.is_playing.return_value = False
+    ytdl = MagicMock()
+    player = GuildMusicPlayer(voice_client=vc, ytdl=ytdl)
+    player.autoplay_enabled = True
+    await player.stop()
+    assert player.autoplay_enabled is False
