@@ -15,7 +15,7 @@ and consumes a mock AutoplayEngine.
 from __future__ import annotations
 
 from datetime import timedelta
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -202,3 +202,61 @@ async def test_stop_disables_autoplay() -> None:
     player.autoplay_enabled = True
     await player.stop()
     assert player.autoplay_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# _await_voice_client_free — don't barge in on a standalone TTS clip and
+# crash the loop with "Already playing audio".
+# See docs/incidents/already-playing-audio-crash.md.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_await_client_free_returns_immediately_when_idle() -> None:
+    """Idle voice client → no wait, no stop()."""
+    from poob.music.player import GuildMusicPlayer
+
+    vc = MagicMock()
+    vc.is_playing.return_value = False
+    player = GuildMusicPlayer(voice_client=vc, ytdl=MagicMock())
+
+    with patch("poob.music.player.asyncio.sleep", new=AsyncMock()) as slept:
+        await player._await_voice_client_free()
+
+    slept.assert_not_awaited()
+    vc.stop.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_await_client_free_waits_then_proceeds() -> None:
+    """A standalone clip that finishes mid-wait → poll until clear, then
+    return without stopping it (it ended on its own)."""
+    from poob.music.player import GuildMusicPlayer
+
+    vc = MagicMock()
+    # Busy for two polls, then free.
+    vc.is_playing.side_effect = [True, True, False]
+    player = GuildMusicPlayer(voice_client=vc, ytdl=MagicMock())
+
+    with patch("poob.music.player.asyncio.sleep", new=AsyncMock()) as slept:
+        await player._await_voice_client_free()
+
+    assert slept.await_count == 2
+    vc.stop.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_await_client_free_stops_stuck_clip_on_timeout() -> None:
+    """A clip that never ends must not block music forever — on timeout the
+    lingering source is stopped so the explicit play request still starts."""
+    from poob.music.player import GuildMusicPlayer
+
+    vc = MagicMock()
+    vc.is_playing.return_value = True  # never frees
+    player = GuildMusicPlayer(voice_client=vc, ytdl=MagicMock())
+
+    with patch("poob.music.player.CLIENT_FREE_TIMEOUT_S", 0.0), \
+         patch("poob.music.player.asyncio.sleep", new=AsyncMock()):
+        await player._await_voice_client_free()
+
+    vc.stop.assert_called_once()

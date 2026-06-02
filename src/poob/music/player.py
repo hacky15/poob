@@ -61,6 +61,14 @@ NORMAL_VOLUME = 1.0
 RAMP_FRAMES = 15          # Frames to ramp volume (15 * 20ms = 300ms)
 GRACE_FRAMES = 8          # Empty overlay reads before cleanup (160ms grace)
 
+# Before the player loop calls vc.play(mixer), the shared voice client may
+# be busy with a standalone TTS clip (e.g. the "Playing X" confirmation
+# spoken in VC). vc.play() raises "Already playing audio" if we barge in,
+# crashing the loop. Wait for the clip to finish — bounded so a stuck clip
+# can't hang music forever. See docs/incidents/already-playing-audio-crash.
+CLIENT_FREE_TIMEOUT_S = 8.0   # max wait for a standalone clip to clear
+CLIENT_FREE_POLL_S = 0.05     # poll interval while waiting
+
 # Pre-allocated silence buffer (avoids per-frame allocation)
 SILENCE = b"\x00" * FRAME_SIZE
 
@@ -417,6 +425,32 @@ class GuildMusicPlayer:
     @property
     def current_track(self) -> Track | None:
         return self.queue.current
+
+    async def _await_voice_client_free(self) -> None:
+        """Wait for the shared voice client to stop playing a standalone clip
+        before the loop calls ``vc.play(mixer)``.
+
+        The voice session plays one-off TTS (a "Playing X" confirmation, a
+        spoken chat reply) directly on the same voice client. Starting music
+        while one is active raises Pycord's ``ClientException: Already playing
+        audio`` and crashes the player loop, so the requested song never plays.
+        The session itself waits the same way before its TTS.
+
+        Bounded by ``CLIENT_FREE_TIMEOUT_S`` so a stuck clip can't block music
+        forever — on timeout, stop the lingering source (the explicit play
+        request takes precedence) and return. See
+        docs/incidents/already-playing-audio-crash.
+        """
+        import time as _t
+        deadline = _t.monotonic() + CLIENT_FREE_TIMEOUT_S
+        while self.voice_client.is_playing() and not self._destroyed:
+            if _t.monotonic() >= deadline:
+                try:
+                    self.voice_client.stop()
+                except Exception:
+                    pass
+                return
+            await asyncio.sleep(CLIENT_FREE_POLL_S)
 
     # ------------------------------------------------------------------
     # Autoplay
@@ -932,6 +966,11 @@ class GuildMusicPlayer:
                             log.warning("Playback error", error=str(error)[:100])
                         self._loop.call_soon_threadsafe(self._next_event.set)
 
+                    # The voice session may be speaking a standalone TTS clip
+                    # on this same voice client. Wait for it to clear, else
+                    # vc.play() raises "Already playing audio" and crashes the
+                    # loop. See docs/incidents/already-playing-audio-crash.
+                    await self._await_voice_client_free()
                     self._next_event.clear()
                     self.voice_client.play(self._mixer, after=_after_play)
                     import time as _t
