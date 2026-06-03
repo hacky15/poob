@@ -9,7 +9,7 @@ deduped. See docs/plans/voice-pipeline-reliability.md (Issue 4).
 from __future__ import annotations
 
 import time
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -162,3 +162,58 @@ async def test_send_audio_connected_failure_buffers_current() -> None:
     await mgr.send_audio(1, b"frame")
     assert stream.connected is False
     assert list(mgr._pending_audio[1]) == [b"frame"]  # not lost
+
+
+# ---------------------------------------------------------------------------
+# Zombie-stream recovery: a Deepgram socket reporting connected=True but
+# delivering no transcripts must be force-reconnected after N consecutive
+# wake-fired-but-no-transcript misses (passive reconnect only fires on
+# connected=False, so it never self-heals). See
+# docs/incidents/deepgram-zombie-stream-no-transcript.md.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_report_lost_transcript_recovers_at_threshold() -> None:
+    mgr = DeepgramStreamManager("key")
+    mgr.force_reconnect = AsyncMock()
+    assert mgr._ZOMBIE_LOST_THRESHOLD == 2
+    first = await mgr.report_lost_transcript(42)
+    assert first is False
+    mgr.force_reconnect.assert_not_awaited()
+    second = await mgr.report_lost_transcript(42)
+    assert second is True
+    mgr.force_reconnect.assert_awaited_once_with(42)
+
+
+@pytest.mark.asyncio
+async def test_transcript_delivered_resets_miss_counter() -> None:
+    mgr = DeepgramStreamManager("key")
+    mgr.force_reconnect = AsyncMock()
+    await mgr.report_lost_transcript(42)          # miss 1
+    mgr.note_transcript_delivered(42)             # stream proved alive → reset
+    recovered = await mgr.report_lost_transcript(42)  # miss 1 again, not 2
+    assert recovered is False
+    mgr.force_reconnect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_misses_are_per_user_isolated() -> None:
+    mgr = DeepgramStreamManager("key")
+    mgr.force_reconnect = AsyncMock()
+    await mgr.report_lost_transcript(1)
+    recovered = await mgr.report_lost_transcript(2)  # different user, count starts at 1
+    assert recovered is False
+    mgr.force_reconnect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_force_reconnect_closes_clears_throttle_and_counter() -> None:
+    mgr = DeepgramStreamManager("key")
+    mgr.close_user = AsyncMock()
+    mgr._last_connect_time[42] = 123.0
+    mgr._consecutive_lost[42] = 5
+    await mgr.force_reconnect(42)
+    mgr.close_user.assert_awaited_once_with(42)   # zombie stream torn down
+    assert 42 not in mgr._last_connect_time        # throttle cleared → next frame reconnects now
+    assert mgr._consecutive_lost[42] == 0          # counter reset

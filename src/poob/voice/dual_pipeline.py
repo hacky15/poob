@@ -233,6 +233,15 @@ class DeepgramStreamManager:
     # docs/plans/voice-pipeline-reliability.md (Issue 3).
     _PENDING_MAX_FRAMES: int = 150
 
+    # Zombie-stream recovery: a Deepgram socket can report connected=True yet
+    # silently deliver no transcripts (half-open socket / Deepgram-side stall).
+    # The passive reconnect only fires on connected=False, so a zombie never
+    # self-heals — the user goes deaf to Poob until they rejoin or the bot
+    # restarts. After this many consecutive wake-fired-but-no-transcript misses
+    # for a user, force-rebuild their stream. See
+    # docs/incidents/deepgram-zombie-stream-no-transcript.md.
+    _ZOMBIE_LOST_THRESHOLD: int = 2
+
     def __init__(self, api_key: str, model: str = "nova-3") -> None:
         self._api_key = api_key
         self._model = model
@@ -242,6 +251,9 @@ class DeepgramStreamManager:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._keepalive_task: asyncio.Task | None = None
         self._pending_audio: dict[int, collections.deque[bytes]] = {}
+        # Per-user consecutive "wake fired but no transcript" misses; reset to
+        # 0 the instant any transcript arrives. Drives zombie-stream recovery.
+        self._consecutive_lost: dict[int, int] = {}
 
     def _buffer_pending(self, user_id: int, frame: bytes) -> None:
         """Queue an audio frame that couldn't be sent (stream down /
@@ -370,6 +382,9 @@ class DeepgramStreamManager:
                     speech_final = data.get("speech_final", False)
 
                     if transcript:
+                        # Any transcript = the stream is alive; clear the
+                        # zombie-miss counter for this user.
+                        self._consecutive_lost[user_id] = 0
                         if is_final:
                             # Append final segment to accumulated transcript
                             if stream.transcript:
@@ -475,6 +490,39 @@ class DeepgramStreamManager:
             stream.transcript = ""
             stream.latest_interim = ""
             stream.is_final = False
+
+    def note_transcript_delivered(self, user_id: int) -> None:
+        """Mark that a transcript was delivered — the stream is healthy, so
+        clear the zombie-miss counter."""
+        self._consecutive_lost[user_id] = 0
+
+    async def report_lost_transcript(self, user_id: int) -> bool:
+        """Record a wake-fired-but-no-transcript miss for a user.
+
+        After ``_ZOMBIE_LOST_THRESHOLD`` consecutive misses the stream is
+        treated as a zombie (socket reports connected but delivers nothing) and
+        force-reconnected. Returns True if a recovery was triggered.
+        """
+        n = self._consecutive_lost.get(user_id, 0) + 1
+        self._consecutive_lost[user_id] = n
+        if n >= self._ZOMBIE_LOST_THRESHOLD:
+            await self.force_reconnect(user_id)
+            return True
+        return False
+
+    async def force_reconnect(self, user_id: int) -> None:
+        """Tear down a user's stream so the next audio frame rebuilds it fresh.
+
+        Zombie recovery: when the socket reports ``connected`` but delivers no
+        transcripts, the passive (``connected is False``) reconnect never
+        fires. This closes the stream and clears the reconnect throttle so the
+        next inbound audio frame reconnects immediately (the pending-audio
+        buffer preserves the recent frames). A deliberate heal — not throttled.
+        """
+        log.warning("Deepgram stream force-reconnect (zombie recovery)", user=user_id)
+        await self.close_user(user_id)
+        self._last_connect_time.pop(user_id, None)
+        self._consecutive_lost[user_id] = 0
 
     async def keepalive(self, user_id: int) -> None:
         """Send a keepalive to prevent Deepgram from closing the WebSocket.
@@ -910,12 +958,17 @@ class DualPipelineProcessor:
             await asyncio.sleep(0.1)
             transcript, _is_final = self._deepgram.get_transcript(user_id)
             if transcript:
+                self._deepgram.note_transcript_delivered(user_id)
                 self._do_emit(user_id, user_name, speech_start_time, True, transcript)
                 return
-        # Still nothing — log it so we know
+        # Still nothing — the stream may be a zombie (connected but mute).
+        # Track the miss; force-reconnect after enough consecutive ones so the
+        # user isn't silently deaf to Poob for the rest of the session.
+        recovered = await self._deepgram.report_lost_transcript(user_id)
         log.warning(
             "Wake word fired but Deepgram never delivered transcript",
             user=user_name or user_id,
+            zombie_recovery=recovered,
         )
 
     def _do_emit(
