@@ -18,6 +18,7 @@ mirroring how voice sessions maintain a rolling transcript.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import TYPE_CHECKING
 
@@ -161,21 +162,21 @@ class AgentMessageHandler(commands.Cog):
             except Exception:
                 log.exception("agent.voice_speak_error", user=user_id)
 
-        # Post the now-playing card when a new track just started as a
-        # side effect of this message (play/queue routed through the
-        # brain's music_assistant tool).
+        # Post the now-playing card when a new track starts as a side effect
+        # of this message. The track usually has to DOWNLOAD before it becomes
+        # `current`, so checking synchronously here loses the race: a fresh
+        # play showed no card (download unfinished) while a skip to a
+        # pre-fetched track did (instant). Wait — bounded + non-blocking — for
+        # the current track to actually change, then post. A queue-only request
+        # never changes `current`, so it just times out (no card, by design).
+        # See docs/incidents/now-playing-card-download-race.md.
         if music_cog is not None and message.guild is not None:
-            track_after = _current_track(music_cog, message.guild.id)
-            if track_after is not None and track_after is not track_before:
-                try:
-                    payload = music_cog.build_now_playing_message(message.guild.id)
-                    if payload is not None:
-                        embed, view = payload
-                        await message.channel.send(embed=embed, view=view)
-                        log.info("agent.now_playing_posted",
-                                 track=track_after.title[:60])
-                except Exception:
-                    log.exception("agent.now_playing_error", user=user_id)
+            asyncio.create_task(
+                _post_now_playing_when_ready(
+                    music_cog, message.channel, message.guild.id,
+                    track_before, user_id,
+                )
+            )
 
     # ------------------------------------------------------------------
     # Channel context
@@ -252,6 +253,41 @@ def _current_track(music_cog, guild_id: int):
     if player is None:
         return None
     return player.current_track
+
+
+async def _post_now_playing_when_ready(
+    music_cog,
+    channel,
+    guild_id: int,
+    track_before,
+    user_id: str,
+    timeout: float = 15.0,
+    interval: float = 0.25,
+) -> None:
+    """Post the now-playing card once a new track actually starts.
+
+    A freshly-played track must download before the player sets it as
+    ``current``, so the card can't be posted synchronously right after the
+    brain reply (it loses the race — see
+    docs/incidents/now-playing-card-download-race.md). This polls
+    ``current_track`` (bounded by ``timeout``) and posts the moment it changes
+    from the pre-call snapshot. A queue-only request never changes ``current``,
+    so it times out silently — no card, which is correct.
+    """
+    iters = max(1, int(timeout / interval))
+    for _ in range(iters):
+        track_after = _current_track(music_cog, guild_id)
+        if track_after is not None and track_after is not track_before:
+            try:
+                payload = music_cog.build_now_playing_message(guild_id)
+                if payload is not None:
+                    embed, view = payload
+                    await channel.send(embed=embed, view=view)
+                    log.info("agent.now_playing_posted", track=track_after.title[:60])
+            except Exception:
+                log.exception("agent.now_playing_error", user=user_id)
+            return
+        await asyncio.sleep(interval)
 
 
 def _split_message(text: str, limit: int = 2000) -> list[str]:
