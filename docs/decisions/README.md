@@ -14,6 +14,7 @@ Write a new note (don't edit in place) when a decision is reversed or materially
 
 ## Entries
 
+- [[in-process-browser-recycle]] — recycle chromium in-process (stop/start, profile preserved) on soft-memory (70%) or 4h age instead of the whole-process os._exit; reclaims the renderer leak without dropping Discord/voice (2026-06-03, active)
 - [[music-queue-primitives]] — move / remove / clear / previous / replay as ``music_assistant`` actions; respawn-based playback for replay & previous (2026-05-12, active)
 - [[music-queue-many-tool]] — ``queue_many`` action takes ``tracks: list[str]`` for multi-song queue from one utterance; per-track resolution status (2026-05-12, active)
 - [[music-filter-presets]] — nightcore / slowed / slowed_reverb / bassboost / 8d / vaporwave / karaoke / chipmunk / deep / super_slowed as named presets, dispatched via ``apply_effect`` (2026-05-12, active)

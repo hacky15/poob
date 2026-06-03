@@ -188,6 +188,18 @@ class AppConfig(BaseSettings):
     # Don't trigger the memory guard within this many seconds of process start
     # (avoids any startup-spike restart loop; the leak builds over hours).
     patrol_memory_restart_min_uptime_s: float = 600.0
+    # In-process browser recycle (the FIRST line of defense, well below the
+    # os._exit guard above). When memory crosses THIS softer fraction, recycle
+    # just the chromium browsers between cycles — a clean stop()+start() kills
+    # the leaked renderers and respawns fresh while the persistent profile keeps
+    # the FB session, so Discord/voice/the process stay up. The whole-process
+    # os._exit (patrol_memory_restart_pct) becomes a last-resort backstop for
+    # non-browser memory only. 0 disables the in-process recycle.
+    # See docs/decisions/in-process-browser-recycle.md.
+    patrol_memory_recycle_pct: float = 0.70
+    # Throttle: never recycle browsers more often than this (avoids thrashing if
+    # memory stays high from a source a browser recycle can't reclaim).
+    patrol_browser_recycle_min_interval_s: float = 600.0
     # FB session self-refresh. Facebook rolls the session token as the
     # authenticated browser is used; a real browser stays logged in for weeks
     # because it keeps the rolled token. We import a one-time cookie snapshot,

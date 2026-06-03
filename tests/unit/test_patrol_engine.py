@@ -1878,3 +1878,142 @@ class TestAnonBrowserSelfHeal:
         await engine._restart_anonymous_browser()
         # Not reset — next cycle will try again.
         assert engine._anon_sweep_consecutive_timeouts == 4
+
+
+class TestBrowserMemoryRecycle:
+    """In-process browser recycle reclaims leaked chromium memory between
+    cycles, so the whole-process os._exit memory guard rarely needs to fire.
+    See docs/decisions/in-process-browser-recycle.md."""
+
+    @pytest.mark.asyncio
+    async def test_no_recycle_below_thresholds(self, patrol_engine):
+        """Below the soft memory fraction and under max age — no recycle."""
+        patrol_engine._memory_recycle_pct = 0.70
+        patrol_engine._main_browser_max_age_s = 0.0  # age trigger disabled
+        patrol_engine._last_browser_recycle = time.monotonic() - 10000
+        with patch.object(
+            patrol_engine, "_recycle_main_browser", new_callable=AsyncMock,
+        ) as mock_recycle:
+            did = await patrol_engine.maybe_recycle_browsers(memory_frac=0.50)
+        assert did is False
+        mock_recycle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_recycle_on_memory_pressure(self, patrol_engine):
+        """Crossing the soft memory fraction triggers an in-process recycle."""
+        patrol_engine._memory_recycle_pct = 0.70
+        patrol_engine._main_browser_max_age_s = 0.0
+        patrol_engine._last_browser_recycle = time.monotonic() - 10000
+        with patch.object(
+            patrol_engine, "_recycle_main_browser", new_callable=AsyncMock,
+        ) as mock_recycle:
+            did = await patrol_engine.maybe_recycle_browsers(memory_frac=0.75)
+        assert did is True
+        mock_recycle.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_recycle_on_browser_age(self, patrol_engine):
+        """An aged main browser is recycled even when memory is fine."""
+        patrol_engine._memory_recycle_pct = 0.70
+        patrol_engine._main_browser_max_age_s = 100.0
+        patrol_engine._main_browser_started = time.monotonic() - 200.0  # aged
+        patrol_engine._last_browser_recycle = time.monotonic() - 10000
+        with patch.object(
+            patrol_engine, "_recycle_main_browser", new_callable=AsyncMock,
+        ) as mock_recycle:
+            did = await patrol_engine.maybe_recycle_browsers(memory_frac=0.10)
+        assert did is True
+        mock_recycle.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_recycle_throttled(self, patrol_engine):
+        """A recent recycle blocks another even under memory pressure."""
+        patrol_engine._memory_recycle_pct = 0.70
+        patrol_engine._main_browser_max_age_s = 0.0
+        patrol_engine._browser_recycle_min_interval_s = 600.0
+        patrol_engine._last_browser_recycle = time.monotonic()  # just recycled
+        with patch.object(
+            patrol_engine, "_recycle_main_browser", new_callable=AsyncMock,
+        ) as mock_recycle:
+            did = await patrol_engine.maybe_recycle_browsers(memory_frac=0.95)
+        assert did is False
+        mock_recycle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_recycle_resets_age_clock(self, patrol_engine):
+        """After a recycle the age clock restarts from ~now."""
+        patrol_engine._memory_recycle_pct = 0.70
+        patrol_engine._main_browser_max_age_s = 0.0
+        patrol_engine._main_browser_started = time.monotonic() - 9999
+        patrol_engine._last_browser_recycle = time.monotonic() - 10000
+        with patch.object(
+            patrol_engine, "_recycle_main_browser", new_callable=AsyncMock,
+        ):
+            await patrol_engine.maybe_recycle_browsers(memory_frac=0.80)
+        assert (time.monotonic() - patrol_engine._main_browser_started) < 5.0
+
+    @pytest.mark.asyncio
+    async def test_recycle_also_recycles_anon_browser(self, patrol_engine):
+        """The anonymous browser (also chromium) is recycled too."""
+        patrol_engine._memory_recycle_pct = 0.70
+        patrol_engine._main_browser_max_age_s = 0.0
+        patrol_engine._last_browser_recycle = time.monotonic() - 10000
+        patrol_engine._anonymous_browser = AsyncMock()
+        with patch.object(
+            patrol_engine, "_recycle_main_browser", new_callable=AsyncMock,
+        ), patch.object(
+            patrol_engine, "_restart_anonymous_browser", new_callable=AsyncMock,
+        ) as mock_anon:
+            await patrol_engine.maybe_recycle_browsers(memory_frac=0.80)
+        mock_anon.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_recycle_main_browser_reauths_on_success(
+        self, patrol_engine, mock_browser_manager, tmp_path,
+    ):
+        """Recycling the main browser restarts it then re-confirms auth."""
+        from poob.sites.facebook.auth import AuthStatus
+
+        patrol_engine._browser = mock_browser_manager
+        patrol_engine._config.browser_profiles_dir = tmp_path
+        mock_browser_manager.restart = AsyncMock()
+        mock_browser_manager.mark_authenticated = Mock()
+        mock_browser_manager.load_cookies = AsyncMock(return_value=1)
+        with patch(
+            "poob.sites.facebook.auth.ensure_logged_in",
+            new_callable=AsyncMock, return_value=AuthStatus.LOGGED_IN,
+        ):
+            await patrol_engine._recycle_main_browser()
+        mock_browser_manager.restart.assert_awaited_once()
+        mock_browser_manager.mark_authenticated.assert_called_once_with(True)
+
+    @pytest.mark.asyncio
+    async def test_recycle_main_browser_marks_unauth_on_reauth_failure(
+        self, patrol_engine, mock_browser_manager, tmp_path,
+    ):
+        """If re-auth raises, the browser is marked unauthenticated (anon path)."""
+        patrol_engine._browser = mock_browser_manager
+        patrol_engine._config.browser_profiles_dir = tmp_path
+        mock_browser_manager.restart = AsyncMock()
+        mock_browser_manager.mark_authenticated = Mock()
+        with patch(
+            "poob.sites.facebook.auth.ensure_logged_in",
+            new_callable=AsyncMock, side_effect=Exception("auth boom"),
+        ):
+            await patrol_engine._recycle_main_browser()
+        mock_browser_manager.mark_authenticated.assert_called_once_with(False)
+
+    @pytest.mark.asyncio
+    async def test_recycle_main_browser_skips_reauth_if_restart_fails(
+        self, patrol_engine, mock_browser_manager,
+    ):
+        """A failed browser restart short-circuits before re-auth."""
+        patrol_engine._browser = mock_browser_manager
+        mock_browser_manager.restart = AsyncMock(side_effect=Exception("restart boom"))
+        mock_browser_manager.mark_authenticated = Mock()
+        with patch(
+            "poob.sites.facebook.auth.ensure_logged_in", new_callable=AsyncMock,
+        ) as mock_auth:
+            await patrol_engine._recycle_main_browser()
+        mock_auth.assert_not_called()
+        mock_browser_manager.mark_authenticated.assert_not_called()

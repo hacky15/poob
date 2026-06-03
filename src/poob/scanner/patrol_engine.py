@@ -259,6 +259,18 @@ class PatrolEngine:
             float(_mba) if isinstance(_mba, (int, float)) and _mba > 0 else 0.0
         )
         self._main_browser_started = time.monotonic()
+        # In-process browser recycle (reclaims leaked chromium memory between
+        # cycles without a whole-process restart). Soft memory trigger below the
+        # scheduler's os._exit guard, plus the age trigger above; throttled.
+        _mrc = getattr(config, "patrol_memory_recycle_pct", 0.70)
+        self._memory_recycle_pct = (
+            float(_mrc) if isinstance(_mrc, (int, float)) and _mrc > 0 else 0.0
+        )
+        _brmi = getattr(config, "patrol_browser_recycle_min_interval_s", 600.0)
+        self._browser_recycle_min_interval_s = (
+            float(_brmi) if isinstance(_brmi, (int, float)) and _brmi > 0 else 600.0
+        )
+        self._last_browser_recycle = 0.0
         # Durable health-signal store (survives os._exit) for the heartbeat:
         # record each delivery so the monitor can detect a dark-out. Only built
         # for a real path (a spec'd-mock config yields a MagicMock, which must
@@ -810,13 +822,16 @@ class PatrolEngine:
             self._canaries.check_batch(listings, source="authenticated_dom")
         return listings
 
-    async def _restart_anonymous_browser(self) -> None:
+    async def _restart_anonymous_browser(
+        self, reason: str = "consecutive sweep timeouts",
+    ) -> None:
         """Tear down and recreate the anonymous browser session in-process.
 
         Called after ``_anon_sweep_max_timeouts`` consecutive DOM-sweep
-        timeouts. The degraded CDP session leaves ``get_page()`` and
-        navigation blocking forever; recreating the BrowserSession restores
-        ingestion without an operator-driven container restart.
+        timeouts (the degraded CDP session leaves ``get_page()`` and navigation
+        blocking forever), or proactively from the memory/age recycle path.
+        Recreating the BrowserSession restores ingestion / reclaims leaked
+        chromium memory without an operator-driven container restart.
 
         Both ``stop()`` and ``start()`` are bounded by their own timeouts —
         a hung session's ``stop()`` can itself block, and ``start()`` is
@@ -828,7 +843,8 @@ class PatrolEngine:
         if self._anonymous_browser is None:
             return
         log.warning(
-            "Recreating anonymous browser after consecutive sweep timeouts",
+            "Recreating anonymous browser",
+            reason=reason,
             consecutive_timeouts=self._anon_sweep_consecutive_timeouts,
         )
         try:
@@ -849,6 +865,100 @@ class PatrolEngine:
                 "Anonymous browser restart failed — will retry next cycle",
                 error=str(exc)[:120],
             )
+
+    async def maybe_recycle_browsers(self, *, memory_frac: float | None = None) -> bool:
+        """Reclaim leaked chromium memory IN-PROCESS, between cycles.
+
+        Chromium leaks renderer memory over hours. Rather than force-exiting the
+        whole process (dropping Discord/voice) when memory nears the cgroup cap,
+        recycle the browsers themselves: a clean stop()+start() kills the leaked
+        renderers and respawns fresh, while the persistent profile keeps the FB
+        session. Triggered when memory crosses the soft recycle fraction OR the
+        main browser has aged past its max; throttled so it can't thrash when
+        memory stays high from a source a recycle can't reclaim. The scheduler's
+        os._exit memory guard remains as a last-resort backstop for that case.
+
+        Called between cycles (where stop/start is safe — the next cycle fetches
+        a fresh page). Returns True if a recycle was performed.
+        See docs/decisions/in-process-browser-recycle.md.
+        """
+        now = time.monotonic()
+        age = now - self._main_browser_started
+        over_age = self._main_browser_max_age_s > 0 and age >= self._main_browser_max_age_s
+        over_mem = (
+            memory_frac is not None
+            and self._memory_recycle_pct > 0
+            and memory_frac >= self._memory_recycle_pct
+        )
+        if not (over_age or over_mem):
+            return False
+        if (now - self._last_browser_recycle) < self._browser_recycle_min_interval_s:
+            return False
+
+        reason = "browser_age" if over_age else "memory_pressure"
+        log.info(
+            "Recycling browsers in-process to reclaim leaked chromium memory "
+            "(Discord/voice/process stay up)",
+            reason=reason,
+            browser_age_min=round(age / 60, 1),
+            memory_pct=round(memory_frac * 100, 1) if memory_frac is not None else None,
+            recycle_pct=round(self._memory_recycle_pct * 100, 1),
+        )
+        self._last_browser_recycle = now
+        await self._recycle_main_browser()
+        if self._anonymous_browser is not None:
+            try:
+                await self._restart_anonymous_browser(reason=f"{reason} recycle")
+            except Exception as exc:  # noqa: BLE001 — main recycle already done
+                log.warning(
+                    "Anonymous browser recycle failed", error=str(exc)[:120],
+                )
+        # Reset the age clock to the post-recycle baseline.
+        self._main_browser_started = time.monotonic()
+        return True
+
+    async def _recycle_main_browser(self) -> None:
+        """Restart the main (authenticated) browser and re-establish its session.
+
+        ``BrowserManager.restart`` reuses the persistent profile, so the FB
+        cookies survive; we still re-run ``ensure_logged_in`` to re-confirm the
+        ``is_authenticated`` flag (resolves at the cheap 'home' check when the
+        session is intact, cookie re-import is the fallback). Mirrors the boot
+        auth flow in main.py.
+        """
+        if self._browser is None:
+            return
+        try:
+            await self._browser.restart()
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "Main browser recycle failed — will retry on next trigger",
+                error=str(exc)[:120],
+            )
+            return
+        if not getattr(self._config, "patrol_authenticated_login_enabled", True):
+            return
+        try:
+            from poob.sites.facebook.auth import AuthStatus, ensure_logged_in
+
+            cookies_path = self._config.browser_profiles_dir / "facebook" / "cookies.json"
+            page = await asyncio.wait_for(self._browser.get_page(), timeout=45.0)
+            status = await asyncio.wait_for(
+                ensure_logged_in(
+                    page,
+                    cookies_path=cookies_path,
+                    load_cookies=self._browser.load_cookies,
+                ),
+                timeout=120.0,
+            )
+            self._browser.mark_authenticated(status is AuthStatus.LOGGED_IN)
+            log.info("FB re-auth after browser recycle", status=status.value)
+        except Exception as exc:  # noqa: BLE001 — degrade to anonymous, recover next trigger
+            log.warning(
+                "Re-auth after browser recycle failed — anonymous until next trigger",
+                error=str(exc)[:120],
+            )
+            self._browser.mark_authenticated(False)
 
     async def _sweep_and_intercept(
         self, page: object, result: PatrolCycleResult,

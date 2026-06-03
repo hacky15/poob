@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -391,3 +391,40 @@ class TestPersistCookies:
         n = await mgr.persist_cookies(path)
         assert n == 0
         assert "good" in path.read_text()  # untouched
+
+
+class TestRestart:
+    """In-process recycle: stop()+start() against the same persistent profile,
+    reclaiming leaked chromium memory while preserving login state.
+    See docs/decisions/in-process-browser-recycle.md."""
+
+    @pytest.mark.asyncio
+    async def test_restart_stops_then_starts_with_stored_cookies_file(self) -> None:
+        """restart() reuses the cookies_file that start() was last called with."""
+        mgr = BrowserManager(headless=True)
+        mgr._cookies_file = "facebook/cookies.json"
+        with patch.object(mgr, "stop", new_callable=AsyncMock) as mock_stop, patch.object(
+            mgr, "start", new_callable=AsyncMock
+        ) as mock_start:
+            await mgr.restart()
+        mock_stop.assert_awaited_once()
+        mock_start.assert_awaited_once_with(cookies_file="facebook/cookies.json")
+
+    @pytest.mark.asyncio
+    async def test_restart_starts_even_if_stop_hangs(self) -> None:
+        """A hung/erroring stop() must not block the recreate — start() still runs."""
+        mgr = BrowserManager(headless=True)
+        with patch.object(
+            mgr, "stop", new_callable=AsyncMock, side_effect=Exception("stop hung"),
+        ), patch.object(mgr, "start", new_callable=AsyncMock) as mock_start:
+            await mgr.restart()
+        mock_start.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_start_records_cookies_file_for_restart(self, tmp_path: Path) -> None:
+        """start() stores its cookies_file so restart() can reuse the profile."""
+        mgr = BrowserManager(headless=True, profiles_dir=tmp_path)
+        with patch("poob.browser.manager.BrowserSession") as MockSession:
+            MockSession.return_value.start = AsyncMock()
+            await mgr.start(cookies_file="facebook/cookies.json")
+        assert mgr._cookies_file == "facebook/cookies.json"

@@ -312,8 +312,16 @@ class PatrolScheduler:
             if self._is_paused:
                 continue
 
-            # Proactively restart before the chromium leak OOMs the container
-            # or degrades CDP into a wedge (checked between cycles).
+            # First line of defense against the chromium leak: recycle the
+            # browsers IN-PROCESS (reclaims renderer memory, keeps Discord/voice
+            # up). Only if that can't help (non-browser memory) does the
+            # whole-process os._exit guard below fire as a last resort.
+            try:
+                await self._engine.maybe_recycle_browsers(
+                    memory_frac=_read_cgroup_memory_fraction(),
+                )
+            except Exception as exc:
+                log.warning("Browser recycle check failed", error=str(exc)[:120])
             self._maybe_restart_on_memory_pressure()
 
             # Per-cycle hard timeout. Without this a single hung browser

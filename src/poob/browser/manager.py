@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -62,6 +63,9 @@ class BrowserManager:
         self._stealth_min_delay_ms = stealth_min_delay_ms
         self._stealth_max_delay_ms = stealth_max_delay_ms
         self._browser: BrowserSession | None = None
+        # Remembered so restart() can recreate the session against the same
+        # persistent profile (preserving login state).
+        self._cookies_file: str | None = None
         # Once CDP has failed to materialize a page enough consecutive
         # times, treat the main browser as permanently broken for this
         # container's lifetime — every retry wastes ~30s per patrol cycle
@@ -92,6 +96,7 @@ class BrowserManager:
             cookies_file: Optional path to a cookies JSON file relative to profiles_dir.
                           Used as user_data_dir for persistent login state.
         """
+        self._cookies_file = cookies_file
         user_data_dir = None
         if cookies_file:
             # Use the directory containing the cookies file as user data dir
@@ -202,6 +207,29 @@ class BrowserManager:
             await self._browser.stop()
             self._browser = None
             log.info("Browser stopped")
+
+    async def restart(self) -> None:
+        """Recreate the browser session in-process, reusing the same profile.
+
+        Kills the current Chromium process tree — reclaiming the renderer
+        memory that browser-use's chromium leaks over hours — and launches a
+        fresh session against the same persistent ``user_data_dir``, so cookies
+        / login state survive the recycle. Both phases are bounded: a wedged
+        session's ``stop()`` can itself block, and ``start()`` assigns a fresh
+        ``BrowserSession`` wholesale, so even a ``stop()`` that times out is
+        recovered by the subsequent ``start()``. The authenticated flag is left
+        for the caller to re-establish (it must re-verify the session).
+        See docs/decisions/in-process-browser-recycle.md.
+        """
+        try:
+            await asyncio.wait_for(self.stop(), timeout=30.0)
+        except Exception as exc:  # noqa: BLE001 — start() recovers a hung stop()
+            log.warning(
+                "Browser stop during restart failed (continuing to start)",
+                error=str(exc)[:100],
+            )
+        await asyncio.wait_for(self.start(cookies_file=self._cookies_file), timeout=90.0)
+        log.info("Browser restarted", headless=self._headless)
 
     def create_agent(
         self,
