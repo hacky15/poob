@@ -329,7 +329,8 @@ def test_music_prompt_has_negative_examples() -> None:
     p = _build_system_prompt(level=5, voice=False, with_tools=True).lower()
     assert "play a game" in p, "missing 'play a game' negative example"
     assert "good play" in p or "nice play" in p, "missing praise negative example"
-    assert "isn't always" in p, "missing the 'play isn't always music' caveat"
+    assert "not everything with the word 'play' is music" in p, \
+        "missing the 'play isn't always music' caveat"
 
 
 def test_music_prompt_current_turn_only() -> None:
@@ -362,6 +363,30 @@ def test_music_tool_query_description_is_current_turn_only() -> None:
     assert "never" in desc and "earlier" in desc, (
         "query desc missing 'never a title from earlier' rule"
     )
+
+
+def test_music_prompt_rejects_sound_effect_fulfillment() -> None:
+    """music_assistant must not be used to ACT OUT a request with a sound
+    effect — "flip a coin" played a coin-flip clip in prod. The prompt must
+    teach "music is what you HEAR" + flip-a-coin is answered in text.
+    See docs/incidents/music-routing-flip-a-coin-false-positive.md."""
+    from poob.brain.poob import MUSIC_TOOL, _build_system_prompt
+    p = _build_system_prompt(level=5, voice=False, with_tools=True).lower()
+    assert "flip a coin" in p, "missing the flip-a-coin negative example"
+    assert "hear" in p, "missing the 'music is what you HEAR' framing"
+    assert "sound effect" in p, "missing the no-sound-effect-fulfillment rule"
+    # Reinforced at the tool-description layer too (what the model sees directly).
+    desc = MUSIC_TOOL["function"]["description"].lower()
+    assert "hear" in desc and "sound effect" in desc
+
+
+def test_music_prompt_stays_diligent_on_real_requests() -> None:
+    """Guard the balance: tightening false positives must not drop the
+    explicit 'be diligent' catch-real-requests directive + positive examples."""
+    from poob.brain.poob import _build_system_prompt
+    p = _build_system_prompt(level=5, voice=False, with_tools=True).lower()
+    assert "diligent" in p
+    assert "tiki tiki" in p and "cheeky cheeky" in p  # nonsense-name positives stay
 
 
 def test_music_prompt_drops_anything_music_adjacent_overreach() -> None:
