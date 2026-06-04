@@ -16,6 +16,7 @@ Resolved incidents stay `status: resolved`. Open ones stay `status: active`. If 
 
 ### 2026-06
 
+- [[wake-address-hey-dropout]] — operator's "Hey Poob, play X" got no response (his audio was fine); Deepgram dropped/mangled the "hey" lead-in ("A Poob", "Apoob", "Poob") so the hey-required text regex rejected 6 real addresses as spurious. Fixed: second deterministic "poob-opener + command-verb" matcher; spurious-fire rejection kept load-bearing (2026-06-04, resolved)
 - [[voice-4014-reconnect-event-loop-wedge]] — voice WS 4014 force-disconnect → DAVE MLS re-key ran unlocked on the shared event-loop thread → native `davey` FFI wedge froze voice + text + patrol for 8 min; recovered by restart. Root: the serialization lock dropped in the Pycord migration (2026-06-01, active — fix planned)
 
 ### 2026-05
@@ -30,7 +31,7 @@ Resolved incidents stay `status: resolved`. Open ones stay `status: active`. If 
 - [[dave-timeout-fail-hard-regression]] — agent flipped DAVE-not-ready into a fatal disconnect; auto-leave on every /join until reverted (2026-04-29)
 - [[voice-three-failure-modes-april27]] — `/join` crash + empty-query play + casual leak of tool-name (2026-04-27)
 - [[casual-chat-response-13s-latency]] — casual voice reply took 13.5 s end-to-end; cloud LLM cascade thrashed by 429s; resolved via Groq primary swap + Cerebras drop + casual-bypass (2026-04-23, resolved)
-- [[wake-gate-stt-mishear-rejection]] — wake gate rejected "play X" when STT mis-heard "Poob" as "poop" / "boop" / etc.; phonetic allowlist landed in address-detector but dual-pipeline regex still narrow (2026-04-23, active)
+- [[wake-gate-stt-mishear-rejection]] — wake gate rejected "play X" when STT mis-heard "Poob" as "poop" / "boop" / etc.; phonetic allowlist landed in address-detector, dual-pipeline command-verb override shipped 2026-06-04 (2026-04-23, resolved → [[wake-address-hey-dropout]])
 - [[music-tool-hallucination]] — LLM played "Bad Guy" from 20-minute-old context
 - [[wake-gate-over-rejection-during-music]] — wake gate rejected legit addresses while music was playing
 - [[voice-addressee-confusion]] — Poob called Ben "lab rat" and Jeweinery "lab rat"

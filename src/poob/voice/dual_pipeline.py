@@ -689,21 +689,69 @@ class DualPipelineProcessor:
     # Covers phonetic variants STT engines produce for "Poob":
     # Poob, Pube, Pub, Poof, Poob, Boob, Hoob, Noob, etc.
     import re
+
+    # Shared poob-variant stem. Deliberately the NARROW family (not the broad
+    # address_detector._WAKE_WORDS set) — this gate feeds the anti-loopback
+    # dual-gate, so widening the stem here re-opens the music/TTS-loopback hole
+    # that gate was built to close. See docs/decisions/wake-word-dual-gate.md.
+    _POOB_STEM = r'(?:p[ou]{1,2}b|p[ou]{1,2}be?|boob|hoob|noob|boop|poof|pub)'
+
+    # Layer A — "hey poob" address. Requires the literal "hey" lead-in.
     _TEXT_WAKE_RE = re.compile(
-        r'\bhey[\s,.]+'
-        r'(?:p[ou]{1,2}b|p[ou]{1,2}be?|boob|hoob|noob|boop|poof|pub)\b',
+        r'\bhey[\s,.]+' + _POOB_STEM + r'\b',
+        re.IGNORECASE,
+    )
+
+    # Layer B — "command address". Catches real addresses where Deepgram
+    # dropped/mangled the "hey" lead-in ("A Poob play X", "Apoob, remove
+    # nightcore", "Poob, nightcore"). Two conditions must BOTH hold so this
+    # stays tight enough not to fire on conversational mentions of "poob":
+    #
+    #   (a) a poob-variant opens the utterance — first word, tolerating one
+    #       leading filler word (a/uh/um/oh/hey/ok/k) and/or a single glued
+    #       filler letter ("apoob" = "a"+"poob"). Anchored at ^, so mid/end
+    #       mentions ("...fucked up, Poob", "Get Poob out of") never qualify.
+    #   (b) an imperative command verb appears anywhere, word-boundaried, so
+    #       "playlist" / "PUBG" don't count as "play" / "pub".
+    #
+    # This is Option B from docs/incidents/wake-gate-stt-mishear-rejection.md.
+    # The glued filler letter is restricted to single-letter filler words
+    # (a, k), NOT any [a-z], so "spoof"/"scoob" can't be read as filler+stem.
+    _POOB_OPENER_RE = re.compile(
+        r'^[\s,.!?]*'
+        r'(?:(?:a|uh+|um+|oh|hey|ok|okay|k)[\s,.!?]+)?'
+        r'(?:a|k)?'
+        + _POOB_STEM + r'\b',
+        re.IGNORECASE,
+    )
+    _COMMAND_VERB_RE = re.compile(
+        r'\b(?:play|queue|skip|next|stop|pause|resume|unpause|remove|clear|'
+        r'cancel|volume|louder|quieter|lower|raise|mute|unmute|nightcore|slow|'
+        r'slowed|speed|reverb|bass|shuffle|autoplay|kill|restart|replay|repeat|'
+        r'turn)\b',
         re.IGNORECASE,
     )
 
     def _text_wake_word_match(self, transcript: str) -> bool:
-        """Check if transcript contains 'Hey Poob' or phonetic variants.
+        """Check if transcript is a text address to Poob.
 
-        This is Layer 2 of wake word detection — catches what the audio
-        model misses. Deepgram's keyterm=Poob helps but STT still produces
-        variants like 'Hey Pube', 'Hey Pub', 'Hey Boob', etc.
+        Layer 2 of wake word detection — catches what the audio model misses
+        and feeds the dual-gate's ``text_match`` signal. Two recognition paths:
+
+        - "hey poob" + phonetic variants (``_TEXT_WAKE_RE``).
+        - "command address": a poob-variant opening the utterance plus an
+          imperative verb, for when STT drops the "hey" lead-in. See
+          docs/incidents/wake-gate-stt-mishear-rejection.md.
+
+        Either path returning True is a match. The narrow stem and the
+        opener+verb conjunction keep this from re-opening the loopback hole
+        guarded by docs/decisions/wake-word-dual-gate.md.
         """
         if self._TEXT_WAKE_RE.search(transcript):
             log.info("Text wake word match", transcript=transcript[:60])
+            return True
+        if self._POOB_OPENER_RE.match(transcript) and self._COMMAND_VERB_RE.search(transcript):
+            log.info("Command-address wake word match", transcript=transcript[:60])
             return True
         return False
 

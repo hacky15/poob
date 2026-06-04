@@ -1,12 +1,16 @@
 ---
 type: incident
-status: active
+status: resolved
 date: 2026-04-23
 tags: [voice, wake-word, dual-gate, brain]
-related: [[wake-word-dual-gate]] [[wake-gate-over-rejection-during-music]] [[wake-word-v3-shipped]]
+related: [[wake-word-dual-gate]] [[wake-gate-over-rejection-during-music]] [[wake-word-v3-shipped]] [[wake-address-hey-dropout]]
 ---
 
 # Wake-gate rejects commands when STT mis-transcribes "Poob" as "Poop" / "Boop" / etc.
+
+## Resolution (2026-06-04)
+
+**Option B shipped** at the dual-pipeline text-gate layer — see [[wake-address-hey-dropout]]. A second "command address" recognition path (poob-variant opening the utterance + a word-boundaried imperative verb) now recovers real addresses where STT drops/mangles the "hey" lead-in, while the load-bearing spurious-fire rejection stays intact. Validated by adversarial regression over 5h of production logs (6/6 real misses recovered, 0 new false positives, 53 prior accepts preserved). Marking `resolved`; the sections below are the original diagnosis, kept for context.
 
 ## Current state (2026-05-24 audit)
 
