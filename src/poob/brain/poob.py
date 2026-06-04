@@ -52,10 +52,10 @@ VOICE_POOB = "__VOICE_POOB__"  # Default: Poob's normal voice (Fenrir)
 VOICE_TOOB = "__VOICE_TOOB__"  # Evil music spirit (Enceladus, deep, slow)
 VOICE_BOOB = "__VOICE_BOOB__"  # Toob's side piece — sweet, complimentary, rare
 
-# ~1 in 20 music plays surface Boob instead of Toob. See
+# ~1 in 75 music plays surface Boob instead of Toob. See
 # decisions/boob-music-wrap-variant for the rarity rationale: too common
 # kills the surprise; too rare and nobody ever hears the variant.
-BOOB_PROBABILITY = 0.05
+BOOB_PROBABILITY = 1 / 75  # ≈0.0133
 
 # ---------------------------------------------------------------------------
 # Poob's personality — tiny, fast, universal
@@ -170,14 +170,20 @@ def _build_system_prompt(
     if with_tools:
         prompt += (
             "\n\nYou have a deal_assistant tool for shopping stuff. Only use when explicitly asked.\n"
-            "You have a music_assistant tool for playing music. When the CURRENT "
-            "message asks to play, queue, skip, pause, stop, or control music, "
-            "call music_assistant — don't talk about the request, don't comment, "
-            "don't ask clarifying questions, just call it.\n"
+            "You have a music_assistant tool for playing music and controlling effects. "
+            "When the CURRENT message asks to play, queue, skip, pause, stop, "
+            "control volume, or manage audio effects, call music_assistant — don't talk "
+            "about the request, don't comment, don't ask clarifying questions, just call it.\n"
             "Whatever follows play / put on / queue IS the song — even if it "
             "sounds like nonsense or a made-up name. Take those words from THIS "
             "message only; never pull a song title from earlier turns or from "
             "what other people said.\n"
+            "AUDIO EFFECTS ROUTING:\n"
+            "- 'nightcore it' / 'make it nightcore' → action=apply_effect, effect='nightcore'\n"
+            "- 'slow it down' / 'slowed' → action=apply_effect, effect='slowed'\n"
+            "- 'add reverb' → action=apply_effect, effect='slowed_reverb'\n"
+            "- 'remove X' / 'turn off X' / 'clear effect' / 'no effect' / 'normal' "
+            "→ action=apply_effect, effect='none' (the 'none' value means CLEAR all effects)\n"
             "Be DILIGENT about catching real song requests (call the tool):\n"
             "- 'play some jazz' → action=play, query='jazz'\n"
             "- 'play something chill' → action=play, query='chill music'\n"
@@ -974,7 +980,7 @@ class PoobBrain:
         if tool_name == "music_assistant":
             action = (tool_args or {}).get("action")
             if action == "play":
-                # Roll for Boob — Toob's side piece. ~1 in 20 plays surface
+                # Roll for Boob — Toob's side piece. ~1 in 75 plays surface
                 # the friendly, complimentary, three-sentence variant
                 # instead of Toob's venomous one-liner. See
                 # decisions/boob-music-wrap-variant.
@@ -1760,7 +1766,7 @@ class PoobBrain:
 
         # Concurrently stream the speculative wrap. Persona selects
         # which voice-mode wrap streams: Toob's one-line venom (default)
-        # or Boob's three-sentence side-piece compliment (rare, ~5%).
+        # or Boob's three-sentence side-piece compliment (rare, ~1.3%).
         # See decisions/boob-music-wrap-variant.
         wrap_stream = (
             self._stream_boob_wrap_from_query(original_message, max_tok)
