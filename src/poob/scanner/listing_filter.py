@@ -336,7 +336,11 @@ class FreshnessFilter:
 
     name: str = "freshness"
     stage: FilterStage = FilterStage.PRE_ENRICHMENT
-    exempt_tags: frozenset[str] = frozenset()
+    # Watchlist matches are exempt: a wishlist is about the item being AVAILABLE,
+    # not "just listed", so a watched item shouldn't be dropped for being older
+    # than the triage window. The user's per-item notification_threshold is the
+    # sole gate. See docs/decisions/watchlist-honors-threshold-not-freshness.md.
+    exempt_tags: frozenset[str] = frozenset({"watchlist_freshness_override"})
     max_age_hours: int = 6
 
     def __call__(self, listing: Listing) -> FilterVerdict:

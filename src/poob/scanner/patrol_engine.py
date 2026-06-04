@@ -506,6 +506,7 @@ class PatrolEngine:
             _WATCHLIST_TAGS = frozenset({
                 "watchlist_category_override",
                 "watchlist_geo_override",
+                "watchlist_freshness_override",
             })
             tags_by_id: dict[str, frozenset[str]] = {}
             for eid in exempt_ids:
@@ -2147,13 +2148,15 @@ class PatrolEngine:
         """Route deals to public channel or user DMs.
 
         Public channel: deals at ``deal_public_min_score`` (default INCREDIBLE)
-        AND posted within ``public_notification_max_age_minutes`` (default 10).
-        Watchlist DMs: deals at per-user ``notification_threshold`` (default GOOD)
-        AND posted within ``watchlist_notification_max_age_minutes`` (default 30).
+        AND posted within the minute-level public freshness gate ("just listed").
+        Watchlist DMs: gated SOLELY by the per-item ``notification_threshold``
+        ('all' = any confirmed match) — a wishlist is about the item being
+        available, not freshly listed, so it is NOT freshness-gated. See
+        docs/decisions/watchlist-honors-threshold-not-freshness.md.
 
         The evaluation cutoff (``listing_max_age_hours``) lets older listings
-        through for backlog recovery and measurement; these minute-level
-        cutoffs are what actually gate user-visible notifications.
+        through for backlog recovery; the public minute-level cutoff is what
+        gates the public channel (watchlist matches are exempt from freshness).
         """
         listing_map = {l.id: l for l in listings if l.id}
         exclusions = await self._load_exclusion_keywords()
@@ -2161,9 +2164,9 @@ class PatrolEngine:
         public_min = DealScore(
             getattr(self._config, "deal_public_min_score", "incredible")
         )
-        watchlist_min = DealScore(
-            getattr(self._config, "deal_watchlist_min_score", "good")
-        )
+        # Watchlist DMs are gated per-item by notification_threshold (below),
+        # not a global watchlist min-score. See
+        # docs/decisions/watchlist-honors-threshold-not-freshness.md.
         # Adaptive public freshness: keep the strict "just-listed" bar when the
         # authenticated feed is available (it provides the <10min listings), but
         # relax when auth is DOWN — then the only live source is the staler anon
@@ -2175,9 +2178,6 @@ class PatrolEngine:
             self._config, "public_notification_max_age_minutes", 10,
         )) if _auth_up else float(getattr(
             self._config, "public_notification_max_age_no_auth_minutes", 60,
-        ))
-        watchlist_max_age_min = float(getattr(
-            self._config, "watchlist_notification_max_age_minutes", 30,
         ))
         now = datetime.now(timezone.utc)
 
@@ -2250,28 +2250,12 @@ class PatrolEngine:
             listing = listing_map.get(deal.listing_id)
             if not listing or not deal.watch_item_id:
                 continue
-            # Freshness gate: never notify for listings with unverified age.
-            if listing.posted_at is None:
-                log.info(
-                    "notify.blocked_no_timestamp",
-                    title=(listing.title or "")[:50],
-                    score=deal.score.value,
-                    interest=deal.watch_item_id,
-                )
-                continue
-            # Minute-level freshness gate — "just listed" for watchlist DMs.
-            age_min = _age_minutes(listing)
-            if age_min is None or age_min > watchlist_max_age_min:
-                log.info(
-                    "notify.skip_too_old",
-                    channel="watchlist_dm",
-                    title=(listing.title or "")[:50],
-                    age_minutes=round(age_min, 1) if age_min is not None else None,
-                    limit_minutes=watchlist_max_age_min,
-                    score=deal.score.value,
-                    interest=deal.watch_item_id,
-                )
-                continue
+            # No freshness gate for watchlist DMs: a wishlist is about the item
+            # being AVAILABLE, not "just listed", so age does not gate it. The
+            # per-item notification_threshold below is the sole gate; batch dedup
+            # ensures one DM per listing. (The public channel keeps its strict
+            # minute-level gate.) See
+            # docs/decisions/watchlist-honors-threshold-not-freshness.md.
             try:
                 watch_item = await self._watchlist_repo.get(deal.watch_item_id)
                 if not watch_item or not watch_item.discord_user_id:

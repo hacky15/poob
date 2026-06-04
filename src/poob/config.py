@@ -343,10 +343,10 @@ class AppConfig(BaseSettings):
     # 2026-06-02) instead of nothing. See
     # docs/decisions/adaptive-public-freshness-when-auth-down.md.
     public_notification_max_age_no_auth_minutes: int = 60
-    # Watchlist DM cutoff: a watchlist match DMed to the interest owner must
-    # be within this many minutes old. Slightly laxer than public because
-    # missing a watchlist match hurts the user more than a stale public post.
-    watchlist_notification_max_age_minutes: int = 30
+    # NOTE: watchlist DMs are intentionally NOT freshness-gated — a wishlist is
+    # about the item being available, not just-listed. The per-item
+    # notification_threshold is the sole gate. See
+    # docs/decisions/watchlist-honors-threshold-not-freshness.md.
     patrol_deep_inspect_enabled: bool = True
     # --- Anonymous GraphQL ---
     patrol_anonymous_graphql_enabled: bool = True  # Try depersonalized GraphQL before browser

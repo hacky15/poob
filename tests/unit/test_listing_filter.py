@@ -871,3 +871,48 @@ class TestEdgeCases:
         v = filt(listing)
         # "car" is in _VEHICLE_KEYWORDS and "car" is a substring of "carpet"
         assert v.passed is False  # Known limitation of substring matching
+
+
+class TestFreshnessWatchlistExemption:
+    """Watchlist-tagged listings are exempt from the freshness filter via the
+    chain — a wishlist is about availability, not 'just listed'. See
+    docs/decisions/watchlist-honors-threshold-not-freshness.md."""
+
+    def _post_chain(self) -> FilterChain:
+        return FilterChain([
+            FreshnessFilter(
+                name="freshness_post",
+                stage=FilterStage.POST_ENRICHMENT,
+                max_age_hours=6,
+            ),
+        ])
+
+    def test_old_watchlist_listing_exempt(self):
+        """A 72h-old listing tagged watchlist_freshness_override is kept."""
+        old = make_listing(external_id="w1", posted_at=_utc_now() - timedelta(hours=72))
+        kept, rejected = self._post_chain().filter_batch(
+            [old],
+            stage=FilterStage.POST_ENRICHMENT,
+            tags_by_id={"w1": frozenset({"watchlist_freshness_override"})},
+        )
+        assert old in kept
+        assert not rejected
+
+    def test_old_watchlist_listing_no_timestamp_exempt(self):
+        """A no-timestamp watchlist listing is kept (POST normally rejects it)."""
+        nots = make_listing(external_id="w2", posted_at=None)
+        kept, rejected = self._post_chain().filter_batch(
+            [nots],
+            stage=FilterStage.POST_ENRICHMENT,
+            tags_by_id={"w2": frozenset({"watchlist_freshness_override"})},
+        )
+        assert nots in kept
+
+    def test_old_nonwatch_listing_still_rejected(self):
+        """Without the tag, a 72h-old listing is still rejected (control)."""
+        old = make_listing(external_id="n1", posted_at=_utc_now() - timedelta(hours=72))
+        kept, rejected = self._post_chain().filter_batch(
+            [old], stage=FilterStage.POST_ENRICHMENT,
+        )
+        assert old not in kept
+        assert rejected

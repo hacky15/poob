@@ -58,6 +58,20 @@ _SCORE_RANK: dict[DealScore, int] = {
     DealScore.INCREDIBLE: 4,
 }
 
+# A watch item's notification_threshold maps to the deal-quality floor for THAT
+# match. 'all'/'free' impose no quality floor — the user is watching a specific
+# item and wants it surfaced regardless of discount ('free' is price-gated at
+# notify, not here). Quality thresholds map to their DealScore. This is what
+# lets a normally-priced wishlist match (scored FAIR) still notify when the user
+# set 'all'. See docs/decisions/watchlist-honors-threshold-not-freshness.md.
+_WATCH_THRESHOLD_TO_SCORE: dict[str, DealScore] = {
+    "all": DealScore.UNKNOWN,
+    "free": DealScore.UNKNOWN,
+    "good": DealScore.GOOD,
+    "great": DealScore.GREAT,
+    "incredible": DealScore.INCREDIBLE,
+}
+
 # Titles that are Facebook UI artifacts, not real listing data.
 # Named distinctly to avoid collision with _GARBAGE_TITLES used for triage bypass.
 _UI_ARTIFACT_TITLES = frozenset({
@@ -1692,9 +1706,19 @@ class SmartDealRadar:
         if provenance:
             provenance.final_score = score.value
 
-        # Check minimum score threshold
+        # Check minimum score threshold. A watchlist match is gated by the
+        # USER's per-item notification_threshold (often 'all' = notify on any
+        # confirmed match), NOT the global deal-quality floor — they're watching
+        # a specific item, not hunting bargains. Non-watch listings use the
+        # global min. See docs/decisions/watchlist-honors-threshold-not-freshness.md.
         interest = watchlist_context.get("interest", "") if watchlist_context else ""
-        if _SCORE_RANK.get(score, 0) < _SCORE_RANK.get(self._min_score, 0):
+        gate_score = self._min_score
+        if watchlist_context:
+            gate_score = _WATCH_THRESHOLD_TO_SCORE.get(
+                str(watchlist_context.get("threshold") or "good").lower(),
+                self._min_score,
+            )
+        if _SCORE_RANK.get(score, 0) < _SCORE_RANK.get(gate_score, 0):
             log.info(
                 "listing.rejected",
                 title=listing.title[:60],
@@ -1702,7 +1726,7 @@ class SmartDealRadar:
                 vlm_score=vlm.deal_quality,
                 final_score=score.value,
                 reason="below_min_threshold",
-                min_required=self._min_score.value,
+                min_required=gate_score.value,
                 dollar_savings=round(dollar_savings, 2) if has_price else None,
                 discount_pct=round(discount_pct, 1) if has_price else None,
                 interest=interest or None,

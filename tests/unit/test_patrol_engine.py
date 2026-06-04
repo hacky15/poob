@@ -2017,3 +2017,54 @@ class TestBrowserMemoryRecycle:
             await patrol_engine._recycle_main_browser()
         mock_auth.assert_not_called()
         mock_browser_manager.mark_authenticated.assert_not_called()
+
+
+class TestWatchlistNotifyNoFreshnessGate:
+    """Watchlist DMs are gated SOLELY by the per-item notification_threshold,
+    not freshness — an OLD (or no-timestamp) wishlist match still DMs when the
+    user set 'all'. See docs/decisions/watchlist-honors-threshold-not-freshness.md."""
+
+    async def _notify_watch(self, engine, mock_watchlist_repo, *, posted_at, threshold="all"):
+        from poob.scanner.patrol_engine import EvaluationResult, PatrolCycleResult
+
+        listing = _make_listing(
+            "111", title="Pine Toilet Paper Cabinet", price=80.0, posted_at=posted_at,
+        )
+        watch = _make_interest("watch-1", "under toilet cabinet", 500.0)
+        watch.notification_threshold = threshold
+        mock_watchlist_repo.get = AsyncMock(return_value=watch)
+        deal = Deal(
+            listing_id="listing-111", watch_item_id="watch-1",
+            score=DealScore.FAIR, estimated_market_price=90.0, discount_pct=10.0,
+        )
+        eval_result = EvaluationResult()
+        eval_result.watchlist_deals = [deal]
+        await engine._notify(eval_result, [listing], PatrolCycleResult())
+
+    @pytest.mark.asyncio
+    async def test_old_watchlist_match_still_dms(
+        self, patrol_engine, mock_watchlist_repo, mock_notifier,
+    ):
+        # 5h old — the removed 30-min gate would have skipped this.
+        posted = datetime.now(timezone.utc) - timedelta(hours=5)
+        await self._notify_watch(patrol_engine, mock_watchlist_repo, posted_at=posted)
+        mock_notifier.send_deal_dm.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_no_timestamp_watchlist_match_still_dms(
+        self, patrol_engine, mock_watchlist_repo, mock_notifier,
+    ):
+        # No posted_at — old gate emitted blocked_no_timestamp; now it DMs.
+        await self._notify_watch(patrol_engine, mock_watchlist_repo, posted_at=None)
+        mock_notifier.send_deal_dm.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_threshold_good_still_filters_fair_at_notify(
+        self, patrol_engine, mock_watchlist_repo, mock_notifier,
+    ):
+        # The per-item threshold still gates: 'good' + FAIR deal is NOT DM'd.
+        posted = datetime.now(timezone.utc) - timedelta(hours=5)
+        await self._notify_watch(
+            patrol_engine, mock_watchlist_repo, posted_at=posted, threshold="good",
+        )
+        mock_notifier.send_deal_dm.assert_not_called()

@@ -3,7 +3,7 @@ type: decision
 status: active
 date: 2026-05-25
 tags: [scanner, freshness, triage, vlm, notifications]
-related: [[just-listed-rework]] [[listing-freshness-verification]] [[husqvarna-enrichment-cross-contamination]] [[enrichment-redirect-as-hard-failure]]
+related: [[just-listed-rework]] [[listing-freshness-verification]] [[husqvarna-enrichment-cross-contamination]] [[enrichment-redirect-as-hard-failure]] [[watchlist-honors-threshold-not-freshness]]
 supersedes: [[just-listed-rework]]
 ---
 

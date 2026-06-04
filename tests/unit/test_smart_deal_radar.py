@@ -764,3 +764,45 @@ class TestReplacementPartsFilter:
         )
         # Empty interest means base browse — no part filtering
         assert _is_replacement_part(listing, "") is False
+
+
+class TestWatchlistThresholdGate:
+    """A watchlist match is gated by the user's per-item notification_threshold,
+    NOT the global deal-quality floor — so a normally-priced wishlist item
+    (scored FAIR) still notifies when the user set 'all'. See
+    docs/decisions/watchlist-honors-threshold-not-freshness.md."""
+
+    def _fair_inputs(self):
+        # Modest savings + VLM 'fair' => FAIR score, below the global 'good'.
+        listing = _make_listing(
+            id="listing-w1", title="Pine Toilet Paper Cabinet", price=80.0
+        )
+        vlm = _make_vlm_eval(deal_quality="fair", estimated_value_mid=110.0)
+        return listing, vlm
+
+    def test_fair_nonwatch_rejected_by_global_min(self, radar):
+        """A FAIR non-watch listing is rejected by the global 'good' floor."""
+        listing, vlm = self._fair_inputs()
+        assert radar._vlm_to_deal(listing, vlm, watchlist_context=None) is None
+
+    def test_fair_watch_all_creates_deal(self, radar):
+        """A watch match with threshold='all' creates a deal even at FAIR."""
+        listing, vlm = self._fair_inputs()
+        ctx = {
+            "watch_item_id": "w-1",
+            "interest": "under toilet cabinet",
+            "threshold": "all",
+        }
+        deal = radar._vlm_to_deal(listing, vlm, watchlist_context=ctx)
+        assert deal is not None
+        assert deal.watch_item_id == "w-1"
+
+    def test_fair_watch_good_still_rejected(self, radar):
+        """A watch match with threshold='good' still requires >= GOOD."""
+        listing, vlm = self._fair_inputs()
+        ctx = {
+            "watch_item_id": "w-1",
+            "interest": "under toilet cabinet",
+            "threshold": "good",
+        }
+        assert radar._vlm_to_deal(listing, vlm, watchlist_context=ctx) is None
