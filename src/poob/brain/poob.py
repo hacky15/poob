@@ -790,6 +790,33 @@ class PoobBrain:
         """Return the currently-playing-track info for a guild, or ""."""
         return self._music_playing_info.get(guild_id, "")
 
+    @staticmethod
+    def _music_context_block(music_info: str) -> str:
+        """In-prompt block telling Poob about the current track.
+
+        Splits CONTROL (route to the music tool) from INFO questions. Poob
+        already has the track facts on this line — refreshed live per-utterance
+        by the voice/music layers — so info questions are answered
+        conversationally with no tool call and no search ("just has the info,
+        not overloaded"). Title is 'Artist - Song', so the performer is the
+        part before the dash. See
+        docs/decisions/now-playing-conversational-answers.md.
+        """
+        return (
+            f"\n\n[MUSIC IS CURRENTLY PLAYING: {music_info}  "
+            "(the title is formatted 'Artist - Song'.)\n"
+            "- CONTROL: if the user wants to change playback — stop, skip, "
+            "pause, resume, volume / turn up / turn down, next, shuffle, loop "
+            "— you MUST call music_assistant with the matching action enum "
+            "(skip, pause, resume, stop, volume (with value), volume_up, "
+            "volume_down, shuffle, loop, now_playing) and NOT answer in text.\n"
+            "- INFO: if the user just ASKS about the current song — its name, "
+            "what it's called, who sings or performs it, the artist, how long "
+            "it is, its length/duration, or how much is left — you ALREADY "
+            "have the answer on this line, so just SAY it in your own voice. "
+            "Do NOT call a tool and do NOT search for an info question.]"
+        )
+
     def _horniness_for(self, guild_id: int) -> int:
         """Return this guild's rolled horniness level (1-10), or 5 default."""
         return self._horniness_levels.get(guild_id, 5)
@@ -1150,15 +1177,7 @@ class PoobBrain:
         # Currently-playing track info for THIS guild only — never another's.
         music_info = self._get_music_playing_info(guild_id)
         if music_info:
-            prompt += (
-                f"\n\n[MUSIC IS CURRENTLY PLAYING: {music_info}. "
-                "CRITICAL: When music is playing and the user says anything about "
-                "stop, skip, pause, resume, volume, turn down, turn up, "
-                "next, shuffle, loop, or what's playing — you MUST call "
-                "music_assistant with the correct action. Do NOT respond with text. "
-                "Use the structured action enum: skip, pause, resume, stop, "
-                "volume (with value), volume_up, volume_down, shuffle, loop, now_playing.]"
-            )
+            prompt += self._music_context_block(music_info)
 
         messages: list[dict[str, str]] = [{"role": "system", "content": prompt}]
 
