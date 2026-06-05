@@ -2067,6 +2067,24 @@ class PoobBrain:
         )
         return "", tool_name, args
 
+    def _make_groq_client(self, *, timeout: float, max_retries: int = 0):
+        """Construct an AsyncGroq client with fail-fast defaults.
+
+        The brain's resilience model is the provider cascade, not SDK-level
+        retries. The Groq SDK defaults to max_retries=2 and a 60s timeout
+        (timed-out requests are themselves retried 2x) — so a rate-limited
+        Groq burns ~1.5-3s of backoff, and a hung call can block ~3min,
+        before we fall over to Gemini anyway. We fail fast (max_retries=0)
+        and cap the timeout, so the cascade reaches the next rung in ~100ms
+        on a 429. See docs/decisions/groq-failfast-client.md.
+        """
+        from groq import AsyncGroq
+        return AsyncGroq(
+            api_key=self.groq_api_key,
+            max_retries=max_retries,
+            timeout=timeout,
+        )
+
     async def _call_provider_with_tools(
         self,
         provider: str,
@@ -2094,9 +2112,8 @@ class PoobBrain:
         if provider == "groq":
             import json as _json
             import re as _re
-            from groq import AsyncGroq
             from groq import BadRequestError as _GroqBadRequest
-            client = AsyncGroq(api_key=self.groq_api_key)
+            client = self._make_groq_client(timeout=8.0)
             try:
                 response = await client.chat.completions.create(
                     model=model,
