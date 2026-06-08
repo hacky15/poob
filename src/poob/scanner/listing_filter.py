@@ -160,6 +160,23 @@ _GARBAGE_LOCATIONS: frozenset[str] = frozenset({
 
 _LISTED_AGO_RE = re.compile(r"listed\s+\d+\s*[hmd]\w*\s+ago")
 
+# Sale-EVENTS and curb-alerts are not items — they have no single resaleable
+# product, yet the VLM scores them (and prompts.py used to reward them as
+# "urgency"). Reject deterministically. Word-boundary matched so legit titles
+# ("Large sectional for sale", "Free treadmill at the curb", "Tag heuer watch",
+# "Curb your enthusiasm DVD") are untouched. The ambiguous "moving sale" /
+# "multi-family sale" / "neighborhood sale" are DELIBERATELY excluded — they
+# attach to genuine single-item titles and could suppress a real watchlist DM.
+# See docs/decisions/public-incredible-selectivity-floors.md.
+_SALE_EVENT_PHRASES: frozenset[str] = frozenset({
+    "rummage sale", "garage sale", "estate sale", "yard sale",
+    "barn sale", "tag sale", "curb alert", "free at curb",
+    "free curb", "everything must go",
+})
+_SALE_EVENT_RE = re.compile(
+    r"\b(?:" + "|".join(p.replace(" ", r"\s+") for p in _SALE_EVENT_PHRASES) + r")\b"
+)
+
 
 class KnownFarLocationFilter:
     """Skip enrichment on towns that are entirely outside the search radius,
@@ -440,6 +457,15 @@ class GarbageFilter:
             return FilterVerdict.reject(self.name, f"garbage title: '{title_lower}'")
         if location_lower and location_lower in _GARBAGE_LOCATIONS:
             return FilterVerdict.reject(self.name, f"garbage location: '{location_lower}'")
+
+        # Sale events / curb alerts are not items (structural reject — not a
+        # deal-quality judgment, so it stays watchlist-safe: a real watched
+        # product is never a bare sale-event title).
+        sale_event = _SALE_EVENT_RE.search(title_clean)
+        if sale_event:
+            return FilterVerdict.reject(
+                self.name, f"non-item sale event: '{sale_event.group(0)}'"
+            )
 
         # Unenrichable placeholder titles — only reject if description
         # is also too short for VLM to reason from.

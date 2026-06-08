@@ -438,6 +438,10 @@ async def startup() -> None:
             retail_lookup=retail_tool,
             search_cascade=search_provider,
             min_deal_quality=config.deal_radar_min_score,
+            incredible_abs_dollar_floor=config.deal_incredible_abs_dollar_floor,
+            max_value_multiple=config.deal_max_value_multiple,
+            free_item_min_value=config.free_item_min_value,
+            free_item_incredible_min_value=config.free_item_incredible_min_value,
         )
         log.info(
             "SmartDealRadar initialized",

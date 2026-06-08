@@ -111,6 +111,13 @@ class AppConfig(BaseSettings):
     deal_radar_min_score: str = "good"  # Minimum score to create a Deal
     deal_public_min_score: str = "incredible"  # Public channel: only INCREDIBLE deals
     deal_watchlist_min_score: str = "good"  # Watchlist DMs: GOOD or better
+    # PUBLIC-feed selectivity floors (watchlist DMs are exempt — gated by their
+    # own per-item notification_threshold). Tune against the live feed. See
+    # docs/decisions/public-incredible-selectivity-floors.md.
+    deal_incredible_abs_dollar_floor: float = 50.0  # INCREDIBLE needs >=$50 real savings
+    deal_max_value_multiple: float = 4.0  # clamp unbranded value to <=4x asking
+    free_item_min_value: float = 40.0  # free item below this resale value -> FAIR
+    free_item_incredible_min_value: float = 80.0  # free item below this -> cap GREAT
     vision_model: str = "qwen2.5vl:7b"  # Vision-capable model (local Ollama VLM fallback)
     vision_model_num_ctx: int = 4096  # Context window for vision model
     # Local fast model for simple tasks — saves cloud quota

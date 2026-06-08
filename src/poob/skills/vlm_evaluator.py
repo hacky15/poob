@@ -85,7 +85,18 @@ Think step by step:
    - poor: heavy wear, significant damage, missing parts
    - parts: broken, non-functional, for parts only
    Note specific observations (cracks, stains, rust, missing components).
-4. VALUE: Estimate fair market value on Facebook Marketplace (local used market).
+4. VALUE: Estimate the TYPICAL USED LOCAL RESALE PRICE — what this exact item, in
+   this condition, realistically sells for SAME-DAY to a local Facebook Marketplace
+   buyer RIGHT NOW. This is NOT retail/MSRP, NOT replacement cost, and is almost
+   always FAR below new price. When unsure, estimate LOW, not high.
+   - A used COMMODITY or UNBRANDED item is almost never worth more than ~3-4x its
+     asking price (a $20 used toaster is worth ~$15-25, NOT $150).
+   - CONSUMABLES and used-up goods (candle/Scentsy wax, pods, food, cosmetics,
+     partially-used craft supplies) have NEAR-ZERO resale value regardless of
+     original retail — do not assign them meaningful value.
+   - Recognizable BRAND appliances, electronics, power tools, instruments, and
+     real furniture are EXEMPT from the ~3-4x guidance — price them on genuine
+     secondhand demand.
    **VALIDATE COMPARABLES FIRST:**
    - The comparable search query is shown in quotes above. Compare it to the listing title.
    - If the search query names a DIFFERENT product or premium brand that does NOT appear
@@ -116,7 +127,10 @@ Think step by step:
    - fair: 5-15% below mid
    - good: 15-30% below mid AND at least $15 saved
    - great: 30-50% below mid AND at least $40 saved
-   - incredible: 50%+ below mid AND at least $75 saved, OR free with identifiable value >$50
+   - incredible: 50%+ below mid AND at least $75 saved, OR (free AND worth_attention
+     AND a SPECIFIC resaleable item — appliance/electronics/tool/furniture/instrument —
+     with realistic used resale value >= $75). NEVER incredible for consumables,
+     bulk/scrap, clothing, or vague-category listings.
 6. RED FLAGS: Check for scam indicators.
    - Photo shows different item than described
    - Stock photos or watermarked images
@@ -129,6 +143,14 @@ CRITICAL RULES:
 a deal. A $200 Herman Miller Aeron with minor wear IS a deal.
 - Consider DESIRABILITY. Popular brands, in-demand items, and useful goods are deals. \
 Random junk at low prices is not.
+- **WORTH-ATTENTION GATE.** Set "worth_attention": false (and deal_quality "pass") for \
+items not worth notifying a human about: cheap commodity goods (basic storage bins/containers, \
+shot glasses, generic kitchenware, door knobs, shoe racks, plain hangers), consumables, scrap/ \
+bulk materials, and non-item listings. BUT if a recognizable brand, model number, appliance, \
+power tool, electronics, instrument, or real furniture piece appears in the title/photos/ \
+enrichment, set worth_attention=true — genuine secondhand demand overrides the commodity \
+heuristic. Only the ABSENCE of any such signal PLUS low resale demand justifies false. \
+When in doubt, set worth_attention=true.
 - **CHECK DESCRIPTION AND PHOTOS FOR MISLEADING SIGNALS.** Set deal_quality to "pass" \
 ONLY if you can clearly see evidence that the item is NOT actually for sale at the listed price: \
   - Description explicitly says "trades only", "looking to trade", "pop up event" \
@@ -163,6 +185,7 @@ Respond with ONLY this JSON (no markdown fences, no text before or after):
   "estimated_value_mid": <float>,
   "estimated_value_high": <float>,
   "deal_quality": "<pass|fair|good|great|incredible>",
+  "worth_attention": <true|false>,
   "confidence": <float 0.0-1.0>,
   "reasoning": "<1-3 sentence explanation of the deal assessment>",
   "red_flags": ["<list of concerns, empty array if none>"]
@@ -566,6 +589,11 @@ class VLMDealEvaluator:
         if deal_quality not in valid_qualities:
             deal_quality = "pass"
 
+        # Fail-OPEN: weaker cascade rungs (Ollama 7b, OpenRouter, Groq Vision)
+        # may omit worth_attention; defaulting True prevents a feed blackout.
+        # The public-only gate in orchestrator._vlm_to_deal acts on a hard False.
+        worth_attention = bool(data.get("worth_attention", True))
+
         return VLMEvaluation(
             item_identified=str(data.get("item_identified", "")),
             condition=condition,
@@ -575,6 +603,7 @@ class VLMDealEvaluator:
             estimated_value_mid=float(data.get("estimated_value_mid", 0.0)),
             estimated_value_high=float(data.get("estimated_value_high", 0.0)),
             deal_quality=deal_quality,
+            worth_attention=worth_attention,
             confidence=float(data.get("confidence", 0.0)),
             reasoning=str(data.get("reasoning", "")),
             red_flags=list(data.get("red_flags", [])),

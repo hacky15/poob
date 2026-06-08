@@ -35,14 +35,15 @@ them in urgency_signals (use the exact short label, not the full text):
 - "make offer" or "obo" or "or best offer"
 - "price drop" or "reduced" or "lowered price"
 - "priced to sell" or "steal" or "below cost"
-- "garage sale" or "estate sale" or "yard sale"
 - "downsizing" or "decluttering" or "spring cleaning"
 - "urgent" or "asap" or "today only" or "this weekend only"
 - "husband says" or "wife says" or "spouse says" (forced sale)
 - "divorce" or "breakup" (liquidation)
 - "no longer need" or "don't use" or "never used" or "still in box"
-- "curb alert" or "porch pickup" or "come get it"
-Return an empty list [] if no urgency signals are found."""
+- "porch pickup" or "come get it"
+Return an empty list [] if no urgency signals are found.
+(A sale EVENT — garage/estate/yard/rummage sale, curb alert — is NOT a buy
+signal; do not list it as urgency.)"""
 
 VISUAL_IDENTIFY_PROMPT = """Look at this image of a marketplace listing item and identify what is being sold.
 
@@ -74,7 +75,8 @@ Focus on:
 - Look for damage: cracks, stains, missing parts, rust, torn fabric, broken pieces
 - If the item appears broken/non-functional, set condition to "parts"
 - Urgency signals in the title/description: "free", "fcfs", "must sell", "need gone", \
-"moving sale", "obo", "make offer", "price drop", "garage sale", "curb alert", "asap", etc.
+"obo", "make offer", "price drop", "asap", etc. (A sale EVENT — garage/estate/yard \
+sale, curb alert — is NOT a buy signal; do not treat it as urgency.)
 Return urgency_signals as an empty list [] if none found."""
 
 RETAIL_PRICE_EXTRACT_PROMPT = """Extract the retail/MSRP price from this web search result text.

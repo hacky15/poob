@@ -806,3 +806,114 @@ class TestWatchlistThresholdGate:
             "threshold": "good",
         }
         assert radar._vlm_to_deal(listing, vlm, watchlist_context=ctx) is None
+
+
+class TestPublicSelectivityFloors:
+    """PUBLIC-feed selectivity: clutter is demoted below INCREDIBLE; legit deals
+    stay; watchlist matches are EXEMPT from every value/dollar/worth-attention
+    gate. See docs/decisions/public-incredible-selectivity-floors.md."""
+
+    def _deal(self, radar, *, title, price, mid, quality="incredible",
+              worth=True, watchlist=None, high=None):
+        listing = _make_listing(id=f"listing-{abs(hash(title)) % 9999}", title=title, price=price)
+        vlm = _make_vlm_eval(
+            estimated_value_mid=mid, deal_quality=quality, worth_attention=worth,
+        )
+        if high is not None:
+            vlm.estimated_value_high = high
+        return radar._vlm_to_deal(listing, vlm, watchlist_context=watchlist)
+
+    @staticmethod
+    def _is_incredible(deal) -> bool:
+        return deal is not None and deal.score == DealScore.INCREDIBLE
+
+    # --- CLUTTER must NOT reach INCREDIBLE on the public feed ---
+
+    def test_worth_attention_false_capped_public(self, radar):
+        # The toaster/waffle-pan class: VLM flags it not-worth-attention.
+        deal = self._deal(radar, title="Toaster", price=20.0, mid=150.0, worth=False)
+        assert not self._is_incredible(deal)
+
+    @pytest.mark.parametrize("title,price,mid", [
+        ("Pampered Chef Waffle Puff Pan", 7.0, 18.0),
+        ("Storage containers", 4.0, 15.0),
+        ("Assorted shot glasses", 1.0, 3.0),
+        ("Kwikset door knob set", 5.0, 20.0),
+        ("4 Tier Shoe Rack", 5.0, 15.0),
+    ])
+    def test_trivial_savings_below_abs_floor(self, radar, title, price, mid):
+        # Even at worth_attention=True, <$50 absolute savings can't be INCREDIBLE.
+        deal = self._deal(radar, title=title, price=price, mid=mid, worth=True)
+        assert not self._is_incredible(deal)
+
+    def test_value_multiple_cap_clamps_hallucination(self, radar):
+        # Unbranded item, value inflated 10x -> clamped to 4x ($80), proving the
+        # cap fired (market price recorded as the clamp, not $200). Title chosen
+        # to avoid _listing_has_no_brand's substring quirk ("Generic" ~ "ge").
+        deal = self._deal(radar, title="Handmade trinket", price=20.0, mid=200.0)
+        assert deal is None or deal.estimated_market_price <= 80.0 + 0.01
+
+    def test_value_multiple_cap_skipped_for_high_value_keyword(self, radar):
+        # A 'treadmill' (high-value keyword) is NOT clamped.
+        deal = self._deal(radar, title="Treadmill", price=20.0, mid=200.0)
+        assert deal is not None and deal.estimated_market_price > 80.0
+
+    def test_free_non_resaleable_demoted(self, radar):
+        assert not self._is_incredible(self._deal(radar, title="Free bricks", price=0.0, mid=250.0))
+        assert not self._is_incredible(self._deal(radar, title="FREE Candle making supplies", price=0.0, mid=15.0))
+        assert not self._is_incredible(self._deal(radar, title="Mens clothes", price=0.0, mid=100.0))
+
+    def test_free_low_value_demoted(self, radar):
+        assert not self._is_incredible(self._deal(radar, title="Keycaps for keyboard", price=0.0, mid=20.0, high=22.0))
+        assert not self._is_incredible(self._deal(radar, title="Queen mattress cover", price=0.0, mid=15.0, high=18.0))
+
+    # --- LEGIT must STILL reach INCREDIBLE ---
+
+    @pytest.mark.parametrize("title,price,mid", [
+        ("DELL XPS 13 LAPTOP", 90.0, 200.0),
+        ("iRobot Roomba Self-Emptying", 99.0, 300.0),
+        ("Samsung 55in TV", 75.0, 175.0),
+        ("Yamaha Clavinova", 200.0, 800.0),
+        ("Toro CCR2000 Snowblower", 50.0, 200.0),
+        ("Whirlpool Duet gas dryer", 50.0, 250.0),
+        ("Craftsman 10in table saw", 10.0, 150.0),
+    ])
+    def test_legit_priced_stay_incredible(self, radar, title, price, mid):
+        deal = self._deal(radar, title=title, price=price, mid=mid, worth=True)
+        assert self._is_incredible(deal), f"{title} should stay INCREDIBLE"
+
+    @pytest.mark.parametrize("title,mid", [
+        ("Free treadmill", 100.0),
+        ("Samsung washer", 200.0),
+        ("Nugget ice machine", 100.0),
+    ])
+    def test_legit_free_stay_incredible(self, radar, title, mid):
+        deal = self._deal(radar, title=title, price=0.0, mid=mid, high=mid * 1.2, worth=True)
+        assert self._is_incredible(deal), f"free {title} should stay INCREDIBLE"
+
+    def test_free_unidentifiable_caps_great_not_fair(self, radar):
+        # High enough value but no brand/keyword -> GREAT (graceful degrade), not killed.
+        deal = self._deal(radar, title="Free wooden thing", price=0.0, mid=100.0, high=120.0)
+        assert deal is not None and deal.score == DealScore.GREAT
+
+    def test_free_value_high_at_incredible_boundary(self, radar):
+        # value_high exactly at the floor + identifiable -> INCREDIBLE-eligible.
+        deal = self._deal(radar, title="Free treadmill", price=0.0, mid=70.0, high=80.0, worth=True)
+        assert self._is_incredible(deal)
+
+    # --- WATCHLIST matches are EXEMPT from all public gates ---
+
+    def test_watchlist_exempt_from_worth_attention(self, radar):
+        ctx = {"watch_item_id": "w1", "interest": "toaster", "threshold": "all"}
+        deal = self._deal(radar, title="Toaster", price=20.0, mid=150.0, worth=False, watchlist=ctx)
+        assert deal is not None and deal.watch_item_id == "w1"
+
+    def test_watchlist_exempt_from_abs_floor(self, radar):
+        ctx = {"watch_item_id": "w1", "interest": "waffle pan", "threshold": "all"}
+        deal = self._deal(radar, title="Waffle pan", price=7.0, mid=18.0, worth=True, watchlist=ctx)
+        assert deal is not None and deal.watch_item_id == "w1"
+
+    def test_watchlist_free_score_preserved(self, radar):
+        ctx = {"watch_item_id": "w1", "interest": "bricks", "threshold": "incredible"}
+        deal = self._deal(radar, title="Free bricks", price=0.0, mid=250.0, watchlist=ctx)
+        assert deal is not None and deal.score == DealScore.INCREDIBLE

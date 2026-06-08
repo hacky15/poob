@@ -737,6 +737,10 @@ class SmartDealRadar:
         retail_lookup: RetailLookupTool | None = None,
         search_cascade: SearchProviderCascade | None = None,
         min_deal_quality: str = "good",
+        incredible_abs_dollar_floor: float = 50.0,
+        max_value_multiple: float = 4.0,
+        free_item_min_value: float = 40.0,
+        free_item_incredible_min_value: float = 80.0,
     ) -> None:
         self._text_triage = text_triage
         self._visual_enrichment = visual_enrichment
@@ -745,6 +749,12 @@ class SmartDealRadar:
         self._retail_lookup = retail_lookup
         self._search_cascade = search_cascade
         self._min_score = _QUALITY_TO_SCORE.get(min_deal_quality, DealScore.GOOD)
+        # PUBLIC-only selectivity tunables (watchlist matches are exempt). See
+        # docs/decisions/public-incredible-selectivity-floors.md.
+        self._incredible_abs_floor = incredible_abs_dollar_floor
+        self._max_value_multiple = max_value_multiple
+        self._free_min_value = free_item_min_value
+        self._free_incredible_min_value = free_item_incredible_min_value
 
     async def evaluate_batch(
         self,
@@ -1580,6 +1590,18 @@ class SmartDealRadar:
 
         score = _QUALITY_TO_SCORE.get(vlm.deal_quality, DealScore.FAIR)
 
+        # PUBLIC-only: a "not worth attention" verdict (cheap commodity,
+        # consumable, non-item) caps the score below the public INCREDIBLE bar.
+        # Fail-open (defaults True), so this only bites on an explicit False.
+        # Watchlist matches are exempt — gated solely by their own threshold.
+        if watchlist_context is None and not getattr(vlm, "worth_attention", True):
+            if _SCORE_RANK.get(score, 0) > _SCORE_RANK[DealScore.FAIR]:
+                if provenance:
+                    provenance.score_adjustments.append(
+                        f"{score.value}->fair: worth_attention=false"
+                    )
+                score = DealScore.FAIR
+
         # Calculate discount percentage and dollar savings from VLM estimates.
         #
         # Design principle: each layer does what it's good at.
@@ -1604,6 +1626,34 @@ class SmartDealRadar:
             (has_price and listing_price == 0)
             or (not has_price and title_lower in {"free", "$0", "0"})
         )
+
+        # PUBLIC-only value-multiple sanity cap: clamp an implausibly-high VLM
+        # value on an unbranded commodity (e.g. "$20 toaster" -> "$150") so a
+        # hallucinated multiple cannot mint a deal. Skipped for: branded items,
+        # high-value categories, and evidence-backed multi-sample non-retail
+        # comps. Watchlist matches are exempt. (A single retail/MSRP hit does
+        # NOT defeat the cap — that is the common toaster-class hallucination.)
+        if (
+            watchlist_context is None
+            and has_price
+            and listing_price >= 5.0
+            and vlm.estimated_value_mid > listing_price * self._max_value_multiple
+            and _listing_has_no_brand(listing)
+            and not (vlm_identified_brand and vlm.confidence >= 0.7)
+            and not _HIGH_VALUE_UNBRANDED_KEYWORDS.search(listing.title or "")
+            and not (
+                comparables is not None
+                and getattr(comparables, "sample_count", 0) > 1
+                and getattr(comparables, "source", "") != "retail"
+            )
+        ):
+            clamped = listing_price * self._max_value_multiple
+            if provenance:
+                provenance.score_adjustments.append(
+                    f"value-multiple cap: ${vlm.estimated_value_mid:.0f}->${clamped:.0f}"
+                )
+            vlm.estimated_value_mid = clamped
+            vlm.estimated_value_high = min(vlm.estimated_value_high or clamped, clamped * 1.5)
 
         if vlm.estimated_value_mid > 0 and listing_price > 0:
             dollar_savings = vlm.estimated_value_mid - listing_price
@@ -1639,18 +1689,46 @@ class SmartDealRadar:
         # listing image which shows the price).
         pre_enforcement_score = score
         if is_free_item and vlm.estimated_value_mid > 0:
-            # FREE items: the VLM score stands without dollar enforcement.
-            # A free item the VLM identifies as worth $100+ IS incredible
-            # by definition — 100% savings, infinite ROI. Don't let the
-            # dollar threshold ($75 for incredible) kill a $0 listing.
-            if provenance:
-                provenance.score_adjustments.append(
-                    f"free item: VLM value=${vlm.estimated_value_mid:.0f}, score preserved"
+            # FREE items. Watchlist matches keep their VLM score (gated by their
+            # own per-item threshold). On the PUBLIC path a free item must clear
+            # a value floor AND be an identifiable resaleable product — not
+            # bulk/scrap/consumables — to reach the top tiers (downgrade-only,
+            # never blocked). Keeps free treadmill/washer/ice-machine INCREDIBLE
+            # while dropping free bricks/candle-supplies/keycaps.
+            if watchlist_context is not None:
+                if provenance:
+                    provenance.score_adjustments.append(
+                        f"free item (watchlist): value=${vlm.estimated_value_mid:.0f}, preserved"
+                    )
+            else:
+                value_high = vlm.estimated_value_high or vlm.estimated_value_mid
+                non_resaleable = bool(_FREE_ITEM_NON_RESALEABLE.search(listing.title or ""))
+                identifiable = (
+                    bool(_HIGH_VALUE_UNBRANDED_KEYWORDS.search(listing.title or ""))
+                    or not _listing_has_no_brand(listing)
+                    or (vlm_identified_brand and vlm.confidence >= 0.7)
                 )
+                if non_resaleable or value_high < self._free_min_value:
+                    score = DealScore.FAIR
+                    adj = ("free non-resaleable -> fair" if non_resaleable
+                           else f"free value ${value_high:.0f}<${self._free_min_value:.0f} -> fair")
+                elif (
+                    value_high < self._free_incredible_min_value or not identifiable
+                ):
+                    if _SCORE_RANK.get(score, 0) > _SCORE_RANK[DealScore.GREAT]:
+                        score = DealScore.GREAT
+                    adj = ("free unidentifiable -> cap great" if identifiable is False
+                           else f"free value ${value_high:.0f}<${self._free_incredible_min_value:.0f} -> cap great")
+                else:
+                    adj = f"free item: value=${value_high:.0f}, score preserved"
+                if provenance:
+                    provenance.score_adjustments.append(adj)
         elif has_price:
             score = _enforce_dollar_savings(
                 score, discount_pct, dollar_savings,
                 listing_price=listing_price,
+                is_public=(watchlist_context is None),
+                incredible_floor=self._incredible_abs_floor,
             )
             if score != pre_enforcement_score and provenance:
                 provenance.score_adjustments.append(
@@ -1783,6 +1861,8 @@ _HIGH_VALUE_UNBRANDED_KEYWORDS = re.compile(
     r"|table saw|band saw|bandsaw|planer|jointer|lathe|drill press"
     r"|miter saw|mitre saw|scroll saw|router table|dovetail jig"
     r"|welder|air compressor|pressure washer"
+    r"|ice machine|ice maker|chest freezer|kegerator|kayak|canoe"
+    r"|grill|smoker|sewing machine|piano|keyboard|drum kit|drum set"
     r")\b",
     re.IGNORECASE,
 )
@@ -1934,8 +2014,40 @@ _MIN_DISCOUNT_PCT: dict[DealScore, float] = {
     DealScore.INCREDIBLE: 50.0,
 }
 
+# PUBLIC-ONLY selectivity floors (watchlist matches are exempt — gated by their
+# own per-item notification_threshold). See
+# docs/decisions/public-incredible-selectivity-floors.md.
+#
+# Absolute dollar floor the proportional <$50 path can NEVER go below: even a
+# 100%-off cheap item needs real absolute savings to reach a tier. This is what
+# demotes "$7->$18 waffle pan" ($11 saved) and "shot glasses $1->$3" from
+# INCREDIBLE. The INCREDIBLE value is operator-tunable via config.
+_ABS_DOLLAR_FLOOR: dict[DealScore, float] = {
+    DealScore.GOOD: 8.0,
+    DealScore.GREAT: 20.0,
+    DealScore.INCREDIBLE: 50.0,
+}
 
-def _get_effective_min_dollars(tier: DealScore, listing_price: float) -> float:
+# Free items whose title names a non-resaleable bulk/consumable good are not
+# deals regardless of the VLM's value guess (kills "free bricks->$250",
+# "free candle supplies", "mens clothes"). PHRASE-matched to avoid collisions
+# ("boxes" vs "box spring"). High-value free items (treadmill, washer) are
+# identified by _HIGH_VALUE_UNBRANDED_KEYWORDS instead and pass.
+_FREE_ITEM_NON_RESALEABLE = re.compile(
+    r"\b(?:bricks?|fire\s*wood|firewood|mulch|top\s*soil|topsoil|gravel|sand"
+    r"|scrap(?:\s+metal)?|moving\s+boxes|cardboard|packing\s+material"
+    r"|candle(?:\s+making)?\s+supplies|craft\s+supplies"
+    r"|wax\s+(?:bars?|melts?|pods?|cubes?)"
+    r"|mens?\s+clothes|womens?\s+clothes|kids?\s+clothes|clothing\s+lot"
+    r"|free\s+stuff|free\s+junk)\b",
+    re.IGNORECASE,
+)
+
+
+def _get_effective_min_dollars(
+    tier: DealScore, listing_price: float, *,
+    is_public: bool = False, incredible_floor: float | None = None,
+) -> float:
     """Get the effective minimum dollar savings for a tier, scaled by price.
 
     For expensive items ($50+), uses the flat threshold (e.g., $10 for GOOD).
@@ -1943,33 +2055,44 @@ def _get_effective_min_dollars(tier: DealScore, listing_price: float) -> float:
     lower and avoids over-penalizing budget items. Between $30-$50, blends
     smoothly between the two.
 
+    On the PUBLIC path (``is_public``) an absolute dollar floor is applied that
+    the proportional cheap-item path can never go below — so a 100%-off $7 item
+    cannot reach INCREDIBLE on a trivial $11 saving. Watchlist matches pass
+    ``is_public=False`` and are unaffected.
+
     Args:
         tier: Deal score tier.
         listing_price: The listing's asking price.
+        is_public: Whether this is the public feed (apply the absolute floor).
+        incredible_floor: Operator-tuned absolute floor for INCREDIBLE.
 
     Returns:
         Effective minimum dollar savings.
     """
     flat_min = _MIN_DOLLAR_SAVINGS.get(tier, 0.0)
 
-    # When listing price is unknown/zero, use flat thresholds
     if listing_price <= 0:
-        return flat_min
+        eff = flat_min
+    else:
+        pct_of_price = _MIN_SAVINGS_PCT_OF_PRICE.get(tier, 0.0)
+        # For items under $50, the proportional threshold may be lower than flat.
+        proportional_min = listing_price * pct_of_price
+        # Use the LOWER of the two — generous to cheap items, while still
+        # enforcing flat thresholds on expensive items.
+        eff = min(flat_min, proportional_min) if listing_price < 50.0 else flat_min
 
-    pct_of_price = _MIN_SAVINGS_PCT_OF_PRICE.get(tier, 0.0)
-
-    # For items under $50, the proportional threshold may be lower than flat
-    proportional_min = listing_price * pct_of_price
-
-    # Use the LOWER of the two — this is generous to cheap items while
-    # still enforcing flat thresholds on expensive items where $10/$30/$75
-    # are reasonable expectations.
-    return min(flat_min, proportional_min) if listing_price < 50.0 else flat_min
+    if is_public:
+        floor = _ABS_DOLLAR_FLOOR.get(tier, 0.0)
+        if tier == DealScore.INCREDIBLE and incredible_floor is not None:
+            floor = incredible_floor
+        eff = max(eff, floor)
+    return eff
 
 
 def _enforce_dollar_savings(
     score: DealScore, discount_pct: float, dollar_savings: float,
-    listing_price: float = 0.0,
+    listing_price: float = 0.0, *,
+    is_public: bool = False, incredible_floor: float | None = None,
 ) -> DealScore:
     """Downgrade deal score if dollar savings or percentage don't meet minimums.
 
@@ -2002,7 +2125,9 @@ def _enforce_dollar_savings(
         if tier_rank > current_rank:
             continue  # Skip tiers above the VLM's rating
 
-        min_dollars = _get_effective_min_dollars(tier, listing_price)
+        min_dollars = _get_effective_min_dollars(
+            tier, listing_price, is_public=is_public, incredible_floor=incredible_floor,
+        )
         min_pct = _MIN_DISCOUNT_PCT.get(tier, 0.0)
 
         if dollar_savings >= min_dollars and discount_pct >= min_pct:
@@ -2020,7 +2145,9 @@ def _enforce_dollar_savings(
 
     # Doesn't meet even GOOD thresholds
     if current_rank > _SCORE_RANK[DealScore.FAIR]:
-        min_good_dollars = _get_effective_min_dollars(DealScore.GOOD, listing_price)
+        min_good_dollars = _get_effective_min_dollars(
+            DealScore.GOOD, listing_price, is_public=is_public, incredible_floor=incredible_floor,
+        )
         log.info(
             "Deal downgraded to FAIR by savings enforcement",
             original=score.value,

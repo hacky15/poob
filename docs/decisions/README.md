@@ -14,6 +14,7 @@ Write a new note (don't edit in place) when a decision is reversed or materially
 
 ## Entries
 
+- [[public-incredible-selectivity-floors]] — de-clutter the public feed: VLM used-resale framing + worth_attention gate (fail-open), absolute $-floor (INCREDIBLE ≥$50), value-multiple cap (≤4×), free-item value/identifiability floor, and a structural sale-event/non-item GarbageFilter gate. All public-only; watchlist exempt (2026-06-07, active)
 - [[watchlist-honors-threshold-not-freshness]] — watchlist DMs gated SOLELY by the per-item notification_threshold ('all' = any confirmed match); decoupled from the global deal-quality floor + exempt from freshness (a wishlist is about availability, not just-listed). Narrows the watchlist part of [[triage-freshness-converge-with-notify]] (2026-06-04, active)
 - [[in-process-browser-recycle]] — recycle chromium in-process (stop/start, profile preserved) on soft-memory (70%) or 4h age instead of the whole-process os._exit; reclaims the renderer leak without dropping Discord/voice (2026-06-03, active)
 - [[music-queue-primitives]] — move / remove / clear / previous / replay as ``music_assistant`` actions; respawn-based playback for replay & previous (2026-05-12, active)

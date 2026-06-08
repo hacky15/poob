@@ -566,6 +566,48 @@ class TestGarbageFilter:
         assert self.filt.stage == FilterStage.POST_ENRICHMENT
 
 
+class TestGarbageFilterSaleEvents:
+    """Non-item sale events / curb alerts are rejected; legit items that merely
+    contain 'sale'/'free'/'curb' are not. See
+    docs/decisions/public-incredible-selectivity-floors.md."""
+
+    filt = GarbageFilter()
+
+    @pytest.mark.parametrize("title", [
+        "Rummage Sale! Last Day!",
+        "Garage Sale 2307 West Memorial Dr @8am",
+        "FREE AT CURB",
+        "Estate Sale",
+        "Yard sale",
+        "Everything Must Go",
+        "curb alert",
+        "Barn Sale this weekend",
+        "Tag sale - multiple families... wait no just tag sale",
+    ])
+    def test_rejects_sale_events(self, title):
+        v = self.filt(make_listing(title=title))
+        assert v.passed is False
+        assert "non-item sale event" in v.reason
+
+    @pytest.mark.parametrize("title", [
+        "Free treadmill",
+        "Samsung washer",
+        "Large sectional for sale",
+        "Couch for sale",
+        "Garage shelving unit",
+        "Barn door hardware",
+        "Tag heuer watch",
+        "Curb your enthusiasm DVD set",
+        "Free curbside pickup couch",
+        "Vintage estate jewelry lot",
+        "Yamaha keyboard - moving sale $50",  # 'moving sale' deliberately allowed
+        "Multi family sale leftovers: Dell laptop",  # 'multi family' not in set
+    ])
+    def test_passes_legit_items(self, title):
+        v = self.filt(make_listing(title=title))
+        assert v.passed is True
+
+
 # ===================================================================
 # FilterChain — stage routing
 # ===================================================================

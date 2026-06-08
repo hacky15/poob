@@ -200,6 +200,11 @@ class VLMEvaluation:
     estimated_value_mid: float = 0.0
     estimated_value_high: float = 0.0
     deal_quality: str = "pass"  # pass | fair | good | great | incredible
+    # Whether this is a SPECIFIC, desirable, resaleable item worth notifying a
+    # human about (vs. cheap commodity / consumable / non-item). Fail-open: the
+    # default + omitted-field parse are True; only a hard False gates (public
+    # path only). See docs/decisions/public-incredible-selectivity-floors.md.
+    worth_attention: bool = True
     confidence: float = 0.0
     reasoning: str = ""
     red_flags: list[str] = field(default_factory=list)
