@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import random
 import asyncio
+import time
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -571,6 +572,13 @@ class PoobBrain:
     # within the dedup window. Per-guild so a user with the bot in
     # multiple servers can play the same song in each.
     _last_play: dict[tuple[int, str], tuple[str, float]] = field(
+        default_factory=dict, init=False,
+    )
+    # Provider/model rate-limit cooldown: model -> monotonic deadline to skip
+    # until. Set from a 429's Retry-After so the routing cascade stops
+    # re-probing a capped model every turn. Global — rate limits aren't
+    # per-guild. See docs/decisions/provider-circuit-breaker.md.
+    _provider_cooldown: dict[str, float] = field(
         default_factory=dict, init=False,
     )
 
@@ -1982,6 +1990,12 @@ class PoobBrain:
         if self.groq_api_key:
             providers.append(("groq", "meta-llama/llama-4-scout-17b-16e-instruct"))
 
+        # Circuit breaker: drop rungs whose model is still in rate-limit
+        # cooldown so a capped model (e.g. Groq's spent daily TPD) is skipped
+        # instead of re-probed every turn — Gemini becomes rung 1 for the
+        # window the 429 told us to wait. Never strands the cascade.
+        providers = self._active_providers(providers)
+
         # High-signal tool indicators: if the user's last message contains
         # these, a text-only response is almost certainly wrong. Force the
         # cascade to keep trying providers until one calls a tool.
@@ -2014,6 +2028,8 @@ class PoobBrain:
                 text, tool_name, tool_args = await self._call_provider_with_tools(
                     provider, model, messages, tools, tool_max_tokens,
                 )
+                # Model answered — clear any stale cooldown (half-open → closed).
+                self._provider_cooldown.pop(model, None)
                 if tool_name:
                     log.info("poob.tool_route", tool=tool_name,
                              provider=provider, model=model,
@@ -2034,6 +2050,10 @@ class PoobBrain:
                 return text, tool_name, tool_args
 
             except Exception as exc:
+                # Rate-limited? Cool the model down for its advised window so
+                # the next turn skips it instead of re-probing (the 130
+                # fall-throughs / 23s spikes from the 2026-06-08 429 storm).
+                self._note_model_rate_limited(model, exc)
                 if not is_last:
                     log.warning("Tool detection failed, trying next",
                                 provider=provider, model=model, error=str(exc)[:500])
@@ -2085,6 +2105,80 @@ class PoobBrain:
             model=model, tool=tool_name,
         )
         return "", tool_name, args
+
+    # --- Provider circuit breaker (driven by each 429's own Retry-After) ---
+    # Groq's daily-token-cap 429 returns "try again in <N>", and a busy voice
+    # night exhausts the 200k TPD (see incidents/groq-daily-cap-routing-storm).
+    # Re-probing a capped model on every turn cost seconds of cascade latency.
+    # We cool the model down for the server-advised window instead.
+    _RETRY_AFTER_RE = re.compile(
+        r"try again in\s+(?:(\d+)\s*m)?\s*([\d.]+)\s*s", re.IGNORECASE
+    )
+    _COOLDOWN_MIN_S = 5.0
+    _COOLDOWN_MAX_S = 1800.0      # never strand a model longer than 30 min
+    _COOLDOWN_DEFAULT_S = 60.0    # rate-limited but no advised time
+
+    @staticmethod
+    def _is_rate_limit_error(exc: Exception) -> bool:
+        """True only for 429 / rate-limit / quota errors — NOT timeouts or
+        other failures (those are transient; don't cool the model down)."""
+        blob = f"{getattr(exc, 'status_code', '')} {exc}".lower()
+        return (
+            "429" in blob or "rate_limit" in blob or "rate limit" in blob
+            or "resource_exhausted" in blob or "too many requests" in blob
+        )
+
+    @classmethod
+    def _retry_after_seconds(cls, exc: Exception) -> float | None:
+        """Server-advised cooldown for a 429: prefer the Retry-After header,
+        fall back to the provider's 'try again in 2m5.3s' message. None if
+        neither is present (caller applies a conservative default)."""
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            try:
+                hdr = resp.headers.get("retry-after")
+            except Exception:
+                hdr = None
+            if hdr:
+                try:
+                    return float(hdr)
+                except (TypeError, ValueError):
+                    pass
+        m = cls._RETRY_AFTER_RE.search(str(exc))
+        if m:
+            return float(m.group(1) or 0) * 60.0 + float(m.group(2) or 0)
+        return None
+
+    def _model_in_cooldown(self, model: str) -> bool:
+        until = self._provider_cooldown.get(model)
+        return until is not None and time.monotonic() < until
+
+    def _note_model_rate_limited(self, model: str, exc: Exception) -> None:
+        """Cool a model down after a 429 for its server-advised window
+        (clamped). No-op for non-rate-limit errors. Driven by the 429's own
+        Retry-After — never a guessed TTL."""
+        if not self._is_rate_limit_error(exc):
+            return
+        secs = self._retry_after_seconds(exc)
+        if secs is None:
+            secs = self._COOLDOWN_DEFAULT_S
+        secs = max(self._COOLDOWN_MIN_S, min(secs, self._COOLDOWN_MAX_S))
+        self._provider_cooldown[model] = time.monotonic() + secs
+        log.info("provider.cooldown_set", model=model, seconds=round(secs, 1))
+
+    def _active_providers(
+        self, providers: list[tuple[str, str]]
+    ) -> list[tuple[str, str]]:
+        """Drop rungs whose model is still in rate-limit cooldown so the
+        cascade skips a known-capped model instead of re-probing it. Cooldown
+        is keyed by model (Groq's TPD is per-model, so Scout's separate budget
+        is unaffected when gpt-oss-20b is capped). Never strands the cascade:
+        if every model is cooling, returns the full list (least-bad)."""
+        active = [(p, m) for (p, m) in providers if not self._model_in_cooldown(m)]
+        if active and len(active) < len(providers):
+            skipped = [m for (_p, m) in providers if self._model_in_cooldown(m)]
+            log.info("provider.cooldown_skip", skipped=skipped)
+        return active or providers
 
     def _make_groq_client(self, *, timeout: float, max_retries: int = 0):
         """Construct an AsyncGroq client with fail-fast defaults.
