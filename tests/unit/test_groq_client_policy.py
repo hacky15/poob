@@ -76,3 +76,21 @@ def test_routing_cascade_uses_failfast_client(monkeypatch) -> None:
         )
     assert captured.get("max_retries") == 0
     assert captured.get("timeout") == 8.0
+
+
+def test_every_groq_client_in_brain_is_failfast() -> None:
+    """No Groq client may use the SDK default max_retries=2 — that default
+    caused the 13s 429-backoff spikes on the casual/wrap paths (2026-06-09).
+    Every AsyncGroq(...) construction must set max_retries (0 inline, or the
+    factory's max_retries=max_retries param)."""
+    import inspect
+    import re
+
+    import poob.brain.poob as brain_mod
+
+    src = inspect.getsource(brain_mod)
+    # match AsyncGroq(...) allowing one level of nested parens (httpx.Timeout etc.)
+    constructions = re.findall(r"AsyncGroq\((?:[^()]|\([^()]*\))*\)", src)
+    assert constructions, "expected AsyncGroq constructions in poob.py"
+    bad = [c for c in constructions if "max_retries" not in c]
+    assert not bad, f"non-fail-fast Groq client(s) found: {bad}"

@@ -183,8 +183,17 @@ def _build_system_prompt(
             "- 'nightcore it' / 'make it nightcore' → action=apply_effect, effect='nightcore'\n"
             "- 'slow it down' / 'slowed' → action=apply_effect, effect='slowed'\n"
             "- 'add reverb' → action=apply_effect, effect='slowed_reverb'\n"
-            "- 'remove X' / 'turn off X' / 'clear effect' / 'no effect' / 'normal' "
-            "→ action=apply_effect, effect='none' (the 'none' value means CLEAR all effects)\n"
+            "- 'remove the effect' / 'turn off the filter' / 'turn off the "
+            "nightcore' / 'clear effect' / 'no effects' / 'back to normal speed' "
+            "→ action=apply_effect, effect='none' (clears ALL effects). Do NOT "
+            "invent an effect here, and do NOT fire this just because the word "
+            "'normal' appears.\n"
+            "VOLUME IS NOT AN EFFECT — they are separate commands. Anything about "
+            "LOUDNESS — 'normal volume' / 'regular volume' / 'max volume' / "
+            "'louder' / 'quieter' / 'turn it up' / 'turn it down' → action=volume "
+            "(or volume_up / volume_down), NEVER apply_effect. Effects are NAMED "
+            "audio filters (nightcore, slowed, reverb, bassboost); volume is just "
+            "how loud it is.\n"
             "Be DILIGENT about catching real song requests (call the tool):\n"
             "- 'play some jazz' → action=play, query='jazz'\n"
             "- 'play something chill' → action=play, query='chill music'\n"
@@ -1083,7 +1092,7 @@ class PoobBrain:
         try:
             from groq import AsyncGroq
 
-            client = AsyncGroq(api_key=self.groq_api_key)
+            client = AsyncGroq(api_key=self.groq_api_key, max_retries=0, timeout=12.0)
             stream = await client.chat.completions.create(
                 model="llama-3.1-8b-instant",
                 messages=casual_messages,  # type: ignore[arg-type]
@@ -1233,7 +1242,7 @@ class PoobBrain:
         )
         try:
             from groq import AsyncGroq
-            client = AsyncGroq(api_key=self.groq_api_key)
+            client = AsyncGroq(api_key=self.groq_api_key, max_retries=0, timeout=12.0)
             resp = await client.chat.completions.create(
                 model="llama-3.1-8b-instant",
                 messages=casual_messages,  # type: ignore[arg-type]
@@ -1505,7 +1514,7 @@ class PoobBrain:
             try:
                 from groq import AsyncGroq
 
-                client = AsyncGroq(api_key=self.groq_api_key)
+                client = AsyncGroq(api_key=self.groq_api_key, max_retries=0, timeout=12.0)
                 resp = await client.chat.completions.create(
                     model="llama-3.1-8b-instant",  # Fast 8b for quick reaction
                     messages=wrap_messages,  # type: ignore[arg-type]
@@ -1562,7 +1571,7 @@ class PoobBrain:
 
         from groq import AsyncGroq
 
-        client = AsyncGroq(api_key=self.groq_api_key)
+        client = AsyncGroq(api_key=self.groq_api_key, max_retries=0, timeout=12.0)
         stream = await client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=wrap_messages,  # type: ignore[arg-type]
@@ -1636,7 +1645,7 @@ class PoobBrain:
 
         from groq import AsyncGroq
 
-        client = AsyncGroq(api_key=self.groq_api_key)
+        client = AsyncGroq(api_key=self.groq_api_key, max_retries=0, timeout=12.0)
         stream = await client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=wrap_messages,  # type: ignore[arg-type]
@@ -1872,7 +1881,7 @@ class PoobBrain:
             try:
                 from groq import AsyncGroq
 
-                client = AsyncGroq(api_key=self.groq_api_key)
+                client = AsyncGroq(api_key=self.groq_api_key, max_retries=0, timeout=12.0)
                 resp = await client.chat.completions.create(
                     model=self.groq_model,
                     messages=wrap_messages,  # type: ignore[arg-type]
@@ -2310,7 +2319,7 @@ class PoobBrain:
         """Stream tokens from Groq (no tools)."""
         from groq import AsyncGroq
 
-        client = AsyncGroq(api_key=self.groq_api_key)
+        client = AsyncGroq(api_key=self.groq_api_key, max_retries=0, timeout=12.0)
         stream = await client.chat.completions.create(
             model=self.groq_model,
             messages=messages,  # type: ignore[arg-type]
