@@ -543,6 +543,11 @@ class PoobBrain:
     # See docs/decisions/gemini-tool-router-rung.md.
     google_api_key: str = ""
     gemini_router_model: str = "gemini-2.5-flash-lite"
+    # Second Gemini rung on a DIFFERENT model: Gemini free-tier burst limits
+    # are per-model (~20 req/min each), so a second model doubles burst
+    # capacity at the same latency when a busy VC exceeds one bucket.
+    # gemini-2.5-flash is on Google's confirmed free list (2026-06).
+    gemini_router_model_alt: str = "gemini-2.5-flash"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3:8b"
     max_history: int = 15
@@ -588,6 +593,11 @@ class PoobBrain:
     # re-probing a capped model every turn. Global — rate limits aren't
     # per-guild. See docs/decisions/provider-circuit-breaker.md.
     _provider_cooldown: dict[str, float] = field(
+        default_factory=dict, init=False,
+    )
+    # Consecutive-timeout counter per model; N in a row arms a short cooldown
+    # (a hung provider otherwise costs the full REST timeout on every turn).
+    _provider_timeouts: dict[str, int] = field(
         default_factory=dict, init=False,
     )
 
@@ -1991,6 +2001,11 @@ class PoobBrain:
         #    docs/gotchas/groq-daily-token-cap-degrades-routing.
         if self.google_api_key:
             providers.append(("gemini", self.gemini_router_model))
+        # 2b. Second Gemini model = separate per-model ~20 RPM bucket. Busy
+        #     VC bursts past one bucket while Groq's daily cap is spent
+        #     (2026-06-09: 15x gemini-429/hour); same latency, double burst.
+        if self.google_api_key:
+            providers.append(("gemini", self.gemini_router_model_alt))
         # 3. NVIDIA NIM — different provider, sidesteps Groq rate limits.
         if self.nvidia_api_key:
             providers.append(("nvidia", self.nvidia_model))
@@ -2037,8 +2052,10 @@ class PoobBrain:
                 text, tool_name, tool_args = await self._call_provider_with_tools(
                     provider, model, messages, tools, tool_max_tokens,
                 )
-                # Model answered — clear any stale cooldown (half-open → closed).
+                # Model answered — clear stale cooldown + timeout streak
+                # (half-open → closed).
                 self._provider_cooldown.pop(model, None)
+                self._provider_timeouts.pop(model, None)
                 if tool_name:
                     log.info("poob.tool_route", tool=tool_name,
                              provider=provider, model=model,
@@ -2063,6 +2080,9 @@ class PoobBrain:
                 # the next turn skips it instead of re-probing (the 130
                 # fall-throughs / 23s spikes from the 2026-06-08 429 storm).
                 self._note_model_rate_limited(model, exc)
+                # Hung? Consecutive timeouts arm a short cooldown (the
+                # 2026-06-09 NVIDIA outage cost the full REST timeout per turn).
+                self._note_model_timeout(model, exc)
                 if not is_last:
                     log.warning("Tool detection failed, trying next",
                                 provider=provider, model=model, error=str(exc)[:500])
@@ -2120,12 +2140,22 @@ class PoobBrain:
     # night exhausts the 200k TPD (see incidents/groq-daily-cap-routing-storm).
     # Re-probing a capped model on every turn cost seconds of cascade latency.
     # We cool the model down for the server-advised window instead.
+    # Groq says "try again in 2m5.3s"; Gemini says "Please retry in 46.4s"
+    # (in the response BODY, not the exception message — see
+    # _retry_after_seconds).
     _RETRY_AFTER_RE = re.compile(
-        r"try again in\s+(?:(\d+)\s*m)?\s*([\d.]+)\s*s", re.IGNORECASE
+        r"(?:try again|retry) in\s+(?:(\d+)\s*m)?\s*([\d.]+)\s*s", re.IGNORECASE
     )
     _COOLDOWN_MIN_S = 5.0
     _COOLDOWN_MAX_S = 1800.0      # never strand a model longer than 30 min
     _COOLDOWN_DEFAULT_S = 60.0    # rate-limited but no advised time
+    # A provider that consistently TIMES OUT is functionally down (e.g. the
+    # 2026-06-09 NVIDIA NIM outage: every routing turn paid the full REST
+    # timeout before failing over). One timeout is transient — don't react;
+    # consecutive timeouts arm a short fixed cooldown (no server signal
+    # exists for "I'm hung", so this one is ours, deliberately brief).
+    _TIMEOUT_ARM_COUNT = 2
+    _TIMEOUT_COOLDOWN_S = 120.0
 
     @staticmethod
     def _is_rate_limit_error(exc: Exception) -> bool:
@@ -2153,7 +2183,16 @@ class PoobBrain:
                     return float(hdr)
                 except (TypeError, ValueError):
                     pass
-        m = cls._RETRY_AFTER_RE.search(str(exc))
+        # Search the exception text AND the response body — Gemini's
+        # "Please retry in 46.4s" lives in the 429 JSON body, which
+        # raise_for_status does not include in str(exc).
+        blob = str(exc)
+        if resp is not None:
+            try:
+                blob += " " + resp.text[:2000]
+            except Exception:
+                pass
+        m = cls._RETRY_AFTER_RE.search(blob)
         if m:
             return float(m.group(1) or 0) * 60.0 + float(m.group(2) or 0)
         return None
@@ -2174,6 +2213,36 @@ class PoobBrain:
         secs = max(self._COOLDOWN_MIN_S, min(secs, self._COOLDOWN_MAX_S))
         self._provider_cooldown[model] = time.monotonic() + secs
         log.info("provider.cooldown_set", model=model, seconds=round(secs, 1))
+
+    @staticmethod
+    def _is_timeout_error(exc: Exception) -> bool:
+        """True for request timeouts (httpx/asyncio/SDK). Kept separate from
+        rate-limit classification — one timeout is transient, but consecutive
+        ones mean the provider is hung (see _note_model_timeout)."""
+        if isinstance(exc, (httpx.TimeoutException, asyncio.TimeoutError)):
+            return True
+        return "timeout" in type(exc).__name__.lower()
+
+    def _note_model_timeout(self, model: str, exc: Exception) -> None:
+        """Arm a short fixed cooldown after _TIMEOUT_ARM_COUNT consecutive
+        timeouts for a model. A hung provider (2026-06-09 NVIDIA NIM outage)
+        otherwise costs the full REST timeout on EVERY routing turn. Fixed
+        window because no server signal exists for a hang; deliberately short
+        so a recovered provider rejoins quickly."""
+        if not self._is_timeout_error(exc):
+            self._provider_timeouts.pop(model, None)
+            return
+        n = self._provider_timeouts.get(model, 0) + 1
+        self._provider_timeouts[model] = n
+        if n >= self._TIMEOUT_ARM_COUNT:
+            self._provider_cooldown[model] = (
+                time.monotonic() + self._TIMEOUT_COOLDOWN_S
+            )
+            self._provider_timeouts.pop(model, None)
+            log.info(
+                "provider.cooldown_set", model=model,
+                seconds=self._TIMEOUT_COOLDOWN_S, reason="consecutive_timeouts",
+            )
 
     def _active_providers(
         self, providers: list[tuple[str, str]]
@@ -2294,7 +2363,10 @@ class PoobBrain:
         else:
             raise ValueError(f"Unknown provider: {provider}")
 
-        async with httpx.AsyncClient(timeout=15.0) as http:
+        # Routing calls normally complete in <2s; 6s is hang-detection, not
+        # patience. The old 15s ceiling made a hung provider (NVIDIA outage,
+        # 2026-06-09) cost 15s on every voice turn before failover.
+        async with httpx.AsyncClient(timeout=6.0) as http:
             r = await http.post(url, headers=headers, json=body)
             r.raise_for_status()
             data = r.json()

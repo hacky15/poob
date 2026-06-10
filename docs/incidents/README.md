@@ -16,6 +16,9 @@ Resolved incidents stay `status: resolved`. Open ones stay `status: active`. If 
 
 ### 2026-06
 
+- [[cascade-outage-nvidia-hang-gemini-rpm]] — ~15.5s to first word on every VC turn: Groq daily-capped + Gemini burst-throttled (20 RPM/model) + Scout capped + NVIDIA NIM hung; each turn paid the full 15s REST timeout re-probing the hung rung. Fixed: consecutive-timeout ejection (2 → 120s cooldown), routing timeout 15s→6s, Gemini body/"retry in" parsing, second Gemini model rung. Also surfaced: routing prompt ≈4k tokens/call → only ~50 Groq turns/day (2026-06-09, resolved)
+- [[normal-volume-routed-to-filter]] — "normal volume" hijacked to apply_effect (Gemini even hallucinated super_slowed); bare 'normal' had been added as an effect-clear trigger by the effect-off fix. Fixed: principled volume-vs-effect split in the routing prompt (2026-06-09, resolved)
+- [[groq-daily-cap-routing-storm]] — back-to-back questions took 22-23s and serialized (the "was slavery good" cluster); Groq's 200k-TPD exhausted and the cascade re-probed the capped model every turn with SDK retry-backoff. Fixed: fail-fast client + provider circuit-breaker driven by the 429's own retry-after (2026-06-08, resolved)
 - [[wake-address-hey-dropout]] — operator's "Hey Poob, play X" got no response (his audio was fine); Deepgram dropped/mangled the "hey" lead-in ("A Poob", "Apoob", "Poob") so the hey-required text regex rejected 6 real addresses as spurious. Fixed: second deterministic "poob-opener + command-verb" matcher; spurious-fire rejection kept load-bearing (2026-06-04, resolved)
 - [[voice-4014-reconnect-event-loop-wedge]] — voice WS 4014 force-disconnect → DAVE MLS re-key ran unlocked on the shared event-loop thread → native `davey` FFI wedge froze voice + text + patrol for 8 min; recovered by restart. Root: the serialization lock dropped in the Pycord migration (2026-06-01, active — fix planned)
 

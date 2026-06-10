@@ -136,3 +136,91 @@ def test_active_providers_never_strands_when_all_cooling() -> None:
 
 def test_active_providers_unchanged_when_none_cooling() -> None:
     assert _brain()._active_providers(_PROVIDERS) == _PROVIDERS
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-09 cascade outage additions (see
+# docs/incidents/cascade-outage-nvidia-hang-gemini-rpm.md):
+# - Gemini puts "Please retry in 46.4s" in the 429 response BODY (str(exc)
+#   doesn't contain it) and uses "retry in", not "try again in".
+# - A provider that consistently TIMES OUT (NVIDIA NIM outage) is functionally
+#   down: consecutive timeouts must arm a short cooldown, or every voice turn
+#   pays the full REST timeout re-probing a hung rung.
+# ---------------------------------------------------------------------------
+
+
+def test_gemini_retry_in_message_format_parses() -> None:
+    got = PoobBrain._retry_after_seconds(
+        _FakeExc("RESOURCE_EXHAUSTED ... Please retry in 46.438775173s.")
+    )
+    assert got is not None and abs(got - 46.438775173) < 0.01
+
+
+def test_retry_after_read_from_response_body() -> None:
+    """httpx raise_for_status puts the quota text in resp.text, NOT str(exc)."""
+    exc = _FakeExc("Client error '429 Too Many Requests' for url 'https://x'")
+    exc.response = _FakeResp({})
+    exc.response.text = (
+        '{"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", '
+        '"message": "Quota exceeded ... Please retry in 46.438775173s."}}'
+    )
+    got = PoobBrain._retry_after_seconds(exc)
+    assert got is not None and abs(got - 46.438775173) < 0.01
+
+
+def test_timeout_classification() -> None:
+    import httpx
+
+    assert PoobBrain._is_timeout_error(httpx.ReadTimeout("x")) is True
+    assert PoobBrain._is_timeout_error(httpx.ConnectTimeout("x")) is True
+    assert PoobBrain._is_timeout_error(TimeoutError("timed out")) is True
+    assert PoobBrain._is_timeout_error(_FakeExc(_GROQ_429)) is False
+    assert PoobBrain._is_timeout_error(ValueError("boom")) is False
+
+
+def test_consecutive_timeouts_arm_cooldown() -> None:
+    import httpx
+
+    b = _brain()
+    b._note_model_timeout("m", httpx.ReadTimeout("t1"))
+    assert not b._model_in_cooldown("m")          # one timeout = transient
+    b._note_model_timeout("m", httpx.ReadTimeout("t2"))
+    assert b._model_in_cooldown("m")              # two in a row = hung -> eject
+    left = b._provider_cooldown["m"] - time.monotonic()
+    assert 115 <= left <= 121                     # short fixed window (120s)
+
+
+def test_success_clears_timeout_streak() -> None:
+    import httpx
+
+    b = _brain()
+    b._note_model_timeout("m", httpx.ReadTimeout("t1"))
+    # The cascade loop pops both maps on a successful call.
+    b._provider_cooldown.pop("m", None)
+    b._provider_timeouts.pop("m", None)
+    b._note_model_timeout("m", httpx.ReadTimeout("t2"))
+    assert not b._model_in_cooldown("m")          # streak restarted at 1
+
+
+def test_non_timeout_error_resets_timeout_streak() -> None:
+    import httpx
+
+    b = _brain()
+    b._note_model_timeout("m", httpx.ReadTimeout("t1"))
+    b._note_model_timeout("m", _FakeExc(_GROQ_429))   # responded -> not hung
+    b._note_model_timeout("m", httpx.ReadTimeout("t2"))
+    assert not b._model_in_cooldown("m")          # 429 broke the streak
+
+
+def test_second_gemini_rung_configured() -> None:
+    """A second Gemini MODEL = a separate per-model free-tier RPM bucket;
+    busy-VC bursts past one bucket while Groq's daily cap is spent."""
+    import inspect
+
+    import poob.brain.poob as brain_mod
+
+    b = _brain()
+    assert b.gemini_router_model_alt == "gemini-2.5-flash"
+    assert b.gemini_router_model != b.gemini_router_model_alt
+    src = inspect.getsource(brain_mod)
+    assert 'providers.append(("gemini", self.gemini_router_model_alt))' in src

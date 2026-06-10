@@ -34,11 +34,22 @@ In `PoobBrain` (`src/poob/brain/poob.py`):
 - `_provider_cooldown: dict[model -> monotonic deadline]`. Keyed by **model**,
   not provider — Groq's TPD is per-model, so Scout (`llama-4-scout`) keeps
   routing when `gpt-oss-20b` is capped.
-- `_is_rate_limit_error` — only 429 / rate-limit / quota errors arm the breaker.
-  **Timeouts and other failures do NOT** (those are transient; re-probe is fine).
+- `_is_rate_limit_error` — 429 / rate-limit / quota errors arm the breaker for
+  the server-advised window.
+- **AMENDED 2026-06-09 — consecutive timeouts now ALSO arm it.** The original
+  rule ("timeouts are transient; re-probe is fine") assumed a timeout is noise.
+  The NVIDIA NIM outage ([[cascade-outage-nvidia-hang-gemini-rpm]]) disproved
+  that for the sustained case: a *hung* provider timed out on every probe, and
+  with the other rungs capped, every voice turn paid the full REST timeout
+  (~15s observed). Rule now: **one timeout = transient (no reaction); two
+  consecutive = hung → fixed 120s cooldown** (`_note_model_timeout`). Fixed
+  window because no server signal exists for a hang; deliberately short so a
+  recovered provider rejoins fast. A 429 or a success resets the streak.
 - `_retry_after_seconds` — prefers the `Retry-After` header, falls back to the
-  `"try again in 2m5.3s"` message regex. Clamped to [5s, 30min]; a rate-limit
-  with no advised time uses a 60s default.
+  `"(try again|retry) in 2m5.3s"` message regex, searched in **both** `str(exc)`
+  and `exc.response.text` (Gemini's 429 puts the advised delay in the JSON body,
+  which `raise_for_status` doesn't surface in the exception message). Clamped to
+  [5s, 30min]; a rate-limit with no advised time uses a 60s default.
 - `_active_providers(providers)` — drops cooled models before the cascade loop;
   **never strands** (if every model is cooling, returns the full list).
 - The loop **clears** a model's cooldown on its first success (half-open →
