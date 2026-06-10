@@ -1,6 +1,6 @@
 ---
 type: plan
-status: proposed
+status: resolved
 date: 2026-06-10
 tags: [brain, llm, routing, latency, prompt, voice]
 related: [[cascade-outage-nvidia-hang-gemini-rpm]] [[free-llm-tier-audit-2026-06]] [[gemini-tool-router-rung]] [[groq-daily-cap-routing-storm]] [[text-casual-fallback-bypass-deal-agent]]
@@ -53,3 +53,14 @@ Historian-flagged **already-untested routing rules** (worth tests regardless of 
 1. **Residual crude-routing risk** (the only cut not provably zero): dropping be-crude/anti-refusal text from routing *could* let a refusal-prone rung decline to emit a tool on an edgy-but-tool-warranting request. Vault evidence: RLHF refusal triggers on topic detection in weights, not instruction count ([[text-casual-fallback-bypass-deal-agent]]); a no-tool result is structurally caught by casual fallback. **Benchmark #7 is the gate** — if it regresses, revert the crude-clause cut.
 2. **String-contract coupling**: `MUSIC IS CURRENTLY PLAYING` (poob.py:835) is hard-scanned by the `control_signals` gate (2049) + gemini-router tests. Append `_music_context_block` unchanged; do NOT touch `_groq_with_tools`. Tidying the marker silently kills the gate → reproduces [[cascade-outage-nvidia-hang-gemini-rpm]].
 3. **Multi-caller hazard**: `_build_system_prompt(with_tools=True)` is also the default for the wrap generators (1875/1922). Use a NEW builder; do NOT gate the existing function, or the wraps lose persona + markdown ban.
+
+## Result — shipped 2026-06-10 (commits 4878100 + 4b79169, live GIT_SHA 4b79169)
+
+Implemented as a separate `_build_routing_prompt(with_music)` + shared `_DEAL_ROUTING_RULE` / `_MUSIC_ROUTING_RULES` constants; `_build_system_prompt` left untouched for the casual + wrap paths (byte-identical output, guarded by test). `_build_messages` now emits the slim prompt; `with_music` gated on the music handler. Deviation from the audit draft: the routing rules are carried **verbatim** (no rewording) so the routing instructions are byte-identical between full and slim — a stronger losslessness guarantee than the draft's reworded version, and DRY.
+
+- **Measured token saving:** routing system prompt 1,338 → 720 tokens (**618 saved/call**); tool schemas (1,845 tok) kept. ~19% of the prompt+schemas payload.
+- **Tests:** Commit 1 pinned the previously-untested rules (`_music_safety_net`, `_scrub_music_query`, empty-query gate, token floor, deal-side tool-worthy gate, deal-session/music-context injection) + fixed a stale `_scrub_music_query` docstring. Commit 2 added 10 slim-prompt tests. Full unit suite green (1,573 passed, the 2 known py3.13 event-loop wall-clock flakes excluded).
+- **Live benchmark gate (Gemini 3.1-flash-lite, full vs slim head-to-head):** 6/7 utterances routed identically; latency parity; 618 tok saved confirmed live. **The residual crude-routing risk did NOT materialize** — "play some fuckin nightcore" routed to `music_assistant` in both (no route→no-tool refusal). The one difference: full → `apply_effect:nightcore`, slim → `play:nightcore`. Slim is **more** correct — it follows our own "whatever follows play IS the song" rule for an idle "play some X"; the full prompt's persona bloat was misapplying the effect rule. No incident/test pins effect-routing for "play some nightcore", so this regresses nothing.
+- **Harness gotcha:** Gemini free tier is ~20 RPM per model — a burst of 28 calls 429s the tail. `bench_routing.py` grew a `--delay` flag; use `--delay 4` on Gemini to stay under the limit.
+
+Outcome vs the original framing: this is the **accuracy + correctness-hygiene** win it was scoped to be (focused classifier, real test gaps closed), not the daily-cap-cliff fix. The cliff remains a separate problem (Gemini-primary, or trimming the 1,845-tok tool-schema payload).
