@@ -129,7 +129,12 @@ _MUSIC_ROUTING_RULES = (
     "AUDIO EFFECTS ROUTING:\n"
     "- 'nightcore it' / 'make it nightcore' → action=apply_effect, effect='nightcore'\n"
     "- 'slow it down' / 'slowed' → action=apply_effect, effect='slowed'\n"
-    "- 'add reverb' → action=apply_effect, effect='slowed_reverb'\n"
+    "- 'add reverb' / 'reverb' → action=apply_effect, effect='slowed_reverb'\n"
+    "- 'reverb only' / 'reverb without slowing' → action=apply_effect, effect='reverb'\n"
+    "- 'darth vader' / 'vader voice' / 'make it deep' → action=apply_effect, effect='darth_vader'\n"
+    "- 'ultra bass' / 'max bass' / 'bass overload' → action=apply_effect, effect='ultrabass'\n"
+    "- 'overload it' / 'earrape' / 'distort it' → action=apply_effect, effect='overload'\n"
+    "- 'what effects / filters do you have' / 'list effects' → action=list_effects (no effect arg)\n"
     "- 'remove the effect' / 'turn off the filter' / 'turn off the "
     "nightcore' / 'clear effect' / 'no effects' / 'back to normal speed' "
     "→ action=apply_effect, effect='none' (clears ALL effects). Do NOT "
@@ -326,7 +331,7 @@ MUSIC_TOOL = {
                         "volume", "volume_up", "volume_down",
                         "shuffle", "loop", "now_playing", "queue",
                         "move", "remove", "clear",
-                        "apply_effect",
+                        "apply_effect", "list_effects",
                         "seek",
                         "autoplay",
                         "save_playlist", "load_playlist",
@@ -351,6 +356,9 @@ MUSIC_TOOL = {
                         "('max', 'mute', 'half'). 'volume_up'/'volume_down' "
                         "for relative bumps. 'apply_effect' applies a named "
                         "audio filter; pass 'effect' with the preset name. "
+                        "'list_effects' tells the user which audio effects "
+                        "exist (no args) — use it for 'what effects / filters "
+                        "do you have'. "
                         "'save_playlist' / 'load_playlist' / 'delete_playlist' "
                         "manage per-guild named playlists — pass 'name' with "
                         "the playlist title (e.g. 'chill', 'gym'). "
@@ -421,12 +429,20 @@ MUSIC_TOOL = {
                         "'none' (clear active effect), 'nightcore' (sped up + "
                         "pitch up), 'slowed' (slowed-genre standard), "
                         "'slowed_reverb' (slowed + reverb), 'super_slowed' "
-                        "(even slower), 'bassboost', '8d' (rotating pan), "
-                        "'vaporwave', 'karaoke' (vocal-cancel), 'chipmunk', "
-                        "'deep'. Map user phrasings: 'nightcore it' → "
-                        "'nightcore', 'slow it down' → 'slowed', 'add reverb' "
-                        "→ 'slowed_reverb' (the chain users mean by 'reverb'), "
-                        "'turn off the effect' → 'none'."
+                        "(even slower), 'bassboost' (gentle), 'ultrabass' "
+                        "(heavy/overload bass), '8d' (rotating pan), "
+                        "'vaporwave', 'chipmunk' (pitch way up), 'darth_vader' "
+                        "(deep voice, normal speed), 'overload' "
+                        "(earrape/distortion), 'reverb' (reverb only, no "
+                        "slowdown), 'tremolo', 'vibrato'. Map user phrasings: "
+                        "'nightcore it' → 'nightcore', 'slow it down' → "
+                        "'slowed', 'add reverb' / 'reverb' → 'slowed_reverb' "
+                        "(what users usually mean), 'reverb only' / 'reverb "
+                        "without slowing' → 'reverb', 'darth vader' / 'vader "
+                        "voice' → 'darth_vader', 'ultra bass' / 'max bass' / "
+                        "'bass overload' → 'ultrabass', 'overload it' / "
+                        "'earrape' → 'overload', 'turn off the effect' → "
+                        "'none'."
                     ),
                 },
                 "time": {

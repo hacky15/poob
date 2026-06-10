@@ -276,6 +276,39 @@ async def test_apply_effect_no_effect_arg_returns_help() -> None:
 
 
 # ---------------------------------------------------------------------------
+# list_effects ("what effects do you have")
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_list_effects_speaks_the_effect_roster() -> None:
+    """'what effects do you have' must be ANSWERED aloud — NOT a silent
+    control action — and the list is sourced from the registry so Poob
+    never hallucinates effects he doesn't have."""
+    from poob.music.effects import AVAILABLE_EFFECTS
+
+    cog, _ = _make_cog_and_player()
+    resp = await cog.handle_music_request(
+        "what effects do you have", user_id=1, guild_id=10,
+        tool_args={"action": "list_effects"},
+    )
+
+    assert not resp.startswith("[SILENT]")     # spoken answer, not silent
+    assert "nightcore" in resp.lower()
+    assert "darth vader" in resp.lower()       # underscore rendered as space
+    assert "ultrabass" in resp.lower()
+    # count matches the registry minus the 'none' sentinel — no drift
+    expected = len([e for e in AVAILABLE_EFFECTS if e != "none"])
+    assert str(expected) in resp
+
+
+def test_music_tool_schema_advertises_list_effects() -> None:
+    from poob.brain.poob import MUSIC_TOOL
+
+    enum = MUSIC_TOOL["function"]["parameters"]["properties"]["action"]["enum"]
+    assert "list_effects" in enum
+
+
+# ---------------------------------------------------------------------------
 # queue_many
 # ---------------------------------------------------------------------------
 

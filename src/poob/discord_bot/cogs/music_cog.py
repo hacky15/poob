@@ -435,9 +435,21 @@ class MusicCog(commands.Cog, name="Music"):
                 else "[SILENT]Autoplay disabled."
             )
 
+        if action == "list_effects":
+            from poob.music.effects import AVAILABLE_EFFECTS
+            names = [e for e in AVAILABLE_EFFECTS if e != "none"]
+            pretty = ", ".join(n.replace("_", " ") for n in names)
+            # Deliberately NOT [SILENT]: the user asked a question, so Poob
+            # speaks the list rather than silently performing a control action.
+            return (
+                f"I've got {len(names)} effects you can throw on: {pretty}. "
+                "Say one to apply it, or say 'none' to clear it."
+            )
+
         if action == "apply_effect":
             if not effect:
-                return "[SILENT]Which effect? (none, nightcore, slowed, slowed_reverb, bassboost, 8d, vaporwave, karaoke, chipmunk, deep, super_slowed)"
+                from poob.music.effects import AVAILABLE_EFFECTS
+                return "[SILENT]Which effect? (" + ", ".join(AVAILABLE_EFFECTS) + ")"
             try:
                 from poob.music.effects import EffectNotFoundError
                 applied = await player.set_effect(effect)

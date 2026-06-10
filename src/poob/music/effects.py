@@ -9,8 +9,9 @@ sources.
 
 The recipes were validated against:
 
-- FFmpeg's own filter docs (asetrate, aresample, aecho, apulsator, bass,
-  dynaudnorm, pan).
+- FFmpeg's own filter docs (asetrate, aresample, atempo, aecho, apulsator,
+  bass, asubboost, dynaudnorm, alimiter, acrusher, tremolo, vibrato) and
+  re-confirmed by running each chain through ffmpeg on a sine input.
 - The "slowed + reverb" TikTok-genre convention (asetrate 0.85x with a
   triple-tap aecho).
 - The 8D-audio one-liner that became the community standard
@@ -60,13 +61,35 @@ EFFECT_PRESETS: dict[str, str] = {
     "8d": "apulsator=hz=0.125",
     # Slower than slowed (0.8x) plus a long-tail reverb for the vaporwave wash.
     "vaporwave": "asetrate=44100*0.8,aresample=44100,aecho=0.8:0.9:1000:0.3",
-    # Cheap vocal-cancellation via L=R subtraction. Quality is mid;
-    # name it "karaoke" rather than "vocal remove" to set expectations.
-    "karaoke": "pan=stereo|c0=c0-c1|c1=c1-c0",
     # 1.5x asetrate is the chipmunk limit; above that loses intelligibility.
     "chipmunk": "asetrate=44100*1.5,aresample=44100",
-    # Inverse of chipmunk — pitch + tempo down 25%.
-    "deep": "asetrate=44100*0.75,aresample=44100",
+    # Darth Vader: pitch DOWN ~6 semitones with tempo PRESERVED. asetrate
+    # drops pitch+tempo to 0.72x, then atempo=1.389 (≈1/0.72) restores the
+    # tempo so the beat stays normal while the voice goes deep; a short
+    # metallic echo gives the helmet timbre. Supersedes the old "deep",
+    # which was a literal duplicate of super_slowed (slowed everything, no
+    # tempo restore) and never sounded like Vader.
+    "darth_vader": (
+        "asetrate=44100*0.72,aresample=44100,atempo=1.389,"
+        "aecho=0.6:0.35:18:0.35"
+    ),
+    # Aggressive low-shelf (+15 dB at 110 Hz) + sub-bass rumble, clamped by
+    # a limiter so it slams without clipping consumer DACs. bassboost is the
+    # gentle version (+8 dB); this is the wall-shaker / "overload" bass.
+    "ultrabass": "bass=g=15:f=110,asubboost,alimiter=limit=0.9",
+    # Bitcrushed overdrive — the chaos / "earrape" preset. acrusher at 6
+    # bits with a limiter so it's nasty but not speaker-destroying.
+    "overload": (
+        "acrusher=level_in=1:level_out=1:bits=6:mode=log:aa=1,"
+        "alimiter=limit=0.95"
+    ),
+    # Hall reverb WITHOUT slowing — slowed_reverb couples reverb to a 0.85x
+    # slowdown; this applies reverb to a full-speed track.
+    "reverb": "aecho=0.8:0.9:500|750|1000:0.3|0.25|0.2",
+    # Tremolo: amplitude (volume) wobble at 5 Hz.
+    "tremolo": "tremolo=f=5:d=0.7",
+    # Vibrato: pitch wobble at 6 Hz.
+    "vibrato": "vibrato=f=6:d=0.5",
 }
 
 

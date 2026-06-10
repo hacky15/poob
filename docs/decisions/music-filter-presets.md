@@ -31,9 +31,15 @@ Module-level ``EFFECT_PRESETS: dict[str, str]`` mapping preset name → FFmpeg `
 | ``bassboost`` | ``bass=g=8,dynaudnorm=f=200`` |
 | ``8d`` | ``apulsator=hz=0.125`` |
 | ``vaporwave`` | ``asetrate=44100*0.8,aresample=44100,aecho=0.8:0.9:1000:0.3`` |
-| ``karaoke`` | ``pan=stereo\|c0=c0-c1\|c1=c1-c0`` |
 | ``chipmunk`` | ``asetrate=44100*1.5,aresample=44100`` |
-| ``deep`` | ``asetrate=44100*0.75,aresample=44100`` |
+| ``darth_vader`` | ``asetrate=44100*0.72,aresample=44100,atempo=1.389,aecho=0.6:0.35:18:0.35`` |
+| ``ultrabass`` | ``bass=g=15:f=110,asubboost,alimiter=limit=0.9`` |
+| ``overload`` | ``acrusher=level_in=1:level_out=1:bits=6:mode=log:aa=1,alimiter=limit=0.95`` |
+| ``reverb`` | ``aecho=0.8:0.9:500\|750\|1000:0.3\|0.25\|0.2`` |
+| ``tremolo`` | ``tremolo=f=5:d=0.7`` |
+| ``vibrato`` | ``vibrato=f=6:d=0.5`` |
+
+`karaoke` and `deep` were retired 2026-06-10 — see the Amendment below.
 
 The pipe character inside ``aecho`` delays and ``pan`` channel maps is FFmpeg syntax, not shell — safe because ``GuildMusicPlayer._make_audio_source`` passes args as a list to ``discord.FFmpegPCMAudio`` (which uses ``subprocess`` with no shell expansion).
 
@@ -95,3 +101,13 @@ Handler response:
 ## Rollback
 
 Remove the ``apply_effect`` branch from the handler and the action from the enum. ``effects.py`` and the player's ``set_effect`` / ``_active_effect`` field can stay; they're inert without a tool to invoke them.
+
+## Amendment — 2026-06-10: roster curation + `list_effects`
+
+Operator review ("only the best effects, plus a real Darth Vader and ultrabass"):
+
+- **Cut ``deep``** — it was a byte-identical duplicate of ``super_slowed`` and never sounded like Darth Vader (``asetrate`` alone drops pitch *and* tempo). **Cut ``karaoke``** — mid-quality center-channel cancellation (also guts bass/drums), low user value per [[music-bot-feature-roadmap]].
+- **Added (operator requirements):** ``darth_vader`` — pitch down with tempo **preserved** via ``asetrate=0.72 → atempo=1.389`` (≈1/0.72) plus a short metallic echo for the helmet timbre; ``ultrabass`` — ``bass=g=15`` + ``asubboost`` clamped by ``alimiter`` so it slams without clipping (``bassboost`` stays as the gentle +8 dB version).
+- **Added (operator picks):** ``overload`` (bitcrushed overdrive, limiter-clamped), ``reverb`` (hall reverb *without* the slowdown ``slowed_reverb`` couples in), ``tremolo``, ``vibrato``. (``telephone`` was offered and declined.)
+- **New ``list_effects`` action** on ``music_assistant`` — answers "what effects do you have" by reciting ``AVAILABLE_EFFECTS`` from the registry (no hallucination). Returns a **non-``[SILENT]``** string so Poob *speaks* it (control confirmations stay silent). Routing hints for the new effects + the list query were added to ``_MUSIC_ROUTING_RULES``.
+- **Validation:** every chain (kept + new) was re-run through ffmpeg on a sine input, and the **prod container's ffmpeg (7.1.4)** was confirmed to include ``atempo``, ``asubboost``, ``alimiter``, ``acrusher``, ``tremolo``, ``vibrato``. The ``rubberband`` pitch-shift alternative this doc deferred was avoided — the universal ``atempo`` trick sidesteps the build-flag risk.

@@ -48,10 +48,19 @@ def test_required_preset_names_are_present() -> None:
     regression guard — removing a preset is a breaking UX change."""
     required = {
         "nightcore", "slowed", "slowed_reverb", "super_slowed",
-        "bassboost", "8d", "vaporwave", "karaoke", "chipmunk", "deep",
+        "bassboost", "8d", "vaporwave", "chipmunk",
+        "darth_vader", "ultrabass", "overload", "reverb", "tremolo", "vibrato",
     }
     missing = required - set(EFFECT_PRESETS.keys())
     assert not missing, f"Missing required effect presets: {missing}"
+
+
+def test_cut_presets_are_gone() -> None:
+    """``deep`` was a literal duplicate of ``super_slowed`` (and not a real
+    Darth Vader effect); ``karaoke`` was mid-quality center-channel
+    cancellation. Both retired — see docs/decisions/music-filter-presets.md."""
+    assert "deep" not in EFFECT_PRESETS
+    assert "karaoke" not in EFFECT_PRESETS
 
 
 # ---------------------------------------------------------------------------
@@ -94,19 +103,53 @@ def test_8d_uses_apulsator_at_0125_hz() -> None:
     assert "apulsator=hz=0.125" in chain
 
 
-def test_karaoke_uses_pan_to_subtract_center_channel() -> None:
-    chain = resolve_effect_chain("karaoke")
-    assert chain is not None
-    assert "pan=" in chain
-    assert "c0-c1" in chain  # the L=R subtraction
-
-
 def test_super_slowed_uses_075_not_below_065() -> None:
     """Below 0.65 the audio becomes unlistenable per the research;
     0.75 is the documented floor for the user-facing 'super slowed' preset."""
     chain = resolve_effect_chain("super_slowed")
     assert chain is not None
     assert "asetrate=44100*0.75" in chain
+
+
+def test_darth_vader_pitches_down_but_preserves_tempo() -> None:
+    """The fix for the old 'deep' dup: asetrate DOWN drops pitch+tempo, then
+    atempo restores tempo — so it's Vader (deep voice at normal speed), not
+    just a slowdown. A short echo gives the helmet timbre."""
+    chain = resolve_effect_chain("darth_vader")
+    assert chain is not None
+    assert "asetrate=44100*0.72" in chain
+    assert "atempo=" in chain          # tempo restored — the key difference from 'deep'
+    assert "aecho=" in chain
+
+
+def test_ultrabass_is_aggressive_but_clip_safe() -> None:
+    """Heavier than bassboost (g=15 vs g=8) with a limiter so it slams
+    without clipping consumer DACs."""
+    chain = resolve_effect_chain("ultrabass")
+    assert chain is not None
+    assert "bass=g=15" in chain
+    assert "alimiter" in chain
+
+
+def test_overload_is_distortion_with_a_limiter() -> None:
+    """Bitcrushed overdrive (the chaos preset), limiter-clamped."""
+    chain = resolve_effect_chain("overload")
+    assert chain is not None
+    assert "acrusher" in chain
+    assert "alimiter" in chain
+
+
+def test_reverb_is_standalone_without_slowing() -> None:
+    """Distinct from slowed_reverb — reverb WITHOUT the asetrate slowdown."""
+    chain = resolve_effect_chain("reverb")
+    assert chain is not None
+    assert "aecho=" in chain
+    assert "asetrate" not in chain
+
+
+def test_tremolo_and_vibrato_present() -> None:
+    assert "tremolo=" in (resolve_effect_chain("tremolo") or "")
+    assert "vibrato=" in (resolve_effect_chain("vibrato") or "")
 
 
 def test_chains_have_no_unescaped_pipe_outside_aecho_or_pan() -> None:
