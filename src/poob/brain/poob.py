@@ -740,9 +740,13 @@ class PoobBrain:
     def _scrub_music_query(cls, query: str) -> str:
         """Strip leading user-verbs from a music search query.
 
+        Strips only the leading intent verb and its prep ("play", "queue
+        up", "put on"); words after that — including a stray "some" — are
+        left for ytdl.
+
         Examples:
           'play red hot chili peppers' -> 'red hot chili peppers'
-          'queue up some jazz'         -> 'jazz'
+          'queue up some jazz'         -> 'some jazz'
           "Can't Stop"                 -> "Can't Stop" (unchanged)
 
         The query field of music_assistant tool_args is for ytdl
