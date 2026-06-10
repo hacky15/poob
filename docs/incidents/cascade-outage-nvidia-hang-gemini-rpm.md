@@ -68,12 +68,49 @@ as the next structural fix (routing-specific slim prompt), not changed tonight.
   reason=consecutive_timeouts` if a provider hangs, no llm_ms ≥15s pinned at the
   old ceiling, and `provider=gemini` routes split across both models.
 
+## Second wave (same night, ~00:25 UTC): effect commands dropped to casual chat
+
+After the fixes above deployed, the operator reported music-alteration commands
+getting "regular responses". Logs: every effect/control command for ~50 min
+("Slow." ×2, "Skip.", "Slow and reverb" ×2, "slow it down and reverb", "Ultra
+slow") produced **no tool call** — Poob's casual reply even *fabricated*
+compliance ("alright, slowing it down, reverb"). Play commands survived only
+via the `_music_safety_net` (which only catches play-patterns).
+
+Root cause, benchmarked live with the real music-playing context:
+**Gemini 2.5/3.x are thinking models by default, and on tool-routing calls the
+thinking consumes the output** — `gemini-2.5-flash` (the alt rung added earlier
+that night, *unbenchmarked* — a process failure) returned NO-tool + empty text
+for "slow it down and reverb" and "skip" (2/4). With `reasoning_effort: "none"`
+it routed **4/4 correctly at ~1s**. A second hole compounded it: the cascade's
+`looks_tool_worthy` keyword list had **zero music words**, so the first rung's
+"no tool" ended the cascade instead of letting the next rung try.
+
+Fixes:
+- Gemini routing body now sends **`reasoning_effort: "none"`** — routing must
+  never think. (This also retroactively explains the `3.1-flash-lite` "42%
+  spikes >2s" verdict in [[free-llm-tier-audit-2026-06]] — it was thinking, not
+  instability. That model deserves a clean re-benchmark with thinking off.)
+- **Music-aware tool-worthy gate**: while the system prompt carries
+  `MUSIC IS CURRENTLY PLAYING`, control-ish words (play/skip/slow/reverb/volume/
+  effect/…) mark the turn tool-worthy, so a no-tool answer from a weak rung
+  forwards to the next rung instead of dropping the command into casual chat.
+  Gated on playback so casual chat without music never pays extra rungs.
+
+Lesson recorded: the alt-Gemini rung shipped without a tool-calling benchmark —
+the exact discipline ("benchmark before any routing-model change") this same
+vault already documents. The benchmark that *was* run earlier that day omitted
+the music-playing context block, which is precisely where the failure lived:
+**benchmark with the production prompt shape, not a simplified one.**
+
 ## Follow-ups
 
 - **Routing prompt is ~4k tokens/call** → ~50 turns/day on Groq. A slim
   routing-only prompt is the structural fix for the nightly cap (high leverage,
   needs careful regression on routing quality — separate change).
-- Re-benchmark `gemini-3.1-flash-lite-preview` **with thinking disabled**
-  (Gemini 3.x defaults to reasoning; the earlier "42% spikes >2s" verdict in
-  [[free-llm-tier-audit-2026-06]] likely measured thinking, not instability).
-  Do it when quota is idle — not during a cap window.
+- Re-benchmark `gemini-3.1-flash-lite-preview` **with `reasoning_effort: "none"`**
+  — the "42% spikes" were almost certainly thinking. If it benches clean it's a
+  candidate upgrade for the lite rung. Do it when quota is idle.
+- Groq's TPD window did **not** reset at 00:00 UTC (`Used 198,906` at 00:25 with
+  "retry in 15m57s") — it behaves as a **rolling window**, not midnight-anchored.
+  The breaker handles it regardless; don't plan around a fixed reset time.

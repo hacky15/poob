@@ -2035,6 +2035,27 @@ class PoobBrain:
         )
         looks_tool_worthy = any(sig in user_msg for sig in tool_signals)
 
+        # While music is PLAYING, control-ish words make a no-tool answer
+        # almost certainly wrong — a weak rung saying "no tool" must not end
+        # the cascade (2026-06-09: thinking-mode gemini-2.5-flash returned
+        # no-tool for "slow it down"/"skip" and Poob just chatted while the
+        # command was dropped). Gate on the music context block so casual
+        # chat without playback never pays the extra rungs.
+        if not looks_tool_worthy:
+            music_playing = any(
+                m.get("role") == "system"
+                and "MUSIC IS CURRENTLY PLAYING" in (m.get("content") or "")
+                for m in messages
+            )
+            if music_playing:
+                control_signals = (
+                    "play", "skip", "pause", "resume", "stop", "volume",
+                    "louder", "quieter", "slow", "speed", "fast", "reverb",
+                    "nightcore", "bass", "effect", "filter", "shuffle",
+                    "loop", "repeat", "mute", "next song", "turn it",
+                )
+                looks_tool_worthy = any(s in user_msg for s in control_signals)
+
         last_text = ""
         last_tool: str | None = None
         last_args: dict | None = None
@@ -2353,12 +2374,20 @@ class PoobBrain:
             # Gemini's OpenAI-compatibility endpoint — same request/response
             # shape as the providers above, so it reuses the shared post+parse
             # below. temp=0 for deterministic routing.
+            #
+            # reasoning_effort="none": Gemini 2.5/3.x are thinking models by
+            # default, and on tool-routing calls the thinking consumes the
+            # output — gemini-2.5-flash returned NO tool + empty text for
+            # clear control commands ("slow it down", "skip") until thinking
+            # was disabled (then 4/4 correct, ~1s). Routing must never think.
+            # See incidents/cascade-outage-nvidia-hang-gemini-rpm (follow-up).
             url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
             headers = {"Authorization": f"Bearer {self.google_api_key}"}
             body = {
                 "model": model, "messages": messages,
                 "tools": tools, "tool_choice": "auto",
                 "max_tokens": max_tokens, "temperature": 0.0,
+                "reasoning_effort": "none",
             }
         else:
             raise ValueError(f"Unknown provider: {provider}")
