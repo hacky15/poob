@@ -220,7 +220,10 @@ def test_second_gemini_rung_configured() -> None:
     import poob.brain.poob as brain_mod
 
     b = _brain()
-    assert b.gemini_router_model_alt == "gemini-2.5-flash"
+    # Primary = 3.1-flash-lite (fastest free, ~587ms w/ thinking off); alt =
+    # 2.5-flash-lite (separate per-model RPM bucket + GA fallback).
+    assert b.gemini_router_model == "gemini-3.1-flash-lite-preview"
+    assert b.gemini_router_model_alt == "gemini-2.5-flash-lite"
     assert b.gemini_router_model != b.gemini_router_model_alt
     src = inspect.getsource(brain_mod)
     assert 'providers.append(("gemini", self.gemini_router_model_alt))' in src

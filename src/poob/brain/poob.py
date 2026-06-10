@@ -542,12 +542,14 @@ class PoobBrain:
     # via its OpenAI-compatible endpoint (reuses the OpenAI-compat code path).
     # See docs/decisions/gemini-tool-router-rung.md.
     google_api_key: str = ""
-    gemini_router_model: str = "gemini-2.5-flash-lite"
-    # Second Gemini rung on a DIFFERENT model: Gemini free-tier burst limits
-    # are per-model (~20 req/min each), so a second model doubles burst
-    # capacity at the same latency when a busy VC exceeds one bucket.
-    # gemini-2.5-flash is on Google's confirmed free list (2026-06).
-    gemini_router_model_alt: str = "gemini-2.5-flash"
+    # Primary Gemini router rung (wired from config.agent_google_model).
+    # 3.1-flash-lite preview: ~587ms / 0% spikes with reasoning_effort=none.
+    gemini_router_model: str = "gemini-3.1-flash-lite-preview"
+    # Second Gemini rung on a DIFFERENT model = separate per-model RPM bucket
+    # (~20 req/min each), so a second model doubles burst capacity when a busy
+    # VC exceeds one bucket. 2.5-flash-lite is GA + on Google's free list, and
+    # is also the GA fallback if the 3.1 preview above is ever pulled.
+    gemini_router_model_alt: str = "gemini-2.5-flash-lite"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3:8b"
     max_history: int = 15

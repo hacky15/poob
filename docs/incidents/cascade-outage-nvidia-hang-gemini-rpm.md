@@ -108,9 +108,14 @@ the music-playing context block, which is precisely where the failure lived:
 - **Routing prompt is ~4k tokens/call** → ~50 turns/day on Groq. A slim
   routing-only prompt is the structural fix for the nightly cap (high leverage,
   needs careful regression on routing quality — separate change).
-- Re-benchmark `gemini-3.1-flash-lite-preview` **with `reasoning_effort: "none"`**
-  — the "42% spikes" were almost certainly thinking. If it benches clean it's a
-  candidate upgrade for the lite rung. Do it when quota is idle.
+- ✅ **DONE (2026-06-09 night):** Re-benchmarked `gemini-3.1-flash-lite-preview`
+  with `reasoning_effort: "none"` — **~587ms median, 0/6 >2s**, routes 4/4. The
+  "42% spikes" were thinking. Promoted to the **primary** Gemini router rung;
+  `2.5-flash-lite` moved to the alt rung. See [[free-llm-tier-audit-2026-06]].
+- ✅ **DONE (2026-06-09 night):** Scraper VLM was sharing the voice router's
+  `google_api_key` (`vlm_cascade.py` 3 Gemini rungs) → high-volume image eval ate
+  voice's per-model RPM budget. Added `config.vlm_google_api_key` (VLM-only key,
+  falls back to `google_api_key`); set `VLM_GOOGLE_API_KEY` in `.env` to isolate.
 - Groq's TPD window did **not** reset at 00:00 UTC (`Used 198,906` at 00:25 with
   "retry in 15m57s") — it behaves as a **rolling window**, not midnight-anchored.
   The breaker handles it regardless; don't plan around a fixed reset time.

@@ -65,7 +65,8 @@ included — i.e. true request latency, not TTFT):
 | Groq `gpt-oss-20b` | **~485ms** (407–534) | fastest free router; the practical floor |
 | Groq `llama-3.1-8b-instant` | ~720ms (665–786) | SLOWER than 20b + routes worse — smaller ≠ faster here |
 | Gemini `2.5-flash-lite` | ~714ms | tight, consistent |
-| Gemini `3.1-flash-lite-preview` | ~1177ms, **42% of calls >2s** (max 10.7s) | **DISQUALIFIED** — preview is latency-unstable |
+| Gemini `3.1-flash-lite-preview` (thinking ON) | ~1177ms, 42% >2s (max 10.7s) | the spikes were THINKING tokens — see re-benchmark ↓ |
+| Gemini `3.1-flash-lite-preview` (`reasoning_effort:none`) | **~587ms, 0% >2s** | **WINNER** — beats 2.5-flash-lite (714ms), routes 4/4 |
 | any provider, 429 reject | ~140ms | fast-fail confirmed |
 
 **~200ms average is not achievable on a free cloud tier from a self-hosted box.**
@@ -76,16 +77,31 @@ the CPU-only homelab ([[homelab-cpu-only]]). So: we are **already on the fastest
 free router that routes correctly** (Groq `gpt-oss-20b`); the only lever is
 keeping Groq *available* (the cap is what forces the slower ~714ms Gemini rung).
 
-`3.1-flash-lite-preview` routes *better* on quality (correctly treated "who sings
-this" as casual where `2.5-flash-lite` hallucinated a play) but its 42% >2s spike
-rate kills it for voice. Revisit when a STABLE (non-preview) 3.x flash-lite ships.
+> **UPDATE 2026-06-09 (night) — disqualification REVERSED.** The "42% >2s spikes"
+> were **thinking tokens**, not preview instability. Gemini 2.5/3.x reason by
+> default; on a tool-routing call the thinking burns the output budget → slow,
+> sometimes no-tool at all. Re-benchmarked with **`reasoning_effort: "none"`** on
+> the real music-playing prompt: **median ~587ms, 0/6 calls >2s**, routes 4/4
+> ("slow it down and reverb" → `apply_effect slowed_reverb`), and it's *smarter*
+> on questions than 2.5-flash-lite. It is now the **primary Gemini router rung**
+> (`config.agent_google_model`); 2.5-flash-lite drops to the alt rung (separate
+> per-model RPM bucket + GA fallback if the preview is pulled). Note:
+> `gemini-3.5-flash-lite` does **not exist** (HTTP 404) — 3.1-flash-lite-preview
+> is the current free `-lite`. Lesson held: benchmark with the PRODUCTION prompt
+> shape — the original run omitted the music context AND left thinking on.
+
+The original (now-superseded) reading: `3.1-flash-lite-preview` routes better on
+quality (correctly treated "who sings this" as casual where `2.5-flash-lite`
+hallucinated a play) but appeared to spike 42% >2s — which turned out to be
+thinking, fixed by `reasoning_effort: "none"`.
 
 ## Per-role verdict
 
 | Role | Now | Verdict | Why (cited) |
 |---|---|---|---|
 | Routing primary | Groq `gpt-oss-20b` | **KEEP** | fast, free, good tool-calling; cap handled by [[provider-circuit-breaker]] |
-| Routing fallback | Gemini `2.5-flash-lite` | **SWITCH → Gemini 3.x flash-LITE** (`gemini-3.1-flash-lite-preview`, already used on our VLM path) | stays in the FREE `-lite` class, newer gen. NOT full 3.5 Flash — that's the #1 tool-caller but the `-lite` tier is what's free; full Flash is likely paid / tiny launch quota. ⚠️ confirm 3.1-flash-lite free RPD covers routing volume |
+| Routing fallback (primary Gemini) | **Gemini `3.1-flash-lite-preview`** + `reasoning_effort:none` | **DONE (2026-06-09)** | ~587ms / 0 spikes re-benchmarked — faster than 2.5-flash-lite, routes 4/4. Free `-lite` tier |
+| Routing fallback (alt Gemini) | Gemini `2.5-flash-lite` | **KEEP as alt rung** | separate per-model RPM bucket (doubles burst) + GA fallback if the 3.1 preview is pulled |
 | Cap-buster rung | — | **SKIP Cerebras** (benchmarked 2026-06-09) | routes correctly but **~1.2s total** (slower than Gemini-lite's 714ms) + **5 RPM confirmed** (429'd under bursts). And unneeded: Groq's cap is token/day; the fallback Gemini-lite is REQUEST-capped (~1,500 RPD ≫ our dozens of routes/day), so Gemini already covers the whole post-cap day, faster. Cerebras's 1M-token budget solves a problem we don't have. |
 | Casual voice | Groq `llama-3.1-8b-instant` | **KEEP** | no clearly-better free fast streamer surfaced |
 | Deal sub-agent | Groq `gpt-oss-120b` | KEEP model; **consider Cerebras host** | same model on Cerebras = 1M/day, dodges Groq cap |
@@ -94,19 +110,26 @@ rate kills it for voice. Revisit when a STABLE (non-preview) 3.x flash-lite ship
 
 ## Highest-impact change
 
-**Post-benchmark conclusion (2026-06-09): the routing cascade is already at its
-free-tier optimum — make NO routing changes.** Measured facts:
+**Post-benchmark conclusion (2026-06-09, amended that night):**
 - Groq `gpt-oss-20b` ~485ms = fastest free; KEEP as primary.
-- The Groq cap is token/day; the existing Gemini-lite fallback is request-capped
-  (~1,500 RPD ≫ our volume), so it already covers the entire post-cap day at
-  714ms. The [[provider-circuit-breaker]] makes the handoff graceful.
-- `gemini-3.1-flash-lite-preview` (the "newer" bump): DISQUALIFIED — 42% of calls
-  spike >2s. KEEP `2.5-flash-lite`.
-- Cerebras (the "cap-buster"): SKIP — slower (~1.2s) + 5 RPM + unneeded (Gemini
-  already covers the cap).
+- **Primary Gemini fallback → `gemini-3.1-flash-lite-preview` + `reasoning_effort:none`**
+  (~587ms, 0 spikes, routes 4/4). This SUPERSEDES the earlier "make no routing
+  changes / keep 2.5-flash-lite" call — the disqualifier was thinking, not the
+  model. The [[provider-circuit-breaker]] makes the Groq→Gemini handoff graceful.
+- `2.5-flash-lite` stays as the **alt Gemini rung** (separate RPM bucket + GA
+  fallback). The Groq cap is token/day; Gemini is request-capped (~1,500 RPD ≫
+  our volume), so the two Gemini models cover the whole post-cap day, faster.
+- Cerebras (the "cap-buster"): SKIP — slower (~1.2s) + 5 RPM + unneeded.
+- **Scraper VLM no longer shares the voice router's Gemini key.** `vlm_cascade.py`'s
+  3 Gemini rungs ran on the SAME `google_api_key` as voice routing, so high-volume
+  image evaluation burned voice's ~1,500 RPD / 20-RPM-per-model budget — a direct
+  contributor to tonight's Gemini 429s. Added `config.vlm_google_api_key`: the VLM
+  uses it when set, else falls back to `google_api_key` (no breakage). Set
+  `VLM_GOOGLE_API_KEY` in `.env` (a 2nd free Google project) to fully isolate the
+  scraper's Gemini usage from voice routing.
 
 The only genuinely stale item is the **VLM cascade's OpenRouter `Qwen3-VL` rung**
-(no longer free → Gemma 4 31B / Nemotron VL) — but that path is SCANNER/marketplace
+(no longer free → Gemma 4 31B / Nemotron VL) — that path is SCANNER/marketplace
 image evaluation, out of the voice-bot lane; hand to the scanner session.
 
 ## Caveats / do-before-shipping

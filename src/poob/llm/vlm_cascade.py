@@ -790,13 +790,19 @@ def build_vlm_cascade(config: Any, *, kv_store: Any | None = None) -> VLMCascade
     """
     providers: list[VLMProviderConfig] = []
 
+    # Scraper VLM Gemini key — isolated from the voice router's free-tier quota
+    # when VLM_GOOGLE_API_KEY is set, else shares google_api_key (no change).
+    # Image evaluation is high-volume; sharing one key starved voice routing
+    # (2026-06-09 Gemini RPM 429s). See config.vlm_google_api_key.
+    _vlm_g_key = config.vlm_google_api_key or config.google_api_key
+
     # 1. Gemini 3 Flash (Vision Arena rank 4, score 1274 — top free VLM)
-    if config.google_api_key:
+    if _vlm_g_key:
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         flash = ChatGoogleGenerativeAI(
             model=config.gemini_flash_model,
-            google_api_key=config.google_api_key,
+            google_api_key=_vlm_g_key,
             temperature=0.1,
             max_retries=0,
             # Suppress thinking/reasoning on preview models — we only need
@@ -814,12 +820,12 @@ def build_vlm_cascade(config: Any, *, kv_store: Any | None = None) -> VLMCascade
         )
 
     # 2. Gemini 3.1 Flash Lite (rank 35, score 1188, 1000 RPD free — high-volume voter)
-    if config.google_api_key and getattr(config, "gemini_flash_lite_model", None):
+    if _vlm_g_key and getattr(config, "gemini_flash_lite_model", None):
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         flash_lite = ChatGoogleGenerativeAI(
             model=config.gemini_flash_lite_model,
-            google_api_key=config.google_api_key,
+            google_api_key=_vlm_g_key,
             temperature=0.1,
             max_retries=0,
         )
@@ -904,12 +910,12 @@ def build_vlm_cascade(config: Any, *, kv_store: Any | None = None) -> VLMCascade
     # shared with the flash-lite workhorse), so disagreements never actually
     # tie-broke. With no tiebreaker, no-consensus uses the first responder — the
     # documented, blessed behavior. Pro stays a normal voter when it has quota.
-    if config.google_api_key:
+    if _vlm_g_key:
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         pro = ChatGoogleGenerativeAI(
             model=config.gemini_pro_model,
-            google_api_key=config.google_api_key,
+            google_api_key=_vlm_g_key,
             temperature=0.1,
             max_retries=0,
         )

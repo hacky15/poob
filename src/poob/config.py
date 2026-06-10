@@ -41,8 +41,20 @@ class AppConfig(BaseSettings):
 
     # --- Cloud LLM ---
     google_api_key: str = ""
+    # Optional SEPARATE Google key for the scraper's VLM image evaluation so it
+    # doesn't burn the voice router's shared free-tier budget (1,500 RPD / ~20
+    # RPM per model). Empty → VLM falls back to google_api_key (no behavior
+    # change). Set VLM_GOOGLE_API_KEY in .env (a 2nd free Google project) to
+    # fully isolate the scraper's Gemini usage from voice routing.
+    vlm_google_api_key: str = ""
     google_model: str = "gemini-2.5-flash"
-    agent_google_model: str = "gemini-2.5-flash-lite"  # Slow thinking model, emergency only
+    # Primary Gemini ROUTER rung. 3.1-flash-lite (preview, free) benchmarked
+    # ~587ms / 0% spikes with reasoning_effort=none — faster + stabler than
+    # 2.5-flash-lite (~714ms) and smarter on questions. The earlier "42% >2s
+    # spikes" were thinking tokens, now disabled brain-side. 2.5-flash-lite is
+    # the GA fallback rung if this preview is pulled. See
+    # docs/research/free-llm-tier-audit-2026-06.md.
+    agent_google_model: str = "gemini-3.1-flash-lite-preview"
     # Gemini 3 Flash: non-thinking, fast — preferred agent fallback over 2.5-flash-lite
     agent_google_model_fast: str = "gemini-3-flash"
 
