@@ -300,6 +300,24 @@ def test_system_prompt_forbids_unsolicited_marketplace() -> None:
             assert "unless" in p, f"missing 'unless they ask' qualifier ({ctx})"
 
 
+def test_anti_volunteer_rule_covers_music_and_effects_not_just_deals() -> None:
+    """Balance fix: the don't-volunteer rule named only deals/marketplace, so
+    the casual model over-weighted music/effects once they entered context
+    (e.g. after 'what effects do you have' recited the roster into history).
+    The rule must name music + effects/filters too, and forbid circling back
+    to a capability just because it came up earlier."""
+    from poob.brain.poob import _build_system_prompt
+    for voice in (True, False):
+        # Casual (with_tools=False) is the path that actually generates replies.
+        p = _build_system_prompt(level=5, voice=voice, with_tools=False).lower()
+        ctx = f"voice={voice}"
+        assert "music" in p, f"anti-volunteer rule must name music ({ctx})"
+        assert "effect" in p, f"anti-volunteer rule must name effects ({ctx})"
+        assert "circling back" in p or "came up" in p, (
+            f"rule must forbid re-raising a capability that came up earlier ({ctx})"
+        )
+
+
 def test_system_prompt_lists_banned_refusal_phrases() -> None:
     """The NEVER block enumerates literal RLHF refusal phrases. Tightening
     this list is part of the same fix (docs/decisions/
