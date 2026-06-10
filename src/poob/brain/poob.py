@@ -108,6 +108,59 @@ def _get_vibe(level: int) -> str:
     return _HORNINESS_VIBES[range(5, 7)]  # fallback to default
 
 
+# Tool-routing rules shared by the full persona prompt (with_tools=True) and
+# the slim routing prompt (_build_routing_prompt). Kept as module constants so
+# both surfaces emit byte-identical routing guidance — the routing model sees
+# the same instructions whether or not the persona text is present. See
+# docs/plans/slim-routing-prompt.md.
+_DEAL_ROUTING_RULE = (
+    "You have a deal_assistant tool for shopping stuff. Only use when explicitly asked."
+)
+
+_MUSIC_ROUTING_RULES = (
+    "You have a music_assistant tool for playing music and controlling effects. "
+    "When the CURRENT message asks to play, queue, skip, pause, stop, "
+    "control volume, or manage audio effects, call music_assistant — don't talk "
+    "about the request, don't comment, don't ask clarifying questions, just call it.\n"
+    "Whatever follows play / put on / queue IS the song — even if it "
+    "sounds like nonsense or a made-up name. Take those words from THIS "
+    "message only; never pull a song title from earlier turns or from "
+    "what other people said.\n"
+    "AUDIO EFFECTS ROUTING:\n"
+    "- 'nightcore it' / 'make it nightcore' → action=apply_effect, effect='nightcore'\n"
+    "- 'slow it down' / 'slowed' → action=apply_effect, effect='slowed'\n"
+    "- 'add reverb' → action=apply_effect, effect='slowed_reverb'\n"
+    "- 'remove the effect' / 'turn off the filter' / 'turn off the "
+    "nightcore' / 'clear effect' / 'no effects' / 'back to normal speed' "
+    "→ action=apply_effect, effect='none' (clears ALL effects). Do NOT "
+    "invent an effect here, and do NOT fire this just because the word "
+    "'normal' appears.\n"
+    "VOLUME IS NOT AN EFFECT — they are separate commands. Anything about "
+    "LOUDNESS — 'normal volume' / 'regular volume' / 'max volume' / "
+    "'louder' / 'quieter' / 'turn it up' / 'turn it down' → action=volume "
+    "(or volume_up / volume_down), NEVER apply_effect. Effects are NAMED "
+    "audio filters (nightcore, slowed, reverb, bassboost); volume is just "
+    "how loud it is.\n"
+    "Be DILIGENT about catching real song requests (call the tool):\n"
+    "- 'play some jazz' → action=play, query='jazz'\n"
+    "- 'play something chill' → action=play, query='chill music'\n"
+    "- 'put on some beats' → action=play, query='beats'\n"
+    "- 'play cheeky cheeky' → action=play, query='cheeky cheeky'\n"
+    "- 'play tiki tiki' → action=play, query='tiki tiki'\n"
+    "music_assistant is for music the user wants to HEAR — a song, "
+    "artist, or genre. It is NOT for acting out a request with a sound "
+    "effect, and not everything with the word 'play' is music.\n"
+    "NOT music — answer these YOURSELF in your reply, do NOT call the tool:\n"
+    "- 'flip a coin' / 'roll the dice' / 'pick a number' (just do it and "
+    "say the result — NEVER play a 'coin flip sound' clip to fake it)\n"
+    "- 'let's play a game' / 'wanna play Among Us' (playing a game)\n"
+    "- 'good play' / 'nice play' (praising what someone did)\n"
+    "- 'play it cool' / 'stop playing with me' (figures of speech)\n"
+    "When it genuinely is a request to hear a song, call the tool — "
+    "never respond with text about a real music request."
+)
+
+
 def _build_system_prompt(
     level: int, voice: bool = False, with_tools: bool = True,
 ) -> str:
@@ -169,49 +222,7 @@ def _build_system_prompt(
     )
 
     if with_tools:
-        prompt += (
-            "\n\nYou have a deal_assistant tool for shopping stuff. Only use when explicitly asked.\n"
-            "You have a music_assistant tool for playing music and controlling effects. "
-            "When the CURRENT message asks to play, queue, skip, pause, stop, "
-            "control volume, or manage audio effects, call music_assistant — don't talk "
-            "about the request, don't comment, don't ask clarifying questions, just call it.\n"
-            "Whatever follows play / put on / queue IS the song — even if it "
-            "sounds like nonsense or a made-up name. Take those words from THIS "
-            "message only; never pull a song title from earlier turns or from "
-            "what other people said.\n"
-            "AUDIO EFFECTS ROUTING:\n"
-            "- 'nightcore it' / 'make it nightcore' → action=apply_effect, effect='nightcore'\n"
-            "- 'slow it down' / 'slowed' → action=apply_effect, effect='slowed'\n"
-            "- 'add reverb' → action=apply_effect, effect='slowed_reverb'\n"
-            "- 'remove the effect' / 'turn off the filter' / 'turn off the "
-            "nightcore' / 'clear effect' / 'no effects' / 'back to normal speed' "
-            "→ action=apply_effect, effect='none' (clears ALL effects). Do NOT "
-            "invent an effect here, and do NOT fire this just because the word "
-            "'normal' appears.\n"
-            "VOLUME IS NOT AN EFFECT — they are separate commands. Anything about "
-            "LOUDNESS — 'normal volume' / 'regular volume' / 'max volume' / "
-            "'louder' / 'quieter' / 'turn it up' / 'turn it down' → action=volume "
-            "(or volume_up / volume_down), NEVER apply_effect. Effects are NAMED "
-            "audio filters (nightcore, slowed, reverb, bassboost); volume is just "
-            "how loud it is.\n"
-            "Be DILIGENT about catching real song requests (call the tool):\n"
-            "- 'play some jazz' → action=play, query='jazz'\n"
-            "- 'play something chill' → action=play, query='chill music'\n"
-            "- 'put on some beats' → action=play, query='beats'\n"
-            "- 'play cheeky cheeky' → action=play, query='cheeky cheeky'\n"
-            "- 'play tiki tiki' → action=play, query='tiki tiki'\n"
-            "music_assistant is for music the user wants to HEAR — a song, "
-            "artist, or genre. It is NOT for acting out a request with a sound "
-            "effect, and not everything with the word 'play' is music.\n"
-            "NOT music — answer these YOURSELF in your reply, do NOT call the tool:\n"
-            "- 'flip a coin' / 'roll the dice' / 'pick a number' (just do it and "
-            "say the result — NEVER play a 'coin flip sound' clip to fake it)\n"
-            "- 'let's play a game' / 'wanna play Among Us' (playing a game)\n"
-            "- 'good play' / 'nice play' (praising what someone did)\n"
-            "- 'play it cool' / 'stop playing with me' (figures of speech)\n"
-            "When it genuinely is a request to hear a song, call the tool — "
-            "never respond with text about a real music request."
-        )
+        prompt += "\n\n" + _DEAL_ROUTING_RULE + "\n" + _MUSIC_ROUTING_RULES
 
     if voice:
         prompt += (
@@ -222,6 +233,36 @@ def _build_system_prompt(
         )
 
     return prompt
+
+
+def _build_routing_prompt(with_music: bool) -> str:
+    """Build the slim tool-ROUTING prompt.
+
+    Routing and casual generation are SEPARATE LLM calls: the routing call's
+    text is discarded (only its tool decision is used) and the casual reply is
+    regenerated with the full persona prompt via ``_rebuild_messages_no_tools``.
+    So persona / RULES / NEVER / VOICE text is dead weight on routing — this
+    prompt carries ONLY the tool-routing rules (the same ``_DEAL_ROUTING_RULE``
+    / ``_MUSIC_ROUTING_RULES`` the full prompt uses, so routing guidance is
+    byte-identical) plus a short classifier framing.
+
+    Args:
+        with_music: Whether the music_assistant tool is wired (mirrors the
+            conditional MUSIC_TOOL at call time). When False, the music block
+            is omitted entirely. See docs/plans/slim-routing-prompt.md.
+    """
+    tools = "deal_assistant and music_assistant" if with_music else "deal_assistant"
+    prompt = (
+        "You are a tool-routing classifier for a Discord voice/text bot. Read "
+        "the user's CURRENT message and decide whether it needs a tool. "
+        f"Available tool(s): {tools}. If the message needs no tool, return no "
+        "tool call — the bot writes the reply separately.\n\n"
+        + _DEAL_ROUTING_RULE
+    )
+    if with_music:
+        prompt += "\n" + _MUSIC_ROUTING_RULES
+    return prompt
+
 
 # ---------------------------------------------------------------------------
 # Meta-tool: routes to the deal sub-agent
@@ -1194,9 +1235,13 @@ class PoobBrain:
         if len(history) > self.max_history:
             history[:] = history[-self.max_history :]
 
-        # Horniness level — voice uses the guild's rolled level, text 5.
-        level = self._horniness_for(guild_id) if voice else 5
-        prompt = _build_system_prompt(level, voice=voice)
+        # Routing prompt: tool-classification only. Persona, voice rules, and
+        # anti-refusal are generation-only — the routing text is discarded and
+        # the casual reply is regenerated with the full persona prompt on the
+        # casual path (_rebuild_messages_no_tools), so they would be dead weight
+        # here. See docs/plans/slim-routing-prompt.md. (`voice` is kept on the
+        # signature for call-site compatibility; routing is voice-agnostic.)
+        prompt = _build_routing_prompt(with_music=self._music_handler is not None)
 
         # Active deal session for this (guild, user) — hint follow-up routing.
         deal_ctx = self._deal_context.get(key)
