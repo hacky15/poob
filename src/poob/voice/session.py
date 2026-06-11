@@ -137,7 +137,7 @@ from poob.voice.audio_buffer import (
     VADConfig,
 )
 from poob.voice.address_detector import MultiSignalAddressDetector
-from poob.voice.fillers import FillerPlayer
+from poob.voice.fillers import FillerPlayer, pick_filler_treatment
 from poob.voice.silero_vad import (
     DISCORD_FRAME_BYTES,
     DISCORD_FRAME_MS,
@@ -498,8 +498,11 @@ class VoiceSession:
             return
         if not audio:
             return
+        # Soft moans get a gentle loudnorm (NOT the speech speechnorm that
+        # over-expanded them harsh); the loud variant surfaces ~12% for charm.
+        af, vol = pick_filler_treatment()
         try:
-            await self._play_audio(audio)
+            await self._play_audio(audio, af=af, volume=vol)
         except Exception as exc:
             log.debug("filler play failed", error=str(exc)[:100])
 
@@ -1206,7 +1209,13 @@ class VoiceSession:
             log.warning("Boob FFmpeg processing error", error=str(exc)[:80])
             return raw_audio
 
-    async def _play_audio(self, audio_data: bytes) -> None:
+    async def _play_audio(
+        self,
+        audio_data: bytes,
+        *,
+        af: str = "speechnorm=e=12.5:r=0.0001:l=1",
+        volume: float = 3.0,
+    ) -> None:
         """Play audio bytes through the Discord voice client.
 
         When music is playing (self.music_player is set and has an active mixer),
@@ -1218,6 +1227,14 @@ class VoiceSession:
 
         Args:
             audio_data: Audio bytes (MP3 or WAV format).
+            af: ffmpeg ``-af`` chain. Default = the speech ``speechnorm`` tuned
+                for Poob/Toob TTS presence over music. Fillers override it with a
+                gentle ``loudnorm`` — soft moans must NOT be speech-expanded (that
+                was the harshness bug). See ``fillers.pick_filler_treatment`` +
+                docs/decisions/poob-noise-fillers.md.
+            volume: ``PCMVolumeTransformer`` gain, paired with ``af``. The speech
+                default 3.0 compensates for ``speechnorm``; the gentle filler path
+                uses ~1.0 since ``loudnorm`` already sets the level.
         """
         if not audio_data or not self.voice_client.is_connected():
             return
@@ -1245,7 +1262,7 @@ class VoiceSession:
             tts_source = discord.FFmpegPCMAudio(
                 tmp_path,
                 executable=FFMPEG_PATH,
-                options="-af speechnorm=e=12.5:r=0.0001:l=1",
+                options=f"-af {af}",
             )
 
             # --- Music overlay path ---
@@ -1260,7 +1277,7 @@ class VoiceSession:
                 # an extra +1.5 dB for presence over the ducked music bed
                 # (25%); gentle clipping here gives speech the same "fullness"
                 # as mastered music. Was 2.5 before speechnorm was added.
-                boosted_tts = discord.PCMVolumeTransformer(tts_source, volume=3.0)
+                boosted_tts = discord.PCMVolumeTransformer(tts_source, volume=volume)
                 self.music_player.inject_tts_overlay(boosted_tts)
                 log.info("TTS injected as overlay on music")
 
@@ -1279,7 +1296,7 @@ class VoiceSession:
             # Post-speechnorm: TTS is already at broadcast-standard loudness.
             # 3.0 brings speech up to match mastered music when Poob is the
             # only thing playing on join. Was 2.5 before speechnorm was added.
-            source = discord.PCMVolumeTransformer(tts_source, volume=3.0)
+            source = discord.PCMVolumeTransformer(tts_source, volume=volume)
 
             # Create a future to await playback completion
             play_done = self._loop.create_future()

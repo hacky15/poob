@@ -35,29 +35,49 @@ if TYPE_CHECKING:
 
 log = get_logger("voice.fillers")
 
-# (phrase, speaking_rate, relative_weight). Workshopped in Fenrir with the
-# operator (docs/decisions/poob-noise-fillers.md): moany non-word vocalizations,
-# spelled + slowed to render as a loud moan rather than spelled-out letters.
-# Real-word "play"-style and pure "mmm" fillers were rejected. The cringe
-# intro quips (low weight) occasionally surface a "it's Poob here, aughh yeah"
-# instead of a bare moan — all ending in an approved moan so they land.
+# (phrase, speaking_rate, relative_weight). RE-WORKSHOPPED 2026-06-10 with the
+# operator (docs/decisions/poob-noise-fillers.md "Update 2026-06-10"): a fresh
+# listen-and-pick over candidates from tests/manual/gen_filler_candidates.py.
+# Every clip now sits in the slow 0.76-0.82 "drawn-out moan" zone. The old roster
+# forced 6 clips to rate 1.25 (fast, un-moany) ONLY because Fenrir spelled
+# repeated consonants out at slow rates; the re-workshop confirmed vowel-dominant
+# spellings (incl. "Ughhh"/"Uuughhh") vocalize fine at 0.78-0.80 — so the 1.25
+# hack is GONE, not worked around. Loudness is fixed separately (gentle loudnorm
+# at playback, not speech speechnorm — see pick_filler_treatment). "Oh man,
+# aughh." is the one approved quip+moan; the rest are bare moans, de-duped.
 FILLER_PHRASES: list[tuple[str, float, float]] = [
-    ("Aughhhh.", 0.8, 30.0),       # hero — ~30%
-    ("Auugh, mmm.", 0.8, 10.0),    # ~10%
-    ("Aughhh.", 1.25, 5.0),
-    ("Auugh.", 0.8, 5.0),
-    ("Auuughhh.", 0.7, 5.0),
-    ("Aaaughhh.", 0.7, 5.0),
-    ("Aaaughhh.", 0.8, 5.0),
-    ("Ohhh.", 0.8, 5.0),
-    ("Ohhhhh.", 0.7, 5.0),
-    ("Ohhhhh.", 0.8, 5.0),
-    ("Rrraugh.", 1.25, 5.0),
-    ("Ughhh.", 1.25, 5.0),
-    ("Uuughhh.", 1.25, 5.0),
-    ("Mm-hmm.", 1.25, 5.0),
-    ("Uhh.", 1.25, 5.0),
+    ("Uuughhh.", 0.78, 18.0),       # hero — operator "very very good"
+    ("Aughhh.", 0.80, 12.0),
+    ("Ohhh.", 0.80, 12.0),
+    ("Aaughhh.", 0.78, 10.0),
+    ("Ohhhhh.", 0.76, 10.0),
+    ("Oohhh.", 0.80, 10.0),
+    ("Aohh.", 0.80, 10.0),
+    ("Ughhh.", 0.80, 10.0),         # vocalizes at 0.80 — the spell-out hack is gone
+    ("Uhmm.", 0.82, 8.0),
+    ("Oh man, aughh.", 0.82, 6.0),  # quip+moan middle-ground — rarer
 ]
+
+
+# Filler loudness, applied at playback (session._play_audio's ``af``/``volume``).
+# Re-workshopped 2026-06-10: the soft moans must NOT go through the speech
+# ``speechnorm`` (e=12.5 over-expands them harsh — the bug). The normal sound is
+# a gentle ``loudnorm``; the loud speech-style treatment surfaces rarely for
+# chaotic charm (operator: "B normal, C rare"). Same ffmpeg pass that already
+# ran at playback, so no added hot-path latency.
+FILLER_AF_GENTLE = "loudnorm=I=-16:TP=-1.5:LRA=11"
+FILLER_VOL_GENTLE = 1.0
+FILLER_AF_LOUD = "speechnorm=e=12.5:r=0.0001:l=1"
+FILLER_VOL_LOUD = 3.0
+FILLER_LOUD_PROB = 0.12  # ~1 in 8 fillers plays the loud variant
+
+
+def pick_filler_treatment() -> tuple[str, float]:
+    """Return ``(-af chain, volume)`` for one filler play — gentle by default,
+    the loud variant ~12% of the time for charm."""
+    if random.random() < FILLER_LOUD_PROB:
+        return FILLER_AF_LOUD, FILLER_VOL_LOUD
+    return FILLER_AF_GENTLE, FILLER_VOL_GENTLE
 
 # Join "catchphrases" — cringe 2-3 word quip + an approved moan tail, played
 # once when Poob ENTERS a voice channel (session.play_entrance), NOT as a

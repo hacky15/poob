@@ -44,3 +44,18 @@ The "open quality question" above was resolved by an operator listening session 
 - **Hazard (durable):** never put a moan tail that spells out into a join phrase. `rrraugh`/`ughhh` spell at 0.85; use `aughh`/`auugh`/`ohhh`/`aaaughhh`/`auuughhh`/`uuughhh` (verified to vocalize). Test `test_join_phrases_dropped_spelled_out_tails` guards this.
 
 Tests: `tests/unit/test_fillers.py` (rate/weight shape, rate-keyed cache distinctness, weighted selection, bare-Path back-compat, join-pool weighting + fixed-tail guard).
+
+## Update 2026-06-10 — re-workshop: killed the 1.25 speed hack + fixed filler loudness
+
+Operator reported the fillers "sound wrong / sped up" in *every* chat (not just music). Investigation (traced the full playback path):
+
+- **NOT a pipeline speed transform.** Fillers route `_maybe_play_filler` → `_play_audio`, which applied only `speechnorm` + a `PCMVolumeTransformer`. No `atempo`/`asetrate` touches them. The Toob/Boob `atempo=2.0` chains are music-wrap only.
+- **Root cause #1 — the 1.25 "speed hack."** 6 of the 15 live phrases (`Aughhh`, `Rrraugh`, `Ughhh`, `Uuughhh`, `Mm-hmm`, `Uhh`) were baked at rate **1.25** — fast, un-moany — *only* because Fenrir spelled their consonant clusters out at slow rates. That fast subset (~29% by weight) WAS the "sped up" the operator heard. The 1.25 was a workaround, not a real fix.
+- **Root cause #2 — loudness.** Soft moans went through the *speech* `speechnorm=e=12.5` + `3.0×` (tuned for TTS presence over music), which over-expands and harshens them. The operator had workshopped the *raw* clips, so deployed ≠ approved.
+
+**Fix (re-workshop, all root-cause):**
+1. Built a reusable workshop generator (`tests/manual/gen_filler_candidates.py`) — synthesizes a slow-zone candidate batch + a loudness A/B/C reference, zips them for an operator listen-and-pick.
+2. **New roster = 10 operator-picked clips, ALL in the 0.76–0.82 slow zone.** The re-workshop proved vowel-dominant spellings — including `Ughhh` (0.80) and `Uuughhh` (0.78, the new hero, "very very good") — vocalize fine at slow rates, so **the 1.25 hack is deleted, not patched.** Roster is de-duped (was mostly `Augh` variants) and includes one approved quip+moan (`Oh man, aughh.`).
+3. **Loudness is now applied per-play, gentle by default.** `_play_audio` gained `af` / `volume` kwargs (defaults preserve the speech path for Poob/Toob). Fillers call `pick_filler_treatment()` → a gentle `loudnorm=I=-16:TP=-1.5:LRA=11` (`fillers.FILLER_AF_GENTLE`) instead of speech `speechnorm`, so soft moans stay soft. The loud speech-style treatment surfaces ~12% of plays for chaotic charm (operator: "B normal, C rare"). Same ffmpeg pass that already ran at playback — no added hot-path latency.
+
+Tests added in `test_fillers.py`: hero is `Uuughhh.`, roster all ≤0.85 (no 1.25 hack), `Ughhh`/`Uuughhh` kept slow, `pick_filler_treatment` gentle-default-loud-rare with no `speechnorm` on the gentle path.

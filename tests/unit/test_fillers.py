@@ -81,9 +81,48 @@ def test_each_phrase_carries_rate_and_weight() -> None:
 
 
 def test_hero_phrase_is_weighted_heaviest() -> None:
-    """`Aughhhh.` is the operator's ~30% hero — it must carry the top weight."""
+    """`Uuughhh.` is the 2026-06-10 re-workshop hero ("very very good") — it
+    must carry the top weight."""
     by_weight = sorted(FILLER_PHRASES, key=lambda e: e[2], reverse=True)
-    assert by_weight[0][0] == "Aughhhh."
+    assert by_weight[0][0] == "Uuughhh."
+
+
+def test_roster_is_all_slow_zone_no_speedup_hack() -> None:
+    """The old roster forced 6 clips to rate 1.25 to dodge Fenrir's spell-out;
+    the re-workshop proved slow spellings vocalize, so every clip must now sit
+    in the drawn-out moan zone — no fast 1.25 entries (the hack is gone, not
+    worked around)."""
+    for phrase, rate, _w in FILLER_PHRASES:
+        assert rate <= 0.85, f"{phrase!r} at rate {rate} — the 1.25 speed hack regressed"
+
+
+def test_spell_out_phrases_kept_at_slow_rate() -> None:
+    """Ughhh / Uuughhh are the exact clips the 1.25 hack existed for; the
+    operator confirmed they vocalize at slow rate, so they're kept slow."""
+    by_phrase = {p: r for p, r, _w in FILLER_PHRASES}
+    assert by_phrase.get("Ughhh.") is not None and by_phrase["Ughhh."] <= 0.85
+    assert by_phrase.get("Uuughhh.") is not None and by_phrase["Uuughhh."] <= 0.85
+
+
+def test_filler_treatment_gentle_default_loud_rare() -> None:
+    """Loudness: a gentle loudnorm is the normal sound (soft moans must NOT go
+    through the speech speechnorm — that was the harshness bug); the loud
+    treatment surfaces rarely (operator: 'B normal, C rare')."""
+    from poob.voice.fillers import (
+        FILLER_AF_GENTLE,
+        FILLER_AF_LOUD,
+        pick_filler_treatment,
+    )
+
+    assert "loudnorm" in FILLER_AF_GENTLE and "speechnorm" not in FILLER_AF_GENTLE
+    assert "speechnorm" in FILLER_AF_LOUD
+
+    counts = {"gentle": 0, "loud": 0}
+    for _ in range(2000):
+        af, _vol = pick_filler_treatment()
+        counts["loud" if af == FILLER_AF_LOUD else "gentle"] += 1
+    assert counts["gentle"] > counts["loud"] * 3   # gentle clearly dominates
+    assert counts["loud"] > 0                        # but loud does surface for charm
 
 
 @pytest.mark.asyncio
