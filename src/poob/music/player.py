@@ -636,6 +636,38 @@ class GuildMusicPlayer:
             self.voice_client.stop()
         return prev
 
+    async def restore_last(self) -> Track | None:
+        """Bring the music back after it stopped — "put the music back on".
+
+        Operator UX (resume-if-paused-else-replay-last, restore even after an
+        explicit stop):
+          1. Paused      → resume from where it was.
+          2. History     → replay the last song the user heard, from the start.
+          3. Cold/stopped → re-enqueue the last-played track from scratch
+             (stream URLs expire, so a fresh copy is re-resolved at play time);
+             ``_last_played_track`` survives both loop-end AND stop().
+        Returns the track being restored, or ``None`` if there's nothing to
+        bring back. See vc-session-failures-2026-06-11-rootcause.
+        """
+        if self._paused:
+            self.resume()
+            return self.queue.current
+        if self.queue.history:
+            return await self.previous()
+        src = self._last_played_track
+        if src is not None:
+            fresh = Track(
+                title=src.title, url=src.url, duration=src.duration,
+                requester_id=src.requester_id, requester_name=src.requester_name,
+                thumbnail=src.thumbnail, identifier=src.identifier,
+                source=src.source, is_stream=src.is_stream,
+            )
+            self.queue.add(fresh)
+            if self._player_task is None or self._player_task.done():
+                self._player_task = self._loop.create_task(self._player_loop())
+            return fresh
+        return None
+
     async def seek(self, parsed) -> tuple[Track, float] | None:  # type: ignore[no-untyped-def]
         """Seek to an absolute or relative position within the current track.
 
@@ -1010,12 +1042,14 @@ class GuildMusicPlayer:
 
                 AsyncYTDL.cleanup_track_file(track)
 
-                # Advance queue
-                if self._skip_requested:
-                    self.queue.current = None
-                    self._skip_requested = False
-                else:
-                    self.queue.current = None
+                # Advance queue. Archive the finished/skipped track to history
+                # (OFF mode) so previous()/restore work — the old direct
+                # `current = None` made get_next() see None and never archive,
+                # leaving history permanently empty (2026-06-11). archive_current
+                # is loop-mode-aware: a no-op in LOOP_ONE/LOOP_QUEUE where
+                # get_next() owns history + re-enqueue.
+                self.queue.archive_current()
+                self._skip_requested = False
 
                 # Reset position-tracking state at the boundary between tracks.
                 self._track_started_at = None

@@ -36,6 +36,46 @@ def _t(name: str) -> Track:
 # move(from_idx, to_idx)
 # ---------------------------------------------------------------------------
 
+def test_archive_current_off_mode_populates_history() -> None:
+    """2026-06-11: the player loop set current=None directly, so get_next never
+    archived and history was permanently empty -> previous()/restore always
+    failed. archive_current() moves current to history in OFF mode."""
+    q = MusicQueue()
+    q.add(_t("A"))
+    q.add(_t("B"))
+    q.get_next()
+    assert q.current is not None and q.current.title == "A"
+    q.archive_current()
+    assert q.current is None
+    assert [t.title for t in q.history] == ["A"]
+    # previous() now has something to return (was always None before the fix)
+    prev = q.previous()
+    assert prev is not None and prev.title == "A"
+
+
+def test_archive_current_is_noop_in_loop_queue() -> None:
+    """LOOP_QUEUE: get_next() owns the history push + re-enqueue. archive_current
+    must NOT touch current here, or the recycle never fires (LOOP_QUEUE silently
+    degrades to play-once)."""
+    q = MusicQueue()
+    q.add(_t("A"))
+    q.add(_t("B"))
+    q.get_next()                       # current = A
+    q._loop_mode = LoopMode.LOOP_QUEUE
+    q.archive_current()                # no-op in loop mode
+    assert q.current is not None and q.current.title == "A"  # current preserved
+    nxt = q.get_next()                 # get_next still recycles A + advances
+    assert nxt is not None and nxt.title == "B"
+    assert any(t.title == "A" for t in q.upcoming), "A must be recycled to the queue end"
+
+
+def test_archive_current_noop_when_no_current() -> None:
+    q = MusicQueue()
+    q.archive_current()                # nothing playing -> safe no-op
+    assert q.current is None
+    assert list(q.history) == []
+
+
 def test_move_reorders_within_queue() -> None:
     q = MusicQueue()
     a, b, c = _t("A"), _t("B"), _t("C")

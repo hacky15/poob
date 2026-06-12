@@ -194,6 +194,23 @@ class MusicQueue:
         self._current.stream_url = None  # Force re-resolve
         return self._current
 
+    def archive_current(self) -> None:
+        """OFF-mode loop advance: move the finished/skipped current track to
+        history, then clear it so the next get_next() pops the next track.
+
+        Loop-mode-aware: in LOOP_ONE / LOOP_QUEUE this is a NO-OP — get_next()
+        owns the history push + (LOOP_QUEUE) re-enqueue, and nulling current
+        here would make that recycle never fire (silently degrading LOOP_QUEUE
+        to play-once). The player loop previously did ``current = None`` directly
+        in OFF mode too, so get_next() saw None and never archived — leaving
+        history permanently empty and ``previous()`` always failing for every
+        user (2026-06-11). Never call this for a never-played (download-abandon)
+        track — those must not enter history.
+        """
+        if self._loop_mode == LoopMode.OFF and self._current is not None:
+            self._history.append(self._current)
+            self._current = None
+
     def skip(self) -> Track | None:
         """Skip current track — advances even in LOOP_ONE mode."""
         saved = self._loop_mode

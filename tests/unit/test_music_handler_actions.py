@@ -309,6 +309,46 @@ def test_music_tool_schema_advertises_list_effects() -> None:
 
 
 # ---------------------------------------------------------------------------
+# restore ("put the music back on") — 2026-06-11
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_restore_dispatches_to_player_restore_last() -> None:
+    cog, player = _make_cog_and_player()
+    player.restore_last = AsyncMock(return_value=_t("Last Song"))
+
+    resp = await cog.handle_music_request(
+        "put the music back on", user_id=1, guild_id=10,
+        tool_args={"action": "restore"},
+    )
+
+    player.restore_last.assert_awaited_once()
+    assert resp.startswith("[SILENT]")
+    assert "Last Song" in resp
+
+
+@pytest.mark.asyncio
+async def test_restore_nothing_to_bring_back_is_graceful() -> None:
+    cog, player = _make_cog_and_player()
+    player.restore_last = AsyncMock(return_value=None)
+
+    resp = await cog.handle_music_request(
+        "put the music back on", user_id=1, guild_id=10,
+        tool_args={"action": "restore"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "nothing" in resp.lower()
+
+
+def test_music_tool_schema_advertises_restore() -> None:
+    from poob.brain.poob import MUSIC_TOOL
+
+    enum = MUSIC_TOOL["function"]["parameters"]["properties"]["action"]["enum"]
+    assert "restore" in enum
+
+
+# ---------------------------------------------------------------------------
 # queue_many
 # ---------------------------------------------------------------------------
 

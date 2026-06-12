@@ -390,6 +390,12 @@ class MusicCog(commands.Cog, name="Music"):
                 return "[SILENT]Nothing is playing to replay."
             return f"[SILENT]Restarting {cur.title} from the top."
 
+        if action == "restore":
+            track = await player.restore_last()
+            if track is None:
+                return "[SILENT]Nothing to bring back."
+            return f"[SILENT]Back on: {track.title}."
+
         if action == "move":
             # Tool schema is 1-based for user-facing parity with the
             # queue display. Convert to 0-based for queue.move().

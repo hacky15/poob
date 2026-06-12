@@ -135,6 +135,9 @@ _MUSIC_ROUTING_RULES = (
     "- 'ultra bass' / 'max bass' / 'bass overload' → action=apply_effect, effect='ultrabass'\n"
     "- 'overload it' / 'earrape' / 'distort it' → action=apply_effect, effect='overload'\n"
     "- 'what effects / filters do you have' / 'list effects' → action=list_effects (no effect arg)\n"
+    "- 'put the music back on' / 'put that song back on' / 'bring it back' / "
+    "'play that again' / 'unpause' / 'resume the music' → action=restore (brings "
+    "back the last song after playback stopped — resumes if paused, else replays)\n"
     "- 'remove the effect' / 'turn off the filter' / 'turn off the "
     "nightcore' / 'clear effect' / 'no effects' / 'back to normal speed' "
     "→ action=apply_effect, effect='none' (clears ALL effects). Do NOT "
@@ -330,7 +333,7 @@ MUSIC_TOOL = {
                     "type": "string",
                     "enum": [
                         "play", "queue_many",
-                        "skip", "previous", "replay",
+                        "skip", "previous", "replay", "restore",
                         "pause", "resume", "stop",
                         "volume", "volume_up", "volume_down",
                         "shuffle", "loop", "now_playing", "queue",
@@ -350,7 +353,9 @@ MUSIC_TOOL = {
                         "utterance — pass each title as a separate string in "
                         "the 'tracks' array. 'previous' walks back to the most "
                         "recent finished track; 'replay' restarts the current "
-                        "track from 0. 'seek' jumps to a position in the "
+                        "track from 0. 'restore' brings the music BACK after it "
+                        "stopped — resume if paused else replay the last song "
+                        "('put the music back on'). 'seek' jumps to a position in the "
                         "current track — pass 'time' with formats like '2:30', "
                         "'2m30s', '150' (absolute) or '+10', '-1m' (relative). "
                         "'move' reorders the queue (use from_position and "
