@@ -968,7 +968,12 @@ class DualPipelineProcessor:
         the cheap synchronous read-emit-reset (no awaits/IO), so it cannot
         deadlock; the per-utterance SEAL (GIL-atomic seq compare) handles the
         listener-thread interleave. See vc-session-failures-2026-06-11."""
-        with self._emit_lock:
+        # getattr keeps it safe under __new__-constructed test instances that
+        # skip __init__ (mirrors _last_emitted / _is_duplicate_emit).
+        lock = getattr(self, "_emit_lock", None)
+        if lock is None:
+            lock = self._emit_lock = threading.Lock()
+        with lock:
             self._emit_utterance_locked(user_id, pipeline)
 
     def _emit_utterance_locked(self, user_id: int, pipeline: UserPipeline) -> None:
