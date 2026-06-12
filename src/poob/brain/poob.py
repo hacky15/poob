@@ -2094,11 +2094,22 @@ class PoobBrain:
         # High-signal tool indicators: if the user's last message contains
         # these, a text-only response is almost certainly wrong. Force the
         # cascade to keep trying providers until one calls a tool.
-        user_msg = ""
+        #
+        # CRITICAL: narrow to the CURRENT TURN before the signal checks. The
+        # last user message is context-wrapped with the [Recent conversation
+        # you've been listening to:...] passive transcript; a stale "skip" /
+        # "play X" in that window must NOT mark the turn tool-worthy, or the
+        # escalation valve refuses a correct no-tool answer and a weak rung
+        # hallucinates a destructive action (2026-06-11 phantom double-skip
+        # that emptied the queue). See tool-hallucination-from-passive-context
+        # and vc-session-failures-2026-06-11-rootcause.
+        raw_last_user = ""
         for m in reversed(messages):
             if m.get("role") == "user":
-                user_msg = (m.get("content") or "").lower()
+                raw_last_user = m.get("content") or ""
                 break
+        _, current_turn = _split_context(raw_last_user)
+        user_msg = current_turn.lower()
         tool_signals = (
             "wishlist", "watchlist", "my list", "on my list", "show my",
             "what am i", "add to", "remove from", "clear ", "scan",

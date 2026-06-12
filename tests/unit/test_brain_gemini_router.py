@@ -189,3 +189,63 @@ async def test_no_tool_accepted_for_casual_when_no_music() -> None:
 
     assert name is None and text == "casual reply"
     assert len(calls) == 1               # accepted immediately, no extra rungs
+
+
+@pytest.mark.asyncio
+async def test_stale_context_control_word_does_not_force_escalation() -> None:
+    """Defect B (2026-06-11 double-skip): looks_tool_worthy must be computed
+    over the CURRENT TURN only — NOT the [Recent conversation...] passive
+    context. A stale 'skip' in the context with a CASUAL current turn must not
+    escalate past a correct no-tool answer (escalation hallucinated action=skip
+    and emptied the queue). See vc-session-failures-2026-06-11-rootcause."""
+    brain = _brain(groq_api_key="gk", google_api_key="g-key", nvidia_api_key="nk")
+    calls: list[str] = []
+
+    async def fake_call(provider, model, messages, tools, max_tokens):
+        calls.append(model)
+        return "a catastrophe is a disaster, chief", None, None   # correct: casual
+
+    brain._call_provider_with_tools = fake_call  # type: ignore[method-assign]
+    wrapped = (
+        "[Recent conversation you've been listening to:\n"
+        "Ben: Hey Poob skip\nRew: nice]\n\n"
+        "Could you please elaborate on what you mean by catastrophe?"
+    )
+    messages = [
+        {"role": "system", "content": "persona [MUSIC IS CURRENTLY PLAYING: X [3:58]]"},
+        {"role": "user", "content": wrapped},
+    ]
+    _t, name, _a = await brain._groq_with_tools(messages, max_tokens=80)
+
+    assert name is None
+    assert len(calls) == 1, "stale-context 'skip' must NOT force escalation"
+
+
+@pytest.mark.asyncio
+async def test_current_turn_control_still_escalates_through_context_wrapper() -> None:
+    """The narrowing must NOT break the 2026-06-09 control rescue: a genuine
+    control word in the CURRENT turn (even when the message is context-wrapped)
+    still continues the cascade past a weak no-tool rung."""
+    brain = _brain(groq_api_key="gk", google_api_key="g-key", nvidia_api_key="nk")
+    calls: list[str] = []
+
+    async def fake_call(provider, model, messages, tools, max_tokens):
+        calls.append(model)
+        if len(calls) == 1:
+            return "just vibing", None, None
+        return "", "music_assistant", {"action": "skip"}
+
+    brain._call_provider_with_tools = fake_call  # type: ignore[method-assign]
+    wrapped = (
+        "[Recent conversation you've been listening to:\n"
+        "Ben: cool track\n]\n\n"
+        "Hey Poob skip"
+    )
+    messages = [
+        {"role": "system", "content": "persona [MUSIC IS CURRENTLY PLAYING: X [3:58]]"},
+        {"role": "user", "content": wrapped},
+    ]
+    _t, name, args = await brain._groq_with_tools(messages, max_tokens=80)
+
+    assert name == "music_assistant" and args == {"action": "skip"}
+    assert len(calls) >= 2
