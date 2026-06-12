@@ -3,7 +3,7 @@ type: architecture
 status: active
 date: 2026-04-07
 tags: [voice, stt, tts, wake-word, vad]
-related: [[poobbrain-architecture]] [[music-player-architecture]] [[wake-word-dual-gate]] [[toob-voice-filter-chain]] [[tts-loudness-speechnorm]] [[voice-latency-phase1-silero-reenabled]] [[voice-latency-phase2-filler-dispatch]] [[voice-latency-phase3-kokoro]]
+related: [[poobbrain-architecture]] [[music-player-architecture]] [[wake-word-dual-gate]] [[toob-voice-filter-chain]] [[tts-loudness-speechnorm]] [[voice-latency-phase1-silero-reenabled]] [[voice-latency-phase2-filler-dispatch]] [[voice-latency-phase3-kokoro]] [[voice-synth-ahead-pipeline]]
 ---
 
 # Voice architecture — dual pipeline, Toob, deferred playback, multi-provider cascade
@@ -31,8 +31,9 @@ on_dual_addressed(user_id, transcript)
     ▼
 PoobBrain.respond_streaming()  → sentences yielded
     │
-    ▼  (per-sentence)
-_synthesize (Poob) or _synthesize_toob (Toob)
+    ▼  (synth-ahead pipeline — synth N+1 while N plays; see below)
+_stream_synth_and_play
+    │   → _synthesize (Poob) / _synthesize_toob (Toob) / _synthesize_boob (Boob)
     │
     ▼
 _play_audio → FFmpegPCMAudio(+speechnorm) → PCMVolumeTransformer(3.0)
@@ -50,6 +51,15 @@ About 1 play in 20 surfaces **Boob** instead — Toob's sweet side piece. Higher
 Voice signal routing is structural, not string-based. `VOICE_TOOB` and `VOICE_BOOB` are sentinels yielded as the first item from `respond_streaming()`. The session loop's synth dispatch is keyed on a `voice_persona` string (`"poob" | "toob" | "boob"`) so adding a fourth persona is a one-line addition to the table. No string prefixes, no regex parsing.
 
 See [[toob-voice-filter-chain]] for Toob's FFmpeg stages and [[boob-music-wrap-variant]] for Boob's.
+
+## Synth-ahead pipeline — `_stream_synth_and_play`
+
+All three response paths (`_process_single_response`, `_process_utterance`, `_drain_pending_utterances`) consume `respond_streaming` through **one shared helper**, `_stream_synth_and_play`. It runs a producer/consumer pair over a bounded `asyncio.Queue(maxsize=2)`:
+
+- **Producer** pulls sentences, resolves persona from the `VOICE_TOOB`/`VOICE_BOOB` sentinels, synthesizes, and enqueues audio — racing ahead so sentence N+1's TTS round-trip overlaps the playback of N.
+- **Consumer** plays in order, waiting only for the previous TTS to drain (or overlaying when music is active).
+
+This is the root-cause fix for the "snappy with 2s of silence between sentences" report — short jabs no longer leave dead air while the next sentence synthesizes. First-word latency is unchanged (the first sentence still synths+plays immediately). Before consolidation the loop was triplicated, and two of the three paths called `_synthesize` directly with **no persona dispatch** — a music sentinel through those paths would have been spoken aloud. See [[voice-synth-ahead-pipeline]].
 
 ## Silent music controls
 
@@ -104,7 +114,7 @@ prompt += f"\n\n[YOUR CURRENT VIBE (embody this in your tone, do NOT mention or 
 
 Because the vibe changes every turn, even if history is full of paranoid responses, the new prompt might say he's mourning a dust mite — forcing a tone shift.
 
-Rules in the system prompt: answer what was asked FIRST, then let vibe color delivery. 1-2 sentences max. Never mention or describe the vibe — embody it.
+Rules in the system prompt: answer what was asked FIRST, then let vibe color delivery. Length is **latitude, not a hard clamp** — default tight (a sentence or two), fuller (three or four sentences) when the moment earns it. The old "1-2 sentences, ~1-25 words" clamp fought `voice_llm_max_tokens=200` and forced every reply into a snap jab; see [[voice-synth-ahead-pipeline]]. Never mention or describe the vibe — embody it.
 
 ## End-of-speech detection (VAD)
 

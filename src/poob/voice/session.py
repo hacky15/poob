@@ -149,6 +149,8 @@ from poob.voice.stt import STTProvider
 from poob.voice.tts import TTSProvider
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from poob.brain.poob import PoobBrain
 
 log = get_logger("voice.session")
@@ -506,6 +508,100 @@ class VoiceSession:
         except Exception as exc:
             log.debug("filler play failed", error=str(exc)[:100])
 
+    async def _stream_synth_and_play(
+        self, sentences: AsyncIterator[str], *, t_start: float,
+    ) -> str:
+        """Synth-ahead pipeline: consume a sentence stream, synthesize each
+        sentence while the previous one is still playing, and play them in
+        order.
+
+        A producer pulls sentences from ``sentences``, resolves the persona
+        (Poob/Toob/Boob) from the ``VOICE_TOOB``/``VOICE_BOOB`` routing
+        sentinels, synthesizes the audio, and hands it to a bounded queue. A
+        consumer plays the queued audio in order. Because synthesis of
+        sentence N+1 overlaps with playback of sentence N, short sentences no
+        longer leave dead air between them — the root-cause fix for the
+        "snappy with 2s silence" report. First-word latency is unchanged: the
+        first sentence still synthesizes and plays immediately.
+
+        Args:
+            sentences: Async stream of sentences from
+                ``brain.respond_streaming`` (may begin with a persona
+                sentinel).
+            t_start: ``time.monotonic()`` reference for the first-sentence
+                latency log.
+
+        Returns:
+            The accumulated response text (persona sentinels excluded), with a
+            trailing space per sentence — callers ``.strip()`` as needed.
+        """
+        import time as _time
+
+        from poob.brain.poob import VOICE_BOOB, VOICE_TOOB
+
+        synth_dispatch = {
+            "poob": self._synthesize,
+            "toob": self._synthesize_toob,
+            "boob": self._synthesize_boob,
+        }
+        # maxsize=2 bounds look-ahead to two sentences — enough to mask TTS
+        # latency across a burst of short jabs without synthesizing an entire
+        # runaway response up front.
+        audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=2)
+        state = {"full_response": "", "persona": "poob", "first": True}
+
+        async def _produce() -> None:
+            async for item in sentences:
+                # Routing signals — not speech. The brain yields exactly one
+                # of these as its first item when a non-default persona speaks.
+                if item == VOICE_TOOB:
+                    state["persona"] = "toob"
+                    continue
+                if item == VOICE_BOOB:
+                    state["persona"] = "boob"
+                    continue
+
+                state["full_response"] += item + " "
+
+                if state["first"]:
+                    log.info(
+                        "First sentence ready",
+                        llm_ms=int((_time.monotonic() - t_start) * 1000),
+                        sentence=item[:60],
+                        voice=state["persona"],
+                    )
+                    state["first"] = False
+
+                try:
+                    audio = await synth_dispatch[state["persona"]](item)
+                except Exception as exc:
+                    log.warning("Synth failed", error=str(exc)[:80])
+                    continue
+                if audio:
+                    await audio_queue.put(audio)
+            await audio_queue.put(None)  # done sentinel
+
+        async def _consume() -> None:
+            while True:
+                audio = await audio_queue.get()
+                if audio is None:
+                    break
+                # When music is playing, _play_audio overlays TTS (music ducks
+                # automatically) — only wait for previous TTS to drain, not the
+                # music itself.
+                music_active = (
+                    self.music_player is not None
+                    and self.music_player.mixer is not None
+                    and self.music_player.is_playing
+                )
+                if not music_active:
+                    while self.voice_client.is_playing():
+                        await asyncio.sleep(0.02)
+                await self._play_audio(audio)
+
+        await asyncio.gather(_produce(), _consume())
+        return state["full_response"]
+
     async def _process_single_response(self, user_id: int, user_name: str, transcript: str) -> None:
         """Process a single addressed utterance: LLM → TTS → play.
 
@@ -555,66 +651,22 @@ class VoiceSession:
                 self.brain._set_music_playing_info(self._guild_id, "")
 
             # Generate response
-            full_response = ""
-            first_sentence = True
             self._is_speaking = True
 
             try:
-                # Stream sentences from the brain and synth+play each one
-                # as it arrives — don't collect the full response first.
-                # Speculative-wrap music paths depend on this: the brain
-                # yields a wrap sentence early while ytdl search is still
-                # running; synth must start on that first yield, not wait
-                # for the rest of the generator to finish.
-                from poob.brain.poob import VOICE_BOOB, VOICE_TOOB
-                voice_persona = "poob"
-                synth_dispatch = {
-                    "poob": self._synthesize,
-                    "toob": self._synthesize_toob,
-                    "boob": self._synthesize_boob,
-                }
-                async for item in self.brain.respond_streaming(
-                    prompt, str(user_id), guild_id=self._guild_id,
-                ):
-                    # Voice signals — not text, just routing control. The
-                    # brain yields exactly one of these as its first item
-                    # when a non-default persona should speak.
-                    if item == VOICE_TOOB:
-                        voice_persona = "toob"
-                        continue
-                    if item == VOICE_BOOB:
-                        voice_persona = "boob"
-                        continue
-
-                    full_response += item + " "
-
-                    if first_sentence:
-                        t_llm = _time.monotonic()
-                        log.info(
-                            "First sentence ready",
-                            llm_ms=int((t_llm - t0) * 1000),
-                            sentence=item[:60],
-                            voice=voice_persona,
-                        )
-                        first_sentence = False
-
-                    synth = synth_dispatch[voice_persona]
-                    audio = await synth(item)
-                    if not audio:
-                        continue
-
-                    # When music is playing, go straight to _play_audio()
-                    # which handles TTS overlay (music ducks automatically).
-                    # Only wait for previous TTS to finish, not music.
-                    music_active = (
-                        self.music_player is not None
-                        and self.music_player.mixer is not None
-                        and self.music_player.is_playing
-                    )
-                    if not music_active:
-                        while self.voice_client.is_playing():
-                            await asyncio.sleep(0.02)
-                    await self._play_audio(audio)
+                # Stream sentences from the brain through the synth-ahead
+                # pipeline — synth of sentence N+1 overlaps playback of N, so
+                # short replies don't leave dead air between them. The
+                # speculative-wrap music path depends on the early first-yield:
+                # the brain emits a wrap sentence while the ytdl search is
+                # still running and synth starts on that first yield. See
+                # _stream_synth_and_play.
+                full_response = await self._stream_synth_and_play(
+                    self.brain.respond_streaming(
+                        prompt, str(user_id), guild_id=self._guild_id,
+                    ),
+                    t_start=t0,
+                )
 
                 # Update state
                 self._address_detector.mark_bot_spoke(full_response.strip())
@@ -852,32 +904,16 @@ class VoiceSession:
                 else:
                     prompt = f"{speaker_name}: {text}"
 
-                # 5. Generate response with sentence streaming.
+                # 5. Generate response via the synth-ahead pipeline.
                 # guild_id from session init isolates per-guild state.
-                full_response = ""
-                first_sentence = True
                 self._is_speaking = True
 
-                async for sentence in self.brain.respond_streaming(
-                    prompt, str(user_id), guild_id=self._guild_id,
-                ):
-                    full_response += sentence + " "
-
-                    if first_sentence:
-                        t_llm = _time.monotonic()
-                        log.info(
-                            "First sentence ready",
-                            llm_ms=int((t_llm - t_stt) * 1000),
-                            sentence=sentence[:60],
-                        )
-                        first_sentence = False
-
-                    # 6. Synthesize and play each sentence
-                    audio = await self._synthesize(sentence)
-                    if audio:
-                        while self.voice_client.is_playing():
-                            await asyncio.sleep(0.05)
-                        await self._play_audio(audio)
+                full_response = await self._stream_synth_and_play(
+                    self.brain.respond_streaming(
+                        prompt, str(user_id), guild_id=self._guild_id,
+                    ),
+                    t_start=t_stt,
+                )
 
                 # Update address detector state — Poob spoke
                 self._address_detector.mark_bot_spoke(full_response.strip())
@@ -970,28 +1006,12 @@ class VoiceSession:
         import time as _time
         t0 = _time.monotonic()
 
-        full_response = ""
-        first_sentence = True
-
-        async for sentence in self.brain.respond_streaming(
-            combined_text, str(last_user_id), guild_id=self._guild_id,
-        ):
-            full_response += sentence + " "
-
-            if first_sentence:
-                t_llm = _time.monotonic()
-                log.info(
-                    "First sentence ready",
-                    llm_ms=int((t_llm - t0) * 1000),
-                    sentence=sentence[:60],
-                )
-                first_sentence = False
-
-            audio = await self._synthesize(sentence)
-            if audio:
-                while self.voice_client.is_playing():
-                    await asyncio.sleep(0.05)
-                await self._play_audio(audio)
+        full_response = await self._stream_synth_and_play(
+            self.brain.respond_streaming(
+                combined_text, str(last_user_id), guild_id=self._guild_id,
+            ),
+            t_start=t0,
+        )
 
         if full_response:
             log.info(
