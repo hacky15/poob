@@ -217,3 +217,82 @@ async def test_force_reconnect_closes_clears_throttle_and_counter() -> None:
     mgr.close_user.assert_awaited_once_with(42)   # zombie stream torn down
     assert 42 not in mgr._last_connect_time        # throttle cleared → next frame reconnects now
     assert mgr._consecutive_lost[42] == 0          # counter reset
+
+
+# ---------------------------------------------------------------------------
+# Defect A — the double-emit SEAL (2026-06-11 double-queue). After our VAD
+# emit+reset, Deepgram re-appends to the SAME still-open utterance rebuilt the
+# phrase and double-fired. The seal (utterance_seq/transcript_seq/emitted_seq,
+# bumped on OUR speech-start) suppresses the re-emit while letting a genuine
+# re-request (user spoke again -> new utterance) through.
+# ---------------------------------------------------------------------------
+
+
+def _mgr_with_stream(uid: int = 1) -> tuple[DeepgramStreamManager, _UserStream]:
+    mgr = DeepgramStreamManager("key")
+    stream = _UserStream()
+    mgr._streams[uid] = stream
+    return mgr, stream
+
+
+def _feed(stream: _UserStream, text: str, *, is_final: bool = True) -> None:
+    """Mimic _listen_loop applying one Deepgram segment (new-utterance reset
+    keyed on utterance_seq, then append/interim)."""
+    if stream.utterance_seq != stream.transcript_seq:
+        stream.transcript = ""
+        stream.latest_interim = ""
+        stream.transcript_seq = stream.utterance_seq
+    if is_final:
+        stream.transcript = (
+            f"{stream.transcript} {text}".strip() if stream.transcript else text
+        )
+        stream.latest_interim = ""
+    else:
+        stream.latest_interim = text
+
+
+def test_seal_suppresses_reaccumulation_but_allows_genuine_reissue() -> None:
+    mgr, stream = _mgr_with_stream(1)
+
+    # Utterance 1 — user says it once.
+    mgr.begin_utterance(1)                          # our speech-start
+    _feed(stream, "hey poob play funny friends")
+    assert mgr.get_transcript(1)[0] == "hey poob play funny friends"
+
+    mgr.mark_emitted(1)                             # VAD emit -> SEAL
+    mgr.reset_transcript(1)
+
+    # Deepgram re-appends to the SAME open utterance (no new speech-start) —
+    # the re-accumulation that double-queued in prod.
+    _feed(stream, "hey poob play funny friends")
+    assert mgr.get_transcript(1)[0] == "", "re-accumulated same utterance must be sealed"
+
+    # 14s later the user GENUINELY asks again -> new speech-start -> new utterance.
+    mgr.begin_utterance(1)
+    _feed(stream, "hey poob play funny friends")
+    assert mgr.get_transcript(1)[0] == "hey poob play funny friends", (
+        "a genuine re-request (user spoke again) must NOT be sealed"
+    )
+
+
+def test_seal_covers_the_latest_interim_fallback() -> None:
+    """get_transcript falls back to latest_interim when transcript is empty;
+    the seal must cover that path or the rebuilt phrase leaks via the interim
+    (the exact original double-fire route)."""
+    mgr, stream = _mgr_with_stream(1)
+    mgr.begin_utterance(1)
+    _feed(stream, "hey poob play x", is_final=False)   # interim only
+    assert mgr.get_transcript(1)[0] == "hey poob play x"
+
+    mgr.mark_emitted(1)
+    mgr.reset_transcript(1)
+    _feed(stream, "hey poob play x", is_final=False)   # interim re-arrives, same utterance
+    assert mgr.get_transcript(1)[0] == "", "interim fallback must also be sealed"
+
+
+def test_seal_first_utterance_is_never_sealed() -> None:
+    """emitted_seq starts at -1 so the very first utterance always emits."""
+    mgr, stream = _mgr_with_stream(7)
+    mgr.begin_utterance(7)
+    _feed(stream, "hey poob play first song")
+    assert mgr.get_transcript(7)[0] == "hey poob play first song"

@@ -23,6 +23,7 @@ import asyncio
 import collections
 import os
 import struct
+import threading
 import time
 import wave
 from dataclasses import dataclass, field
@@ -213,6 +214,16 @@ class _UserStream:
         self.listener_task = None  # Background task reading from WS
         self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._sender_task = None
+        # Per-utterance sequence numbers — the double-emit SEAL (2026-06-11).
+        # utterance_seq bumps when Deepgram closes an utterance (speech_final /
+        # UtteranceEnd). transcript_seq is the utterance the current transcript
+        # belongs to. emitted_seq is the highest utterance we've already
+        # emitted. get_transcript returns "" while transcript_seq <= emitted_seq,
+        # so Deepgram re-appends after our VAD emit+reset can't rebuild the
+        # phrase and double-fire. See vc-session-failures-2026-06-11-rootcause.
+        self.utterance_seq: int = 0
+        self.transcript_seq: int = 0
+        self.emitted_seq: int = -1
 
 
 class DeepgramStreamManager:
@@ -385,6 +396,15 @@ class DeepgramStreamManager:
                         # Any transcript = the stream is alive; clear the
                         # zombie-miss counter for this user.
                         self._consecutive_lost[user_id] = 0
+                        # First content of a NEW utterance (our speech-start
+                        # bumped utterance_seq via begin_utterance): start the
+                        # transcript fresh + tag it with the new seq so it never
+                        # appends onto a sealed, already-emitted one. See the
+                        # SEAL on _UserStream.
+                        if stream.utterance_seq != stream.transcript_seq:
+                            stream.transcript = ""
+                            stream.latest_interim = ""
+                            stream.transcript_seq = stream.utterance_seq
                         if is_final:
                             # Append final segment to accumulated transcript
                             if stream.transcript:
@@ -477,11 +497,40 @@ class DeepgramStreamManager:
         stream = self._streams.get(user_id)
         if stream is None:
             return "", False
+        # SEAL: once an utterance is emitted (mark_emitted), ignore content that
+        # still belongs to it. Deepgram re-appends after our VAD emit+reset would
+        # otherwise rebuild the phrase and double-fire (2026-06-11 double-queue).
+        # A genuine NEW utterance bumps utterance_seq -> transcript_seq, un-
+        # sealing. Covers BOTH transcript and the latest_interim fallback below.
+        if stream.transcript_seq <= stream.emitted_seq:
+            return "", stream.is_final
         # Prefer finalized transcript, fall back to interim
         text = stream.transcript
         if not text and stream.latest_interim:
             text = stream.latest_interim
         return text, stream.is_final
+
+    def mark_emitted(self, user_id: int) -> None:
+        """Seal the just-emitted utterance: get_transcript returns "" for it
+        until a NEW utterance arrives (utterance_seq bump). Closes the
+        re-accumulation double-fire at the source — see vc-session-failures-
+        2026-06-11-rootcause. GIL-atomic int compare, so safe vs the listener
+        thread's appends without a lock."""
+        stream = self._streams.get(user_id)
+        if stream:
+            stream.emitted_seq = stream.transcript_seq
+
+    def begin_utterance(self, user_id: int) -> None:
+        """Mark the start of a NEW utterance (called from our speech-start
+        detection — reliable, unlike Deepgram's UtteranceEnd). Bumps
+        utterance_seq so the next Deepgram content is tagged fresh and un-seals
+        get_transcript. This is the discriminator: a genuine re-request means
+        the user SPOKE AGAIN (new speech-start -> new utterance -> emits), while
+        Deepgram re-appending to the SAME utterance after our emit stays sealed.
+        See vc-session-failures-2026-06-11-rootcause."""
+        stream = self._streams.get(user_id)
+        if stream:
+            stream.utterance_seq += 1
 
     def reset_transcript(self, user_id: int) -> None:
         """Clear transcript state for a user (after processing)."""
@@ -646,6 +695,10 @@ class DualPipelineProcessor:
         self._bot_audio_active = bot_audio_active or (lambda: False)
         self._user_pipelines: dict[int, UserPipeline] = {}
         self._silence_counters: dict[int, int] = {}
+        # Serializes _emit_utterance across the two caller threads (recording
+        # thread + the 100ms stale-buffer checker) — prevents a concurrent
+        # read-emit race from double-emitting one utterance (2026-06-11).
+        self._emit_lock = threading.Lock()
         # Per-user last addressed emission (normalized transcript, monotonic ts)
         # for utterance-level dedup — guards a re-triggered/resent identical
         # transcript from double-queuing a response. Complements the
@@ -855,9 +908,25 @@ class DualPipelineProcessor:
             else:
                 pipeline.is_active = wake_hit
                 pipeline._pending_wake = False
+                if wake_hit:
+                    # Re-arm on the speech-start frame. Previously SILENT — the
+                    # 2026-06-11 double-fire's silent re-address was invisible
+                    # because only the branch above logged a wake. Always log.
+                    log.info(
+                        "Wake word detected",
+                        user=user_name or user_id,
+                        speech_to_wake_ms=int(
+                            (time.monotonic() - pipeline.speech_start_time) * 1000
+                        ),
+                        rearm=True,
+                    )
             pipeline.current_transcript = ""
             self._silence_counters[user_id] = 0
             self._deepgram.reset_transcript(user_id)
+            # New utterance begun — bump the seal seq so this utterance's
+            # transcript un-seals while the prior emitted one stays sealed
+            # (the genuine-re-request discriminator). 2026-06-11.
+            self._deepgram.begin_utterance(user_id)
 
         # Send audio to Deepgram during active speech.
         # Keepalive during silence is handled by the background keepalive loop.
@@ -894,6 +963,15 @@ class DualPipelineProcessor:
                     self._emit_utterance(user_id, pipeline)
 
     def _emit_utterance(self, user_id: int, pipeline: UserPipeline) -> None:
+        """Serialize emission across the two caller threads (Pycord recording
+        thread + the 100ms stale-buffer checker). The lock is held only across
+        the cheap synchronous read-emit-reset (no awaits/IO), so it cannot
+        deadlock; the per-utterance SEAL (GIL-atomic seq compare) handles the
+        listener-thread interleave. See vc-session-failures-2026-06-11."""
+        with self._emit_lock:
+            self._emit_utterance_locked(user_id, pipeline)
+
+    def _emit_utterance_locked(self, user_id: int, pipeline: UserPipeline) -> None:
         """Emit a complete utterance (speech ended).
 
         Grabs the streaming transcript from Deepgram (already built in
@@ -1052,6 +1130,9 @@ class DualPipelineProcessor:
             if self._on_passive:
                 self._on_passive(user_id, user_name, transcript)
 
+        # SEAL this utterance so Deepgram re-appends to the same (still-open)
+        # utterance can't be re-emitted (2026-06-11 double-fire).
+        self._deepgram.mark_emitted(user_id)
         self._deepgram.reset_transcript(user_id)
 
     _EMIT_DEDUP_WINDOW_S: float = 8.0
