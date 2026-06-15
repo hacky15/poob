@@ -1390,5 +1390,16 @@ class VoiceSession:
         # Unlink music player (MusicCog handles its own cleanup)
         self.music_player = None
 
+        # Tear down the dual pipeline — closes every per-user Deepgram
+        # WebSocket and stops the keepalive loop. Without this the streams
+        # leaked for ~an hour after the session ended (zombie sockets + a
+        # live keepalive task). See incidents/deepgram-streams-leak-on-cleanup.
+        if self._dual_pipeline is not None:
+            try:
+                await self._dual_pipeline.cleanup()
+            except Exception as exc:
+                log.warning("dual pipeline cleanup failed", error=str(exc)[:120])
+            self._dual_pipeline = None
+
         # Clear conversation histories for all users in this session
         log.info("Voice session cleaned up")

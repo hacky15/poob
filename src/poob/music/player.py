@@ -369,8 +369,13 @@ class GuildMusicPlayer:
         self._paused = False
         self._skip_requested = False
 
-        # Pre-fetch state
+        # Pre-fetch / deferred-resolve state. Deferred-play, prefetch, and the
+        # player-loop acquisition all route through ``_ensure_resolving`` so a
+        # track is never downloaded twice (the deferred double-download race).
+        # Keyed by ``id(track)`` — the same Track instance flows from the queue
+        # into the player loop. See incidents/deferred-double-download.
         self._prefetch_task: asyncio.Task | None = None
+        self._resolve_tasks: dict[int, asyncio.Task] = {}
 
         # ---- Position tracking (wall-clock, pause-aware) ----
         # Set when ``voice_client.play`` is called for the live source.
@@ -546,24 +551,52 @@ class GuildMusicPlayer:
         """
         self.queue.add(track)
         if deferred:
-            # Pre-resolve the stream URL in background so it's ready
-            self._loop.create_task(self._pre_resolve(track))
+            # Pre-resolve in the background so audio is ready when playback
+            # starts. The player loop awaits this SAME task (via
+            # _ensure_resolving) instead of racing a second download. See
+            # incidents/deferred-double-download.
+            self._ensure_resolving(track)
             return
         if self._player_task is None or self._player_task.done():
             self._player_task = self._loop.create_task(self._player_loop())
 
-    async def _pre_resolve(self, track: Track) -> None:
-        """Pre-download a deferred track so it's ready when playback starts."""
+    def _ensure_resolving(self, track: Track) -> asyncio.Task:
+        """Return the in-flight resolution task for ``track``, creating one if
+        none exists.
+
+        Dedupes concurrent resolution so a track is never downloaded twice —
+        the deferred pre-resolve, the prefetch, and the player-loop
+        acquisition all share one task per ``Track`` instance. See
+        incidents/deferred-double-download.md.
+        """
+        key = id(track)
+        task = self._resolve_tasks.get(key)
+        if task is None or task.done():
+            task = self._loop.create_task(self._resolve_track(track))
+            self._resolve_tasks[key] = task
+            task.add_done_callback(self._on_resolve_done)
+        return task
+
+    def _on_resolve_done(self, task: asyncio.Task) -> None:
+        """Drop a finished resolve task from the in-flight map."""
+        for key, pending in list(self._resolve_tasks.items()):
+            if pending is task:
+                self._resolve_tasks.pop(key, None)
+                break
+
+    async def _resolve_track(self, track: Track) -> None:
+        """Download ``track`` to a local file, falling back to a stream URL.
+
+        Idempotent: ``download_track`` returns the cached path when
+        ``track.local_file`` is already set, so a redundant call is a no-op.
+        """
         try:
             result = await self.ytdl.download_track(track)
-            if result:
-                log.info("Pre-downloaded deferred track", title=track.title[:50])
-            else:
-                # Fallback: resolve stream URL for streaming playback
+            if not result:
                 await self.ytdl.resolve_stream_url(track)
-                log.info("Pre-resolved deferred track (stream)", title=track.title[:50])
         except Exception:
-            pass  # Will retry at play time
+            log.debug("Track resolve failed; will retry at play time",
+                      title=track.title[:50])
 
     def start_deferred(self) -> None:
         """Start playback of previously deferred tracks.
@@ -941,18 +974,17 @@ class GuildMusicPlayer:
                 # previous) doesn't blank the seed back to None.
                 self._last_played_track = track
 
-                # Acquire audio: pre-download to local file, fall back to stream URL
+                # Acquire audio via the shared, dedup'd resolver: awaits the
+                # in-flight deferred pre-resolve / prefetch for this track if
+                # one exists, otherwise resolves now. Never double-downloads.
+                # See incidents/deferred-double-download.
                 if not track.local_file and not track.stream_url:
-                    log.info("Downloading track", title=track.title[:60])
-                    local = await self.ytdl.download_track(track)
-                    if not local:
-                        # Download failed — fall back to stream URL
-                        log.info("Download failed, resolving stream URL", title=track.title[:60])
-                        url = await self.ytdl.resolve_stream_url(track)
-                        if not url:
-                            log.warning("Failed to get audio, skipping", title=track.title[:60])
-                            self.queue.current = None
-                            continue
+                    log.info("Acquiring track", title=track.title[:60])
+                    await self._ensure_resolving(track)
+                    if not track.local_file and not track.stream_url:
+                        log.warning("Failed to get audio, skipping", title=track.title[:60])
+                        self.queue.current = None
+                        continue
 
                 log.info(
                     "Playing track",
@@ -1083,19 +1115,10 @@ class GuildMusicPlayer:
         if next_track.local_file or next_track.stream_url:
             return  # Already ready
 
-        async def _prefetch():
-            try:
-                result = await self.ytdl.download_track(next_track)
-                if result:
-                    log.debug("Pre-downloaded next track", title=next_track.title[:40])
-                else:
-                    # Fallback: at least have a stream URL ready
-                    await self.ytdl.resolve_stream_url(next_track)
-                    log.debug("Pre-fetched next track URL", title=next_track.title[:40])
-            except Exception:
-                pass  # Non-critical — will resolve at play time
-
-        self._prefetch_task = self._loop.create_task(_prefetch())
+        # Route through the shared resolver so when the player loop reaches
+        # this track it awaits the SAME in-flight task instead of racing a
+        # second download. See incidents/deferred-double-download.
+        self._prefetch_task = self._ensure_resolving(next_track)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1114,6 +1137,13 @@ class GuildMusicPlayer:
 
         if self._prefetch_task and not self._prefetch_task.done():
             self._prefetch_task.cancel()
+
+        # Cancel any in-flight deferred/prefetch resolves so they don't run
+        # after teardown (and orphan a temp file with no cleanup path).
+        for task in list(self._resolve_tasks.values()):
+            if not task.done():
+                task.cancel()
+        self._resolve_tasks.clear()
 
         if self.voice_client.is_playing() or self._paused:
             self.voice_client.stop()

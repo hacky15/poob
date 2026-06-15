@@ -610,7 +610,15 @@ class DeepgramStreamManager:
             stream.listener_task.cancel()
 
     async def cleanup(self) -> None:
-        """Close all streaming connections."""
+        """Close all streaming connections and stop the keepalive loop.
+
+        The keepalive task runs independently of streams; without cancelling
+        it here it leaked a live task after every session (see
+        docs/incidents/deepgram-streams-leak-on-cleanup.md).
+        """
+        if self._keepalive_task is not None and not self._keepalive_task.done():
+            self._keepalive_task.cancel()
+        self._keepalive_task = None
         for user_id in list(self._streams.keys()):
             await self.close_user(user_id)
 
