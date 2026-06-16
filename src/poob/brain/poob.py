@@ -316,17 +316,9 @@ MUSIC_TOOL = {
         "name": "music_assistant",
         "description": (
             "Play or control MUSIC the user wants to HEAR — songs, artists, "
-            "genres, playlists. NOT for sound effects standing in for a "
-            "non-music request (e.g. do NOT play a 'coin flip sound' for 'flip "
-            "a coin' — that's answered in text, not the tool). You MUST classify "
-            "the action type. Use 'play' for one song, 'queue_many' for two-or-more "
-            "songs in one utterance, 'volume' for any volume change (include the "
-            "target number), 'apply_effect' for audio effects "
-            "(nightcore/slowed/reverb/bassboost/etc.), 'autoplay' to toggle "
-            "continuous playback when the queue empties (pass 'mode' as "
-            "'on'/'off'/'status'), and the appropriate action for "
-            "skip/previous/replay/pause/resume/stop/shuffle/loop/"
-            "move/remove/clear/now_playing/queue."
+            "genres, playlists. NOT sound effects standing in for a non-music "
+            "request (don't play a 'coin flip sound' for 'flip a coin' — that's "
+            "answered in text). You MUST set 'action'."
         ),
         "parameters": {
             "type": "object",
@@ -350,65 +342,48 @@ MUSIC_TOOL = {
                         "leave",
                     ],
                     "description": (
-                        "The music action to perform. 'play' for ONE song or "
-                        "playlist. 'queue_many' for TWO-OR-MORE songs in one "
-                        "utterance — pass each title as a separate string in "
-                        "the 'tracks' array. 'previous' walks back to the most "
-                        "recent finished track; 'replay' restarts the current "
-                        "track from 0. 'restore' brings the music BACK after it "
-                        "stopped — resume if paused else replay the last song "
-                        "('put the music back on'). 'seek' jumps to a position in the "
-                        "current track — pass 'time' with formats like '2:30', "
-                        "'2m30s', '150' (absolute) or '+10', '-1m' (relative). "
-                        "'move' reorders the queue (use from_position and "
-                        "to_position). 'remove' deletes a track at 'position'. "
-                        "'clear' empties the upcoming queue. 'volume' for "
-                        "absolute volume target — number OR named extreme "
-                        "('max', 'mute', 'half'). 'volume_up'/'volume_down' "
-                        "for relative bumps. 'apply_effect' applies a named "
-                        "audio filter; pass 'effect' with the preset name. "
-                        "'list_effects' tells the user which audio effects "
-                        "exist (no args) — use it for 'what effects / filters "
-                        "do you have'. "
-                        "'save_playlist' / 'load_playlist' / 'delete_playlist' "
-                        "manage per-guild named playlists — pass 'name' with "
-                        "the playlist title (e.g. 'chill', 'gym'). "
-                        "'list_playlists' returns every saved name with no "
-                        "args. 'leave' makes the bot disconnect from the "
-                        "voice channel (cleans up music + listening)."
+                        "'play' = ONE song/playlist; 'queue_many' = TWO+ songs "
+                        "in one utterance (use the 'tracks' array). 'previous' = "
+                        "the last finished track; 'replay' = restart current "
+                        "from 0; 'restore' = bring music BACK after it stopped "
+                        "('put the music back on'). 'volume' = absolute target "
+                        "(set 'value'); 'volume_up'/'volume_down' = relative. "
+                        "'apply_effect' = audio filter (set 'effect'); "
+                        "'list_effects' = name the available effects (no args, "
+                        "for 'what effects do you have'). 'seek' = jump within "
+                        "the track (set 'time'). 'move'/'remove' use queue "
+                        "positions. 'save_playlist'/'load_playlist'/"
+                        "'delete_playlist' use 'name'; 'list_playlists' has no "
+                        "args. 'queue_spotify_playlist' uses 'url'. 'leave' "
+                        "disconnects. skip/pause/resume/stop/shuffle/loop/"
+                        "now_playing/queue/clear are self-explanatory."
                     ),
                 },
                 "query": {
                     "type": "string",
                     "description": (
-                        "The song name, artist, or search query. Only required "
-                        "for 'play' action. Extract JUST the song/artist name "
-                        "from the user's CURRENT message — not the full message, "
-                        "and NEVER a song title from earlier in the conversation "
-                        "or from what other people said. If the current message "
-                        "names no song, do not borrow one from context."
+                        "Song/artist/search query — for 'play' only. Extract "
+                        "JUST the name from the CURRENT message; NEVER borrow a "
+                        "title from earlier turns or from what others said. If "
+                        "the current message names no song, omit it."
                     ),
                 },
                 "tracks": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Multiple song titles for 'queue_many'. Each entry is "
-                        "a separate search query — one song per entry, no "
-                        "commas or 'and' chaining within a string. Example: "
-                        "['Bohemian Rhapsody', \"Don't Stop Believin'\", "
+                        "Song titles for 'queue_many' — one song per entry, no "
+                        "'and'-chaining in a string. E.g. ['Bohemian Rhapsody', "
                         "'Africa by Toto']."
                     ),
                 },
                 "value": {
                     "type": "integer",
                     "description": (
-                        "Numeric volume target for 'volume' action (0-200). "
-                        "Required for 'volume'. Map named extremes when present: "
-                        "'max'/'crank'/'loudest'/'all the way up' → 200; "
-                        "'mute'/'silence'/'min'/'off' → 0; "
-                        "'half' → 100; 'low'/'quiet' → 50; 'high'/'loud' → 150. "
-                        "Use the explicit number when the user gives one."
+                        "Volume target 0-200 for 'volume' (required). Map "
+                        "extremes: max/loudest/crank=200, mute/off=0, half=100, "
+                        "low/quiet=50, high/loud=150; use the explicit number "
+                        "if given."
                     ),
                 },
                 "from_position": {
@@ -436,50 +411,33 @@ MUSIC_TOOL = {
                 "effect": {
                     "type": "string",
                     "description": (
-                        "Audio effect preset name for 'apply_effect'. Valid: "
-                        "'none' (clear active effect), 'nightcore' (sped up + "
-                        "pitch up), 'slowed' (slowed-genre standard), "
-                        "'slowed_reverb' (slowed + reverb), 'super_slowed' "
-                        "(even slower), 'bassboost' (gentle), 'ultrabass' "
-                        "(heavy/overload bass), '8d' (rotating pan), "
-                        "'vaporwave', 'chipmunk' (pitch way up), 'darth_vader' "
-                        "(deep voice, normal speed), 'overload' "
-                        "(earrape/distortion), 'reverb' (reverb only, no "
-                        "slowdown), 'tremolo', 'vibrato'. Map user phrasings: "
-                        "'nightcore it' → 'nightcore', 'slow it down' → "
-                        "'slowed', 'add reverb' / 'reverb' → 'slowed_reverb' "
-                        "(what users usually mean), 'reverb only' / 'reverb "
-                        "without slowing' → 'reverb', 'darth vader' / 'vader "
-                        "voice' → 'darth_vader', 'ultra bass' / 'max bass' / "
-                        "'bass overload' → 'ultrabass', 'overload it' / "
-                        "'earrape' → 'overload', 'turn off the effect' → "
-                        "'none'."
+                        "Preset for 'apply_effect': none, nightcore, slowed, "
+                        "slowed_reverb, super_slowed, bassboost, ultrabass, 8d, "
+                        "vaporwave, chipmunk, darth_vader, overload, reverb, "
+                        "tremolo, vibrato. 'add reverb'/'reverb' usually means "
+                        "slowed_reverb; use 'reverb' only for reverb without "
+                        "slowdown. 'max bass'/'bass overload'=ultrabass, "
+                        "'earrape'=overload, 'vader voice'=darth_vader; "
+                        "'turn it off'/'clear it'/'remove'=none (clears the "
+                        "active effect)."
                     ),
                 },
                 "time": {
                     "type": "string",
                     "description": (
-                        "Seek target for the 'seek' action. Accepted formats: "
-                        "absolute clock '2:30' or '1:02:03'; absolute "
-                        "suffixed '2m30s' / '1h5m' / '45s'; absolute bare "
-                        "seconds '150'; relative '+10' or '-1m' (offset from "
-                        "current position). Map user phrasings: 'skip ahead "
-                        "10 seconds' → '+10'; 'go to two minutes' → '2:00'; "
-                        "'start over' → use 'replay' instead. Pass the "
-                        "literal time string; the bot parses it."
+                        "Seek target for 'seek' — pass the user's time phrase "
+                        "verbatim ('2:30', '1:02:03', '2m30s', '150', '+10', "
+                        "'-1m'); the bot parses it. For 'start over' use "
+                        "'replay' instead."
                     ),
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["on", "off", "status"],
                     "description": (
-                        "Mode arg for the 'autoplay' action. 'on' enables "
-                        "continuous playback (the bot auto-queues a related "
-                        "track when the queue empties), 'off' disables, "
-                        "'status' reports the current state without changing "
-                        "it. Map user phrasings: 'turn on autoplay' / 'keep "
-                        "playing' → 'on'; 'stop autoplay' / 'no more autoplay' "
-                        "→ 'off'; 'is autoplay on' → 'status'."
+                        "For 'autoplay': 'on' auto-queues a related track when "
+                        "the queue empties, 'off' disables, 'status' reports "
+                        "('keep playing'=on, 'no more autoplay'=off)."
                     ),
                 },
                 "name": {
