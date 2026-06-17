@@ -226,6 +226,21 @@ class MusicCog(commands.Cog, name="Music"):
             return None
 
         channel = member.voice.channel
+
+        # Clear any lingering voice client before connecting. A half-dead
+        # guild.voice_client (session torn down while Discord's gateway still
+        # holds the connection — is_connected() reads False, yet
+        # channel.connect() raises "Already connected") otherwise blocks every
+        # auto-join and Poob can't join any VC. The caller only reaches here
+        # when we're not validly in a VC, so any existing client is stale.
+        # /join clears this via _force_disconnect; auto-join must too. See
+        # incidents/zombie-voice-connection-blocks-autojoin.
+        if guild.voice_client is not None:
+            try:
+                await guild.voice_client.disconnect(force=True)
+            except Exception:
+                pass
+
         try:
             vc = await channel.connect(timeout=15.0)
             log.info(
