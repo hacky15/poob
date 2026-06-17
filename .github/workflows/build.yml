@@ -46,3 +46,28 @@ jobs:
           cache-to: |
             type=registry,ref=ghcr.io/${{ github.repository_owner }}/poob:buildcache,mode=max
             type=gha,mode=max
+
+      # Event-driven deploy trigger. Before this, build.yml only built+pushed,
+      # so deploys rode Komodo's slow auto_update poll (non-deterministic, up to
+      # ~hourly — see incidents/zombie-voice-connection-blocks-autojoin for how a
+      # late deploy compounded an outage). The self-hosted runner is on the
+      # homelab, so it reaches komodo-core via the docker host gateway and POSTs
+      # the poob stack's Komodo webhook to pull+redeploy in ~1 min. HMAC-signed
+      # (GitHub-style) with the stack's webhook secret. Non-fatal: the image is
+      # already pushed; if the trigger misses, the poll is still the fallback.
+      # See docs/decisions/komodo-deploy-trigger.md.
+      - name: Trigger Komodo redeploy
+        continue-on-error: true
+        env:
+          KOMODO_DEPLOY_URL: ${{ secrets.KOMODO_DEPLOY_URL }}
+          KOMODO_WEBHOOK_SECRET: ${{ secrets.KOMODO_WEBHOOK_SECRET }}
+        run: |
+          body='{"ref":"refs/heads/main"}'
+          sig=$(printf '%s' "$body" | openssl dgst -sha256 -hmac "$KOMODO_WEBHOOK_SECRET" | awk '{print $NF}')
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$KOMODO_DEPLOY_URL" \
+            -H 'Content-Type: application/json' \
+            -H 'X-GitHub-Event: push' \
+            -H "X-Hub-Signature-256: sha256=$sig" \
+            -d "$body")
+          echo "Komodo /deploy -> HTTP $code"
+          test "$code" = "200"
