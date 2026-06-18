@@ -9,6 +9,7 @@ thread and the asyncio event loop.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import glob
 import os
 import shutil
@@ -266,6 +267,32 @@ class VoiceSession:
         self._user_names: dict[int, str] = {}
         # Multi-signal fusion address detector (research-backed)
         self._address_detector = MultiSignalAddressDetector()
+
+        # Prewarm the lazy-loaded voice models in the background, right after
+        # join, so the wake + address pipeline is ready BEFORE the user speaks.
+        # Previously OpenWakeWord (first speech frame) and Model2Vec (first
+        # addressee decision) loaded on first use, leaving a ~25-50s cold window
+        # after join where voice requests were silently dropped (no transcript,
+        # no log). The loads are sync, so they run in a thread executor to avoid
+        # stalling the join — the original reason they were deferred. See
+        # incidents/voice-pipeline-cold-start-drops-requests.
+        # no running loop (sync construction) → falls back to lazy load
+        with contextlib.suppress(Exception):
+            self._loop.create_task(self._prewarm_models())
+
+    async def _prewarm_models(self) -> None:
+        """Background-load the wake + address models so they're ready before
+        the first utterance instead of loading on first use (cold-start gap)."""
+        loop = asyncio.get_event_loop()
+        jobs = []
+        if self._dual_pipeline is not None:
+            jobs.append(loop.run_in_executor(None, self._dual_pipeline.prewarm))
+        jobs.append(loop.run_in_executor(None, self._address_detector.prewarm))
+        try:
+            await asyncio.gather(*jobs, return_exceptions=True)
+            log.info("Voice models prewarmed", guild=self._guild_id)
+        except Exception as exc:
+            log.debug("Voice prewarm failed", error=str(exc)[:100])
 
     def _bot_audio_active(self) -> bool:
         """True when Poob's OWN VOICE is playing and could loop back through

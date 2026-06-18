@@ -115,6 +115,21 @@ class WakeWordDetector:
         self._model_name = ""
         self._audio_buffers: dict[int, bytearray] = {}  # per-user audio accumulation
         self._FRAME_SAMPLES = 1280  # 80ms at 16kHz — OpenWakeWord's expected chunk size
+        # Per-user peak OWW score for the current utterance. Surfaced at emit
+        # time so a wake-miss shows "peaked at 0.55 (below 0.7)" instead of a
+        # blind wake_word=False. See incidents/voice-pipeline-cold-start-drops-requests.
+        self._peak_scores: dict[int, float] = {}
+
+    def prewarm(self) -> None:
+        """Eagerly load the OpenWakeWord model (otherwise lazy on the first
+        speech frame, leaving a cold-start window after join). Idempotent;
+        safe to call off-thread on session setup."""
+        self._ensure_model()
+
+    def peak_score(self, user_id: int) -> float:
+        """Highest OWW score seen for this user's current utterance (0.0 if
+        none). Diagnostic only — the live gate uses the per-chunk threshold."""
+        return self._peak_scores.get(user_id, 0.0)
 
     def _ensure_model(self) -> None:
         """Lazy-load the OpenWakeWord model."""
@@ -175,9 +190,11 @@ class WakeWordDetector:
             # Run inference
             prediction = self._model.predict(samples)
 
-            # Check all model outputs against threshold
-            for name, score in prediction.items():
+            # Check all model outputs against threshold + track the peak.
+            for _name, score in prediction.items():
                 s = float(score)
+                if s > self._peak_scores.get(user_id, 0.0):
+                    self._peak_scores[user_id] = s
                 if s >= self._threshold:
                     detected = True
                     # Don't log here — caller logs once per detection event
@@ -195,6 +212,7 @@ class WakeWordDetector:
         after the phrase passes, so stale activations are not a concern.
         """
         self._audio_buffers.pop(user_id, None)
+        self._peak_scores.pop(user_id, None)
 
     def cleanup(self) -> None:
         """Release resources."""
@@ -1082,6 +1100,20 @@ class DualPipelineProcessor:
                 )
                 self._dump_wake_fp(user_id, pipeline.user_name, transcript)
 
+        # Diagnostic: surface WHY the gate decided as it did — both signals +
+        # the OWW peak (even below threshold) — so a wake-miss is debuggable
+        # instead of a bare wake_word=False. See
+        # incidents/voice-pipeline-cold-start-drops-requests.
+        _wd = getattr(self, "_wake_detector", None)
+        log.info(
+            "Wake gate decision",
+            user=pipeline.user_name or user_id,
+            addressed=is_addressed,
+            text_match=text_match,
+            audio_match=audio_match,
+            oww_peak=round(_wd.peak_score(user_id), 3) if _wd is not None else -1.0,
+            threshold=getattr(_wd, "_threshold", -1.0),
+        )
         self._do_emit(user_id, pipeline.user_name, pipeline.speech_start_time,
                       is_addressed, transcript)
         pipeline.is_active = False
@@ -1232,6 +1264,14 @@ class DualPipelineProcessor:
             path=path, transcript=transcript[:60],
             duration_ms=int(len(pcm_bytes) / 32),  # 2 bytes/sample × 16000 Hz
         )
+
+    def prewarm(self) -> None:
+        """Eagerly load the wake-word model so it's ready before the first
+        speech frame (otherwise it loads lazily ~seconds into the session,
+        leaving a cold-start window where wakes are missed). Sync + idempotent;
+        VoiceSession runs it off-thread on join. See
+        incidents/voice-pipeline-cold-start-drops-requests."""
+        self._wake_detector.prewarm()
 
     async def cleanup(self) -> None:
         """Release all resources."""

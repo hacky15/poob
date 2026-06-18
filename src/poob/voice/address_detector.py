@@ -138,6 +138,13 @@ class MultiSignalAddressDetector:
             self._embed_load_failed = True
             log.warning("Model2Vec unavailable, semantic scoring disabled", error=str(exc)[:80])
 
+    def prewarm(self) -> None:
+        """Eagerly load the Model2Vec model (otherwise lazy on the first
+        addressee decision, ~tens of seconds into a session). Idempotent;
+        VoiceSession runs it off-thread on join. See
+        incidents/voice-pipeline-cold-start-drops-requests."""
+        self._ensure_model()
+
     # ----- State update methods (called by VoiceSession) -----
 
     def update_member_names(self, names: set[str]) -> None:
