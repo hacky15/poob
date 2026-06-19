@@ -219,6 +219,14 @@ class AppConfig(BaseSettings):
     # Throttle: never recycle browsers more often than this (avoids thrashing if
     # memory stays high from a source a browser recycle can't reclaim).
     patrol_browser_recycle_min_interval_s: float = 600.0
+    # Voice-priority backoff. poob runs the voice pipeline + this scanner in one
+    # process on a CPU-only box; a chromium patrol cycle during multi-user voice
+    # starves real-time wake/STT/TTS. When True, the scheduler skips a cycle
+    # while voice processed audio within the last window, and resumes once voice
+    # is quiet (no scanner throughput lost outside VC). Set False to disable.
+    # See docs/decisions/patrol-backoff-during-voice.md.
+    patrol_skip_during_voice: bool = True
+    patrol_voice_activity_window_s: float = 120.0
     # FB session self-refresh. Facebook rolls the session token as the
     # authenticated browser is used; a real browser stays logged in for weeks
     # because it keeps the rolled token. We import a one-time cookie snapshot,

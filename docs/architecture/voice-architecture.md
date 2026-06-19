@@ -3,7 +3,7 @@ type: architecture
 status: active
 date: 2026-04-07
 tags: [voice, stt, tts, wake-word, vad]
-related: [[poobbrain-architecture]] [[music-player-architecture]] [[wake-word-dual-gate]] [[toob-voice-filter-chain]] [[tts-loudness-speechnorm]] [[voice-latency-phase1-silero-reenabled]] [[voice-latency-phase2-filler-dispatch]] [[voice-latency-phase3-kokoro]] [[voice-synth-ahead-pipeline]]
+related: [[poobbrain-architecture]] [[music-player-architecture]] [[wake-word-dual-gate]] [[toob-voice-filter-chain]] [[tts-loudness-speechnorm]] [[voice-latency-phase1-silero-reenabled]] [[voice-latency-phase2-filler-dispatch]] [[voice-latency-phase3-kokoro]] [[voice-synth-ahead-pipeline]] [[voice-pipeline-cold-start-drops-requests]] [[patrol-backoff-during-voice]]
 ---
 
 # Voice architecture — dual pipeline, Toob, deferred playback, multi-provider cascade

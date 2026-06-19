@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
+from poob.utils import voice_activity
 from poob.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -114,6 +115,29 @@ class PatrolScheduler:
             float(_mru) if isinstance(_mru, (int, float)) and _mru >= 0 else 600.0
         )
         self._started_monotonic = time.monotonic()
+        # Voice-priority backoff: poob runs the voice pipeline + this scanner
+        # in one process on a CPU-only box. While users are actively in a voice
+        # channel, a chromium patrol cycle starves real-time voice inference,
+        # so we skip the cycle when the voice-activity beacon is recent. The
+        # scanner resumes (full-tilt, no throughput loss) once voice goes quiet
+        # for the window. See docs/decisions/patrol-backoff-during-voice.md.
+        _svd = getattr(config, "patrol_skip_during_voice", True)
+        self._skip_during_voice = bool(_svd)
+        _vw = getattr(config, "patrol_voice_activity_window_s", 120.0)
+        self._voice_activity_window_s = (
+            float(_vw) if isinstance(_vw, (int, float)) and _vw > 0 else 120.0
+        )
+        self._voice_skips = 0  # consecutive cycles skipped for voice (telemetry)
+
+    def _should_skip_for_voice(self) -> bool:
+        """True if this patrol cycle should be deferred because the voice
+        pipeline is actively processing audio (CPU priority to real-time
+        voice). Resumes automatically once voice is quiet for the window.
+        See docs/decisions/patrol-backoff-during-voice.md.
+        """
+        return self._skip_during_voice and voice_activity.is_active(
+            self._voice_activity_window_s
+        )
 
     @property
     def is_running(self) -> bool:
@@ -311,6 +335,23 @@ class PatrolScheduler:
 
             if self._is_paused:
                 continue
+
+            # Voice-priority backoff: don't start a CPU-heavy chromium cycle
+            # while users are actively in a voice channel — it starves
+            # real-time voice (wake/STT/TTS) on the shared CPU. Skipping here
+            # (before browser-recycle + memory-guard + the cycle) also avoids a
+            # memory-pressure restart firing mid-VC and killing the voice
+            # session. The scanner resumes once voice is quiet for the window;
+            # no functionality is lost. See patrol-backoff-during-voice.md.
+            if self._should_skip_for_voice():
+                self._voice_skips += 1
+                log.info(
+                    "Patrol cycle skipped — active voice (CPU priority to voice)",
+                    idle_required_s=self._voice_activity_window_s,
+                    consecutive_voice_skips=self._voice_skips,
+                )
+                continue
+            self._voice_skips = 0
 
             # First line of defense against the chromium leak: recycle the
             # browsers IN-PROCESS (reclaims renderer memory, keeps Discord/voice

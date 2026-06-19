@@ -31,6 +31,7 @@ from typing import Callable
 
 import numpy as np
 
+from poob.utils import voice_activity
 from poob.utils.logging import get_logger
 
 log = get_logger("voice.dual_pipeline")
@@ -862,6 +863,10 @@ class DualPipelineProcessor:
         """
         pipeline = self._get_pipeline(user_id, user_name)
         pipeline.last_audio_time = time.monotonic()
+        # Beacon for the patrol scheduler: voice is processing audio right now,
+        # so the scanner should back off the shared CPU. Reuses the timestamp
+        # just taken (no extra syscall). See patrol-backoff-during-voice.
+        voice_activity.mark_active(pipeline.last_audio_time)
 
         # Pre-connect Deepgram on first frame from any user — don't wait for speech
         if not getattr(pipeline, '_deepgram_preconnected', False):

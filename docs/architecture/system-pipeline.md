@@ -3,7 +3,7 @@ type: architecture
 status: active
 date: 2026-04-01
 tags: [pipeline, scanner, patrol, system-overview]
-related: [[poobbrain-architecture]] [[facebook-scrolling-and-listing-volume]] [[vlm-triage-pipeline]] [[unified-filter-pipeline]]
+related: [[poobbrain-architecture]] [[facebook-scrolling-and-listing-volume]] [[vlm-triage-pipeline]] [[unified-filter-pipeline]] [[patrol-backoff-during-voice]] [[voice-architecture]]
 ---
 
 # System pipeline — end-to-end
@@ -28,6 +28,12 @@ Complete pipeline documentation. Every stage, every data flow, every decision po
 │  Phase 4: EVALUATE ──► Phase 5: MATCH ──► Phase 6: NOTIFY          │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+**Voice-priority backoff:** the scanner and the real-time voice pipeline run in
+the **same process** on a CPU-only box. The scheduler **skips a cycle while
+users are actively in a voice channel** (voice-activity beacon recent) so voice
+inference isn't starved, resuming once voice is quiet. Cycles are deferred, not
+dropped. See [[patrol-backoff-during-voice]].
 
 ---
 
