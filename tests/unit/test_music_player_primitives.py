@@ -31,7 +31,8 @@ from poob.music.queue import Track
 
 def _t(name: str) -> Track:
     return Track(
-        title=name, url=f"https://example.com/{name}",
+        title=name,
+        url=f"https://example.com/{name}",
         duration=timedelta(seconds=180),
     )
 
@@ -48,6 +49,7 @@ def _make_player() -> GuildMusicPlayer:
 # ---------------------------------------------------------------------------
 # replay()
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_replay_with_no_current_returns_none() -> None:
@@ -83,7 +85,7 @@ async def test_replay_preserves_active_effect_chain() -> None:
     p = _make_player()
     cur = _t("song")
     p.queue.current = cur
-    p._active_effect = "nightcore"
+    p._effect_levels = {"speed": 1.25}
     p._active_effect_chain = "asetrate=44100*1.25,aresample=44100"
 
     await p.replay()
@@ -95,6 +97,7 @@ async def test_replay_preserves_active_effect_chain() -> None:
 # ---------------------------------------------------------------------------
 # previous()
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_previous_with_empty_history_returns_none() -> None:
@@ -113,7 +116,9 @@ async def test_previous_with_empty_history_returns_none() -> None:
 async def test_previous_swaps_current_with_history_pop_and_inserts_old_to_queue() -> None:
     p = _make_player()
     a, b, c = _t("A"), _t("B"), _t("C")
-    p.queue.add(a); p.queue.add(b); p.queue.add(c)
+    p.queue.add(a)
+    p.queue.add(b)
+    p.queue.add(c)
     p.queue.get_next()  # current=A
     p.queue.get_next()  # current=B, history=[A]
 
@@ -154,6 +159,7 @@ async def test_previous_with_no_current_still_walks_history() -> None:
 # set_effect()
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_set_effect_with_no_current_returns_none() -> None:
     p = _make_player()
@@ -161,7 +167,7 @@ async def test_set_effect_with_no_current_returns_none() -> None:
     assert result is None
     assert p._respawn_request is None
     # But the effect should be stored as the default for the next track.
-    assert p._active_effect == "nightcore"
+    assert p.active_effects == ["nightcore"]
 
 
 @pytest.mark.asyncio
@@ -185,18 +191,39 @@ async def test_set_effect_requests_respawn_at_current_position() -> None:
 
 
 @pytest.mark.asyncio
+async def test_adjust_effect_applies_on_the_fly_at_position() -> None:
+    """'slower' mid-track respawns FFmpeg at the current position with a slowed
+    -af chain — incremental adjustment without restarting the song."""
+    p = _make_player()
+    cur = _t("song")
+    p.queue.current = cur
+    p._track_started_at = time.monotonic() - 3.0
+    p._total_pause_seconds = 0.0
+
+    await p.adjust_effect("slower")
+    await p.adjust_effect("slower")  # slower and slower
+
+    assert p._respawn_request is not None
+    track, position, chain = p._respawn_request
+    assert track is cur
+    assert 2.5 < position < 3.5
+    assert chain is not None and "asetrate=44100*0." in chain  # a slowdown
+    assert p._effect_levels["speed"] < 0.85  # two steps below normal-slow
+
+
+@pytest.mark.asyncio
 async def test_set_effect_none_clears_filter_chain() -> None:
     p = _make_player()
     cur = _t("song")
     p.queue.current = cur
     p._track_started_at = time.monotonic() - 2.0
-    p._active_effect = "nightcore"
+    p._effect_levels = {"speed": 1.25}
     p._active_effect_chain = "asetrate=44100*1.25,aresample=44100"
 
     result = await p.set_effect("none")
 
     assert result == "none"
-    assert p._active_effect == "none"
+    assert p.active_effects == []
     assert p._active_effect_chain is None
     track, _pos, chain = p._respawn_request  # type: ignore[misc]
     assert chain is None
@@ -215,12 +242,13 @@ async def test_set_effect_invalid_name_raises_and_does_not_mutate() -> None:
         await p.set_effect("notarealeffect")
 
     assert p._respawn_request is None
-    assert p._active_effect == "none"
+    assert p.active_effects == []
 
 
 # ---------------------------------------------------------------------------
 # Position tracker
 # ---------------------------------------------------------------------------
+
 
 def test_position_seconds_zero_when_no_track_playing() -> None:
     p = _make_player()

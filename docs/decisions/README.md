@@ -14,6 +14,7 @@ Write a new note (don't edit in place) when a decision is reversed or materially
 
 ## Entries
 
+- [[per-subsystem-component-logging]] — `component` field (first logger segment) on every event + a rotating `poob.jsonl` firehose (lossless machine filter) + ANSI off in non-TTY + a `{stream: components}` curated registry; `voice.log` now includes music. Extends [[persistent-voice-log]] (2026-06-15, active)
 - [[public-incredible-selectivity-floors]] — de-clutter the public feed: VLM used-resale framing + worth_attention gate (fail-open), absolute $-floor (INCREDIBLE ≥$50), value-multiple cap (≤4×), free-item value/identifiability floor, and a structural sale-event/non-item GarbageFilter gate. All public-only; watchlist exempt (2026-06-07, active)
 - [[watchlist-honors-threshold-not-freshness]] — watchlist DMs gated SOLELY by the per-item notification_threshold ('all' = any confirmed match); decoupled from the global deal-quality floor + exempt from freshness (a wishlist is about availability, not just-listed). Narrows the watchlist part of [[triage-freshness-converge-with-notify]] (2026-06-04, active)
 - [[in-process-browser-recycle]] — recycle chromium in-process (stop/start, profile preserved) on soft-memory (70%) or 4h age instead of the whole-process os._exit; reclaims the renderer leak without dropping Discord/voice (2026-06-03, active)
@@ -21,6 +22,7 @@ Write a new note (don't edit in place) when a decision is reversed or materially
 - [[music-queue-many-tool]] — ``queue_many`` action takes ``tracks: list[str]`` for multi-song queue from one utterance; per-track resolution status (2026-05-12, active)
 - [[music-filter-presets]] — nightcore / slowed / slowed_reverb / bassboost / 8d / vaporwave / karaoke / chipmunk / deep / super_slowed as named presets, dispatched via ``apply_effect`` (2026-05-12, active)
 - [[music-on-the-fly-filter-respawn]] — change effects mid-track via FFmpeg respawn with ``-ss`` seek; shared mechanism for replay / previous / set_effect (2026-05-12, active)
+- [[music-effect-stacking]] — effects STACK (one per category) via ``add``/``replace``/``remove`` modes; alias resolution; ``[SPEAK]`` verbatim protocol so ``list_effects`` reads the list instead of persona-snark (2026-06-19, active)
 - [[music-seek]] — ``seek`` action with multi-format parser (``2:30``, ``2m30s``, ``150``, ``+10``, ``-1m``); reuses respawn machinery (2026-05-12, active)
 - [[music-now-playing-embed-buttons]] — 3 new persistent-view buttons (previous / replay / leave) + active-effect embed indicator; cross-cog leave reaches VoiceCog (2026-05-12, active)
 - [[voice-latency-phase1-silero-reenabled]] — shared `SileroVADProcessor` per session + per-user `_state`/`_context` clone-restore + lazy model load; gated by `VOICE_USE_SILERO_VAD` (default OFF for A/B) (2026-05-24, active)

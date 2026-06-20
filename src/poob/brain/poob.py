@@ -126,14 +126,22 @@ _MUSIC_ROUTING_RULES = (
     "sounds like nonsense or a made-up name. Take those words from THIS "
     "message only; never pull a song title from earlier turns or from "
     "what other people said.\n"
-    "AUDIO EFFECTS ROUTING:\n"
+    "AUDIO EFFECTS ROUTING (effects STACK — layering is the default):\n"
     "- 'nightcore it' / 'make it nightcore' → action=apply_effect, effect='nightcore'\n"
     "- 'slow it down' / 'slowed' → action=apply_effect, effect='slowed'\n"
-    "- 'add reverb' / 'reverb' → action=apply_effect, effect='slowed_reverb'\n"
-    "- 'reverb only' / 'reverb without slowing' → action=apply_effect, effect='reverb'\n"
+    "- 'add reverb' / 'reverb' → action=apply_effect, effect='reverb' (layers on)\n"
     "- 'darth vader' / 'vader voice' / 'make it deep' → action=apply_effect, effect='darth_vader'\n"
     "- 'ultra bass' / 'max bass' / 'bass overload' → action=apply_effect, effect='ultrabass'\n"
     "- 'overload it' / 'earrape' / 'distort it' → action=apply_effect, effect='overload'\n"
+    "- STACKING: 'add X' / 'keep the filters and add X' / 'also X' → effect=X, "
+    "mode='add' (default — layers on top). 'only X' / 'just X' → mode='replace' "
+    "(sole effect). 'take off the X' / 'remove the X' → mode='remove' (drops "
+    "that one, keeps the rest).\n"
+    "- ADJUST (on the fly): 'slower' / 'slow it down more' / 'even slower' → "
+    "effect='slower'; 'faster' / 'speed it up more' → effect='faster' (no mode). "
+    "'more reverb' / 'less reverb' → effect='reverb' + mode='more'/'less'; same "
+    "for 'more bass'/'less bass', 'more 8d', etc. — 'more'/'less' crank the named "
+    "effect up or down.\n"
     "- 'what effects / filters do you have' / 'list effects' → action=list_effects (no effect arg)\n"
     "- 'put the music back on' / 'put that song back on' / 'bring it back' / "
     "'play that again' / 'unpause' / 'resume the music' → action=restore (brings "
@@ -411,15 +419,13 @@ MUSIC_TOOL = {
                 "effect": {
                     "type": "string",
                     "description": (
-                        "Preset for 'apply_effect': none, nightcore, slowed, "
-                        "slowed_reverb, super_slowed, bassboost, ultrabass, 8d, "
-                        "vaporwave, chipmunk, darth_vader, overload, reverb, "
-                        "tremolo, vibrato. 'add reverb'/'reverb' usually means "
-                        "slowed_reverb; use 'reverb' only for reverb without "
-                        "slowdown. 'max bass'/'bass overload'=ultrabass, "
-                        "'earrape'=overload, 'vader voice'=darth_vader; "
-                        "'turn it off'/'clear it'/'remove'=none (clears the "
-                        "active effect)."
+                        "Effect for 'apply_effect' (effects STACK — see 'mode'). "
+                        "Names: none, nightcore, slowed, slowed_reverb, "
+                        "super_slowed, bassboost, ultrabass, 8d, vaporwave, "
+                        "chipmunk, darth_vader, overload, reverb, tremolo, "
+                        "vibrato. Aliases resolve ('ultra slowed', 'vader "
+                        "voice', 'max bass'=ultrabass, 'earrape'=overload). "
+                        "'clear'/'none'/'turn it off'=none (wipes ALL effects)."
                     ),
                 },
                 "time": {
@@ -433,11 +439,13 @@ MUSIC_TOOL = {
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["on", "off", "status"],
+                    "enum": ["on", "off", "status", "add", "replace", "remove", "more", "less"],
                     "description": (
-                        "For 'autoplay': 'on' auto-queues a related track when "
-                        "the queue empties, 'off' disables, 'status' reports "
-                        "('keep playing'=on, 'no more autoplay'=off)."
+                        "For 'autoplay': on/off/status. For 'apply_effect': "
+                        "'add' (default — stack/layer), 'replace' ('only X' — "
+                        "sole effect), 'remove' (drop one), 'more'/'less' "
+                        "(crank an adjustable effect up/down: 'more reverb', "
+                        "'less bass'). 'faster'/'slower' need no mode."
                     ),
                 },
                 "name": {
@@ -1486,6 +1494,17 @@ class PoobBrain:
                 self._clear_play_on_failure(
                     guild_id, user_id, play_query_for_dedup,
                 )
+
+        if music_response.startswith("[SPEAK]"):
+            # Informational answer (e.g. list_effects) — return VERBATIM, never
+            # persona-wrap. The voice wrap (_wrap_music_response) regenerates a
+            # persona line and discards the content, which is the "what effects
+            # do you have → 'you poor soul' (no list)" bug. The caller still
+            # yields the persona voice sentinel, so it's spoken in-character but
+            # with the real content. See decisions/music-effect-stacking.
+            clean = music_response[7:].strip()
+            self._save_response(guild_id, user_id, clean)
+            return clean
 
         if music_response.startswith("[SILENT]"):
             clean = music_response[8:].strip()

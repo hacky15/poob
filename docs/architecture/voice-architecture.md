@@ -3,7 +3,7 @@ type: architecture
 status: active
 date: 2026-04-07
 tags: [voice, stt, tts, wake-word, vad]
-related: [[poobbrain-architecture]] [[music-player-architecture]] [[wake-word-dual-gate]] [[toob-voice-filter-chain]] [[tts-loudness-speechnorm]] [[voice-latency-phase1-silero-reenabled]] [[voice-latency-phase2-filler-dispatch]] [[voice-latency-phase3-kokoro]] [[voice-synth-ahead-pipeline]] [[voice-pipeline-cold-start-drops-requests]] [[patrol-backoff-during-voice]]
+related: [[poobbrain-architecture]] [[music-player-architecture]] [[wake-word-dual-gate]] [[toob-voice-filter-chain]] [[tts-loudness-speechnorm]] [[voice-latency-phase1-silero-reenabled]] [[voice-latency-phase2-filler-dispatch]] [[voice-latency-phase3-kokoro]] [[voice-synth-ahead-pipeline]] [[voice-pipeline-cold-start-drops-requests]] [[patrol-backoff-during-voice]] [[music-effect-stacking]]
 ---
 
 # Voice architecture — dual pipeline, Toob, deferred playback, multi-provider cascade
@@ -64,6 +64,8 @@ This is the root-cause fix for the "snappy with 2s of silence between sentences"
 ## Silent music controls
 
 Control commands return `[SILENT]Status` from the music handler. The brain detects the prefix, returns empty string to the session → no TTS generated, no personality wrap. Action executes instantly (~600ms end-to-end). The `[SILENT]` protocol is a structured contract between handler and brain, not a bandaid.
+
+**`[SPEAK]` — its sibling.** Informational answers (e.g. `list_effects`) return `[SPEAK]<text>`. The brain returns the text **verbatim** — never persona-wrapped. Short (<300 char) non-`[SILENT]` music responses otherwise go through `_wrap_music_response`/`_wrap_in_personality`, which *regenerates* a persona line and discards the content (the "what effects do you have → 'you poor soul' with no list" bug). `[SPEAK]` keeps the content; the caller still yields the Toob/Boob voice sentinel, so it's spoken in-character. See [[music-effect-stacking]].
 
 ## Deferred playback — session-level orchestration
 

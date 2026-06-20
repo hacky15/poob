@@ -3,7 +3,7 @@ type: architecture
 status: active
 date: 2026-04-07
 tags: [music, audio, ytdl, ffmpeg]
-related: [[voice-architecture]] [[one-handler-music-contract]] [[poobbrain-architecture]] [[music-autoplay-cascade]] [[music-named-playlists]]
+related: [[voice-architecture]] [[one-handler-music-contract]] [[poobbrain-architecture]] [[music-autoplay-cascade]] [[music-named-playlists]] [[music-effect-stacking]]
 ---
 
 # Music player — yt-dlp + FFmpeg + audioop PCM mixer
@@ -77,7 +77,7 @@ Transitions: event-driven via `asyncio.Event`. The `after` callback in `vc.play(
 
 ## Audio-effect pipeline (on-the-fly filter toggle)
 
-Filter presets (nightcore / slowed / slowed_reverb / bassboost / 8d / etc.) are validated FFmpeg ``-af`` chains stored in [music/effects.py](../../src/poob/music/effects.py). The player can apply / clear an effect on the live track via ``GuildMusicPlayer.set_effect(name)``. Live toggling is implemented by respawning the FFmpeg subprocess with ``-ss <position>`` and the new ``-af`` chain — see [[music-on-the-fly-filter-respawn]]. The same respawn mechanism powers ``replay()`` and ``previous()``; all three callers set ``_respawn_request`` and let the player loop's inner respawn loop rebuild the audio source without advancing the queue.
+Effects are **parametric**: each adjustable filter (speed/bass/reverb/8d/tremolo/vibrato) is a continuous *level* in ``effects.DIMENSIONS`` with a chain builder, not a frozen preset string. ``GuildMusicPlayer`` holds ``_effect_levels`` (dimension → level) + ``_atomic_effects`` (presets with no single knob: darth_vader, overload); ``effects.render_effect_chain`` builds the combined, category-ordered ``-af``. Named presets are shortcuts that set levels (``PRESET_DIMENSION_LEVELS``). At most one occupant per category (dimension or atomic). Mutators: ``set_effect`` (replace all), ``add_effect`` (layer), ``remove_effect`` (drop one), ``adjust_effect(target, "up"/"down")`` for "more/less" and "slower/faster" (steps a level via ``effects.step_level``, clamped) — all resolve aliases/dimensions and respawn through the shared ``_apply_effect_chain``. See [[music-effect-stacking]]. Live changes respawn FFmpeg with ``-ss <position>`` and the new combined ``-af`` — see [[music-on-the-fly-filter-respawn]]. The same respawn mechanism powers ``replay()`` and ``previous()``; all callers set ``_respawn_request`` and let the player loop's inner respawn loop rebuild the audio source without advancing the queue.
 
 A ~200-400 ms audio gap on respawn is intentional, documented in [[ffmpeg-effect-toggle-creates-audio-gap]]. The position tracker (``GuildMusicPlayer.position_seconds``) is wall-clock since play minus paused intervals plus the active ``-ss`` offset — listener-perceived position, not subprocess uptime.
 
@@ -91,7 +91,7 @@ A ~200-400 ms audio gap on respawn is intentional, documented in [[ffmpeg-effect
 | Queue manip | ``move``, ``remove``, ``clear``, ``shuffle``, ``loop`` |
 | Volume | ``volume``, ``volume_up``, ``volume_down`` |
 | Display | ``now_playing``, ``queue`` |
-| Effects | ``apply_effect`` (preset name via ``effect`` arg) |
+| Effects | ``apply_effect`` (``effect`` + ``mode``: ``add`` default / ``replace`` / ``remove`` / ``more`` / ``less`` — parametric, on the fly; 'slower'/'faster' need no mode), ``list_effects`` |
 | Position | ``seek`` (multi-format ``time`` string via [[music-seek]]) |
 | Autoplay | ``autoplay`` (``mode`` arg: ``on`` / ``off`` / ``status``) |
 | Playlists | ``save_playlist``, ``load_playlist``, ``list_playlists``, ``delete_playlist`` (``name`` arg for save/load/delete) |

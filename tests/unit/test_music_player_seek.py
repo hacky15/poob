@@ -21,7 +21,8 @@ from poob.music.seek import ParsedSeek
 
 def _t(name: str, *, duration_s: int = 180, is_stream: bool = False) -> Track:
     return Track(
-        title=name, url=f"https://example.com/{name}",
+        title=name,
+        url=f"https://example.com/{name}",
         duration=None if is_stream else timedelta(seconds=duration_s),
         is_stream=is_stream,
     )
@@ -37,6 +38,7 @@ def _make_player() -> GuildMusicPlayer:
 # ---------------------------------------------------------------------------
 # No current track / stream — early-return contracts
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_seek_returns_none_when_no_current_track() -> None:
@@ -66,6 +68,7 @@ async def test_seek_returns_none_on_livestream() -> None:
 # ---------------------------------------------------------------------------
 # Absolute target
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_seek_absolute_sets_target_directly() -> None:
@@ -117,6 +120,7 @@ async def test_seek_absolute_clamps_to_duration_minus_one() -> None:
 # Relative target
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_seek_relative_adds_to_current_position() -> None:
     p = _make_player()
@@ -162,13 +166,14 @@ async def test_seek_relative_clamps_when_target_exceeds_duration() -> None:
 # Effect preservation
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_seek_preserves_active_effect_chain() -> None:
     """Seeking under nightcore stays nightcored. Same contract as replay."""
     p = _make_player()
     p.queue.current = _t("song", duration_s=180)
     p._track_started_at = time.monotonic() - 10.0
-    p._active_effect = "nightcore"
+    p._effect_levels = {"speed": 1.25}
     p._active_effect_chain = "asetrate=44100*1.25,aresample=44100"
 
     await p.seek(ParsedSeek(seconds=45.0, relative=False))
@@ -180,6 +185,7 @@ async def test_seek_preserves_active_effect_chain() -> None:
 # ---------------------------------------------------------------------------
 # Track without duration metadata
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_seek_with_unknown_duration_skips_upper_clamp() -> None:

@@ -26,7 +26,8 @@ from poob.music.queue import Track
 
 def _t(name: str) -> Track:
     return Track(
-        title=name, url=f"https://example.com/{name}",
+        title=name,
+        url=f"https://example.com/{name}",
         duration=timedelta(seconds=180),
     )
 
@@ -50,6 +51,10 @@ def _make_cog_and_player() -> tuple[MusicCog, MagicMock]:
     player.is_playing = False
     player.current_track = None
     player.active_effect = "none"
+    player.set_effect = AsyncMock(return_value=None)
+    player.add_effect = AsyncMock(return_value=None)
+    player.remove_effect = AsyncMock(return_value=None)
+    player.adjust_effect = AsyncMock(return_value=None)
 
     # Make _get_or_create_player return our mock regardless of args.
     cog._get_or_create_player = MagicMock(return_value=player)  # type: ignore[method-assign]
@@ -72,13 +77,16 @@ def _make_cog_and_player() -> tuple[MusicCog, MagicMock]:
 # previous / replay
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_previous_with_empty_history_returns_silent_error() -> None:
     cog, player = _make_cog_and_player()
     player.previous = AsyncMock(return_value=None)
 
     resp = await cog.handle_music_request(
-        "go back", user_id=1, guild_id=10,
+        "go back",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "previous"},
     )
 
@@ -93,7 +101,9 @@ async def test_previous_with_history_returns_titled_silent_reply() -> None:
     player.previous = AsyncMock(return_value=_t("Old Song"))
 
     resp = await cog.handle_music_request(
-        "previous", user_id=1, guild_id=10,
+        "previous",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "previous"},
     )
 
@@ -107,7 +117,9 @@ async def test_replay_with_no_current_returns_silent_error() -> None:
     player.replay = AsyncMock(return_value=None)
 
     resp = await cog.handle_music_request(
-        "replay", user_id=1, guild_id=10,
+        "replay",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "replay"},
     )
 
@@ -121,7 +133,9 @@ async def test_replay_with_current_returns_titled_silent_reply() -> None:
     player.replay = AsyncMock(return_value=_t("Now Playing"))
 
     resp = await cog.handle_music_request(
-        "replay", user_id=1, guild_id=10,
+        "replay",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "replay"},
     )
 
@@ -133,6 +147,7 @@ async def test_replay_with_current_returns_titled_silent_reply() -> None:
 # move / remove / clear
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_move_translates_one_based_to_zero_based() -> None:
     """User-facing queue is 1-based (matches format_queue display).
@@ -143,7 +158,9 @@ async def test_move_translates_one_based_to_zero_based() -> None:
     player.queue.size = 3
 
     resp = await cog.handle_music_request(
-        "move", user_id=1, guild_id=10,
+        "move",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "move", "from_position": 1, "to_position": 3},
     )
 
@@ -157,7 +174,9 @@ async def test_move_missing_positions_returns_silent_error() -> None:
     cog, player = _make_cog_and_player()
 
     resp = await cog.handle_music_request(
-        "move", user_id=1, guild_id=10,
+        "move",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "move"},
     )
 
@@ -172,7 +191,9 @@ async def test_move_out_of_range_returns_silent_error() -> None:
     player.queue.size = 3
 
     resp = await cog.handle_music_request(
-        "move", user_id=1, guild_id=10,
+        "move",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "move", "from_position": 99, "to_position": 1},
     )
 
@@ -187,7 +208,9 @@ async def test_remove_translates_one_based_to_zero_based() -> None:
     player.queue.size = 2
 
     resp = await cog.handle_music_request(
-        "remove", user_id=1, guild_id=10,
+        "remove",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "remove", "position": 2},
     )
 
@@ -202,7 +225,9 @@ async def test_clear_returns_count_in_silent_reply() -> None:
     player.queue.clear = MagicMock(return_value=5)
 
     resp = await cog.handle_music_request(
-        "clear", user_id=1, guild_id=10,
+        "clear",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "clear"},
     )
 
@@ -214,15 +239,37 @@ async def test_clear_returns_count_in_silent_reply() -> None:
 # apply_effect
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
-async def test_apply_effect_dispatches_to_player_set_effect() -> None:
+async def test_apply_effect_default_mode_stacks_via_add_effect() -> None:
+    # Default mode is 'add' (stack/layer) — see decisions/music-effect-stacking.
+    cog, player = _make_cog_and_player()
+    player.add_effect = AsyncMock(return_value="nightcore")
+    player.active_effect = "nightcore"
+
+    resp = await cog.handle_music_request(
+        "nightcore it",
+        user_id=1,
+        guild_id=10,
+        tool_args={"action": "apply_effect", "effect": "nightcore"},
+    )
+
+    player.add_effect.assert_awaited_once_with("nightcore")
+    player.set_effect.assert_not_awaited()
+    assert resp.startswith("[SILENT]")
+
+
+@pytest.mark.asyncio
+async def test_apply_effect_replace_mode_uses_set_effect() -> None:
     cog, player = _make_cog_and_player()
     player.set_effect = AsyncMock(return_value="nightcore")
     player.active_effect = "nightcore"
 
     resp = await cog.handle_music_request(
-        "nightcore it", user_id=1, guild_id=10,
-        tool_args={"action": "apply_effect", "effect": "nightcore"},
+        "only nightcore",
+        user_id=1,
+        guild_id=10,
+        tool_args={"action": "apply_effect", "effect": "nightcore", "mode": "replace"},
     )
 
     player.set_effect.assert_awaited_once_with("nightcore")
@@ -230,13 +277,83 @@ async def test_apply_effect_dispatches_to_player_set_effect() -> None:
 
 
 @pytest.mark.asyncio
+async def test_apply_effect_remove_mode_uses_remove_effect() -> None:
+    cog, player = _make_cog_and_player()
+    player.remove_effect = AsyncMock(return_value="slowed")
+    player.active_effect = "slowed"
+
+    resp = await cog.handle_music_request(
+        "take off the reverb",
+        user_id=1,
+        guild_id=10,
+        tool_args={"action": "apply_effect", "effect": "reverb", "mode": "remove"},
+    )
+
+    player.remove_effect.assert_awaited_once_with("reverb")
+    assert resp.startswith("[SILENT]")
+
+
+@pytest.mark.asyncio
+async def test_apply_effect_more_mode_adjusts_up() -> None:
+    cog, player = _make_cog_and_player()
+    player.adjust_effect = AsyncMock(return_value="heavy reverb")
+    player.active_effect = "heavy reverb"
+
+    resp = await cog.handle_music_request(
+        "more reverb",
+        user_id=1,
+        guild_id=10,
+        tool_args={"action": "apply_effect", "effect": "reverb", "mode": "more"},
+    )
+
+    player.adjust_effect.assert_awaited_once_with("reverb", "up")
+    assert resp.startswith("[SILENT]")
+
+
+@pytest.mark.asyncio
+async def test_apply_effect_less_mode_adjusts_down() -> None:
+    cog, player = _make_cog_and_player()
+    player.adjust_effect = AsyncMock(return_value="bass boost")
+
+    resp = await cog.handle_music_request(
+        "less bass",
+        user_id=1,
+        guild_id=10,
+        tool_args={"action": "apply_effect", "effect": "bass", "mode": "less"},
+    )
+
+    player.adjust_effect.assert_awaited_once_with("bass", "down")
+    assert resp.startswith("[SILENT]")
+
+
+@pytest.mark.asyncio
+async def test_apply_effect_slower_word_adjusts_speed() -> None:
+    # bare "slower"/"faster" carry their own direction — no mode needed
+    cog, player = _make_cog_and_player()
+    player.adjust_effect = AsyncMock(return_value="0.7x speed")
+
+    resp = await cog.handle_music_request(
+        "slower",
+        user_id=1,
+        guild_id=10,
+        tool_args={"action": "apply_effect", "effect": "slower"},
+    )
+
+    player.adjust_effect.assert_awaited_once_with("slower")
+    player.add_effect.assert_not_awaited()
+    assert resp.startswith("[SILENT]")
+
+
+@pytest.mark.asyncio
 async def test_apply_effect_none_returns_cleared_message() -> None:
     cog, player = _make_cog_and_player()
-    player.set_effect = AsyncMock(return_value="none")
+    player.add_effect = AsyncMock(return_value=None)
     player.active_effect = "none"
 
     resp = await cog.handle_music_request(
-        "clear the effect", user_id=1, guild_id=10,
+        "clear the effect",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "apply_effect", "effect": "none"},
     )
 
@@ -249,10 +366,14 @@ async def test_apply_effect_unknown_returns_silent_error_with_valid_names() -> N
     from poob.music.effects import EffectNotFoundError
 
     cog, player = _make_cog_and_player()
-    player.set_effect = AsyncMock(side_effect=EffectNotFoundError("unknown effect 'wahwah'; valid: none, nightcore"))
+    player.add_effect = AsyncMock(
+        side_effect=EffectNotFoundError("unknown effect 'wahwah'; valid: none, nightcore")
+    )
 
     resp = await cog.handle_music_request(
-        "wahwah", user_id=1, guild_id=10,
+        "wahwah",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "apply_effect", "effect": "wahwah"},
     )
 
@@ -265,7 +386,9 @@ async def test_apply_effect_no_effect_arg_returns_help() -> None:
     cog, _ = _make_cog_and_player()
 
     resp = await cog.handle_music_request(
-        "apply an effect", user_id=1, guild_id=10,
+        "apply an effect",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "apply_effect"},
     )
 
@@ -279,6 +402,7 @@ async def test_apply_effect_no_effect_arg_returns_help() -> None:
 # list_effects ("what effects do you have")
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_list_effects_speaks_the_effect_roster() -> None:
     """'what effects do you have' must be ANSWERED aloud — NOT a silent
@@ -288,13 +412,15 @@ async def test_list_effects_speaks_the_effect_roster() -> None:
 
     cog, _ = _make_cog_and_player()
     resp = await cog.handle_music_request(
-        "what effects do you have", user_id=1, guild_id=10,
+        "what effects do you have",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "list_effects"},
     )
 
-    assert not resp.startswith("[SILENT]")     # spoken answer, not silent
+    assert not resp.startswith("[SILENT]")  # spoken answer, not silent
     assert "nightcore" in resp.lower()
-    assert "darth vader" in resp.lower()       # underscore rendered as space
+    assert "darth vader" in resp.lower()  # underscore rendered as space
     assert "ultrabass" in resp.lower()
     # count matches the registry minus the 'none' sentinel — no drift
     expected = len([e for e in AVAILABLE_EFFECTS if e != "none"])
@@ -312,13 +438,16 @@ def test_music_tool_schema_advertises_list_effects() -> None:
 # restore ("put the music back on") — 2026-06-11
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_restore_dispatches_to_player_restore_last() -> None:
     cog, player = _make_cog_and_player()
     player.restore_last = AsyncMock(return_value=_t("Last Song"))
 
     resp = await cog.handle_music_request(
-        "put the music back on", user_id=1, guild_id=10,
+        "put the music back on",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "restore"},
     )
 
@@ -333,7 +462,9 @@ async def test_restore_nothing_to_bring_back_is_graceful() -> None:
     player.restore_last = AsyncMock(return_value=None)
 
     resp = await cog.handle_music_request(
-        "put the music back on", user_id=1, guild_id=10,
+        "put the music back on",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "restore"},
     )
 
@@ -352,18 +483,25 @@ def test_music_tool_schema_advertises_restore() -> None:
 # queue_many
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_queue_many_all_resolve_reports_count() -> None:
     cog, player = _make_cog_and_player()
     player.play = AsyncMock()
     cog._ytdl = MagicMock()
-    cog._ytdl.search = AsyncMock(side_effect=[
-        _t("Bohemian Rhapsody"), _t("Don't Stop Believin'"), _t("Africa"),
-    ])
+    cog._ytdl.search = AsyncMock(
+        side_effect=[
+            _t("Bohemian Rhapsody"),
+            _t("Don't Stop Believin'"),
+            _t("Africa"),
+        ]
+    )
     player.is_playing = False
 
     resp = await cog.handle_music_request(
-        "play three songs", user_id=1, guild_id=10,
+        "play three songs",
+        user_id=1,
+        guild_id=10,
         tool_args={
             "action": "queue_many",
             "tracks": ["Bohemian Rhapsody", "Don't Stop Believin'", "Africa by Toto"],
@@ -379,13 +517,19 @@ async def test_queue_many_partial_resolution_reports_misses() -> None:
     cog, player = _make_cog_and_player()
     player.play = AsyncMock()
     cog._ytdl = MagicMock()
-    cog._ytdl.search = AsyncMock(side_effect=[
-        _t("Bohemian Rhapsody"), None, _t("Africa"),
-    ])
+    cog._ytdl.search = AsyncMock(
+        side_effect=[
+            _t("Bohemian Rhapsody"),
+            None,
+            _t("Africa"),
+        ]
+    )
     player.is_playing = True
 
     resp = await cog.handle_music_request(
-        "queue stuff", user_id=1, guild_id=10,
+        "queue stuff",
+        user_id=1,
+        guild_id=10,
         tool_args={
             "action": "queue_many",
             "tracks": [
@@ -408,7 +552,9 @@ async def test_queue_many_all_misses_returns_couldnt_find() -> None:
     cog._ytdl.search = AsyncMock(return_value=None)
 
     resp = await cog.handle_music_request(
-        "queue stuff", user_id=1, guild_id=10,
+        "queue stuff",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "queue_many", "tracks": ["x", "y", "z"]},
     )
 
@@ -421,7 +567,9 @@ async def test_queue_many_empty_list_returns_silent_error() -> None:
     cog, player = _make_cog_and_player()
 
     resp = await cog.handle_music_request(
-        "queue many", user_id=1, guild_id=10,
+        "queue many",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "queue_many", "tracks": []},
     )
 
@@ -439,7 +587,9 @@ async def test_queue_many_drops_too_short_titles() -> None:
     cog._ytdl.search = AsyncMock(return_value=_t("OK Song"))
 
     resp = await cog.handle_music_request(
-        "queue many", user_id=1, guild_id=10,
+        "queue many",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "queue_many", "tracks": ["a", "", "OK Song"]},
     )
 
@@ -452,13 +602,20 @@ async def test_queue_many_drops_too_short_titles() -> None:
 # Tool schema regression guard
 # ---------------------------------------------------------------------------
 
+
 def test_music_tool_schema_advertises_all_new_actions() -> None:
     from poob.brain.poob import MUSIC_TOOL
 
     enum = MUSIC_TOOL["function"]["parameters"]["properties"]["action"]["enum"]
     for action in (
-        "previous", "replay", "move", "remove", "clear",
-        "queue_many", "apply_effect", "seek",
+        "previous",
+        "replay",
+        "move",
+        "remove",
+        "clear",
+        "queue_many",
+        "apply_effect",
+        "seek",
     ):
         assert action in enum, f"MUSIC_TOOL missing {action!r}"
 
@@ -468,7 +625,12 @@ def test_music_tool_schema_declares_new_parameters() -> None:
 
     props = MUSIC_TOOL["function"]["parameters"]["properties"]
     for param in (
-        "tracks", "from_position", "to_position", "position", "effect", "time",
+        "tracks",
+        "from_position",
+        "to_position",
+        "position",
+        "effect",
+        "time",
     ):
         assert param in props, f"MUSIC_TOOL missing {param!r} parameter"
 
@@ -483,6 +645,7 @@ def test_music_tool_schema_declares_new_parameters() -> None:
 # seek
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_seek_dispatches_to_player_with_parsed_input() -> None:
     cog, player = _make_cog_and_player()
@@ -490,7 +653,9 @@ async def test_seek_dispatches_to_player_with_parsed_input() -> None:
     player.seek = AsyncMock(return_value=(track, 150.0))
 
     resp = await cog.handle_music_request(
-        "seek to two thirty", user_id=1, guild_id=10,
+        "seek to two thirty",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "seek", "time": "2:30"},
     )
 
@@ -498,6 +663,7 @@ async def test_seek_dispatches_to_player_with_parsed_input() -> None:
     assert player.seek.await_count == 1
     parsed_arg = player.seek.await_args.args[0]
     from poob.music.seek import ParsedSeek
+
     assert isinstance(parsed_arg, ParsedSeek)
     assert parsed_arg.seconds == 150.0
     assert parsed_arg.relative is False
@@ -513,7 +679,9 @@ async def test_seek_relative_format_dispatches_with_relative_flag() -> None:
     player.seek = AsyncMock(return_value=(track, 60.0))
 
     await cog.handle_music_request(
-        "skip ahead", user_id=1, guild_id=10,
+        "skip ahead",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "seek", "time": "+10s"},
     )
 
@@ -527,7 +695,9 @@ async def test_seek_missing_time_arg_returns_silent_prompt() -> None:
     cog, player = _make_cog_and_player()
 
     resp = await cog.handle_music_request(
-        "seek", user_id=1, guild_id=10,
+        "seek",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "seek"},
     )
 
@@ -540,7 +710,9 @@ async def test_seek_invalid_format_returns_silent_parse_error() -> None:
     cog, player = _make_cog_and_player()
 
     resp = await cog.handle_music_request(
-        "seek to the future", user_id=1, guild_id=10,
+        "seek to the future",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "seek", "time": "the future"},
     )
 
@@ -555,7 +727,9 @@ async def test_seek_with_no_current_track_returns_silent_error() -> None:
     player.current_track = None
 
     resp = await cog.handle_music_request(
-        "seek", user_id=1, guild_id=10,
+        "seek",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "seek", "time": "1:00"},
     )
 
@@ -566,6 +740,7 @@ async def test_seek_with_no_current_track_returns_silent_error() -> None:
 # ---------------------------------------------------------------------------
 # leave
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_leave_stops_player_then_calls_voice_cog_force_disconnect() -> None:
@@ -580,7 +755,9 @@ async def test_leave_stops_player_then_calls_voice_cog_force_disconnect() -> Non
     cog.bot.get_cog = MagicMock(return_value=voice_cog)
 
     resp = await cog.handle_music_request(
-        "leave", user_id=1, guild_id=10,
+        "leave",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "leave"},
     )
 
@@ -601,7 +778,9 @@ async def test_leave_handles_missing_voice_cog_gracefully() -> None:
     cog.bot.get_cog = MagicMock(return_value=None)
 
     resp = await cog.handle_music_request(
-        "leave", user_id=1, guild_id=10,
+        "leave",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "leave"},
     )
 
@@ -617,7 +796,9 @@ async def test_seek_on_livestream_returns_silent_error_with_stream_message() -> 
     player.current_track = stream_track
 
     resp = await cog.handle_music_request(
-        "seek", user_id=1, guild_id=10,
+        "seek",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "seek", "time": "1:00"},
     )
 
@@ -637,7 +818,9 @@ async def test_autoplay_on_enables_and_confirms() -> None:
     player.autoplay_enabled = False
 
     resp = await cog.handle_music_request(
-        "autoplay on", user_id=1, guild_id=10,
+        "autoplay on",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "autoplay", "mode": "on"},
     )
 
@@ -652,7 +835,9 @@ async def test_autoplay_off_disables_and_confirms() -> None:
     player.autoplay_enabled = True
 
     resp = await cog.handle_music_request(
-        "autoplay off", user_id=1, guild_id=10,
+        "autoplay off",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "autoplay", "mode": "off"},
     )
 
@@ -667,7 +852,9 @@ async def test_autoplay_status_reports_current_state() -> None:
     player.autoplay_enabled = True
 
     resp = await cog.handle_music_request(
-        "autoplay?", user_id=1, guild_id=10,
+        "autoplay?",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "autoplay", "mode": "status"},
     )
 
@@ -683,7 +870,9 @@ async def test_autoplay_missing_mode_returns_help() -> None:
     player.autoplay_enabled = False
 
     resp = await cog.handle_music_request(
-        "autoplay", user_id=1, guild_id=10,
+        "autoplay",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "autoplay"},  # no mode field
     )
 
@@ -695,6 +884,7 @@ async def test_autoplay_missing_mode_returns_help() -> None:
 # ---------------------------------------------------------------------------
 # Named playlists: save / load / list / delete
 # ---------------------------------------------------------------------------
+
 
 def _make_cog_with_playlist_repo() -> tuple[MusicCog, MagicMock, MagicMock]:
     """Build a MusicCog with a stubbed player AND a mocked playlist repo.
@@ -722,7 +912,9 @@ async def test_save_playlist_with_queue_persists_and_replies() -> None:
     repo.load = AsyncMock(return_value=None)  # name does not exist yet
 
     resp = await cog.handle_music_request(
-        "save as chill", user_id=1, guild_id=10,
+        "save as chill",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "save_playlist", "name": "chill"},
     )
 
@@ -743,7 +935,9 @@ async def test_save_playlist_with_empty_queue_rejects() -> None:
     player.queue.upcoming = []
 
     resp = await cog.handle_music_request(
-        "save as chill", user_id=1, guild_id=10,
+        "save as chill",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "save_playlist", "name": "chill"},
     )
 
@@ -760,7 +954,9 @@ async def test_save_playlist_existing_name_says_updated() -> None:
     repo.load = AsyncMock(return_value=[{"title": "old"}])  # name exists
 
     resp = await cog.handle_music_request(
-        "save", user_id=1, guild_id=10,
+        "save",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "save_playlist", "name": "chill"},
     )
 
@@ -774,7 +970,9 @@ async def test_save_playlist_missing_name_returns_help() -> None:
     cog, player, repo = _make_cog_with_playlist_repo()
 
     resp = await cog.handle_music_request(
-        "save", user_id=1, guild_id=10,
+        "save",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "save_playlist"},  # no name
     )
 
@@ -787,17 +985,37 @@ async def test_save_playlist_missing_name_returns_help() -> None:
 async def test_load_playlist_appends_to_queue() -> None:
     cog, player, repo = _make_cog_with_playlist_repo()
     saved_tracks = [
-        {"title": "T1", "url": "u1", "identifier": "i1",
-         "duration_seconds": 60, "source": "youtube", "is_stream": False},
-        {"title": "T2", "url": "u2", "identifier": "i2",
-         "duration_seconds": 90, "source": "youtube", "is_stream": False},
-        {"title": "T3", "url": "u3", "identifier": "i3",
-         "duration_seconds": 120, "source": "youtube", "is_stream": False},
+        {
+            "title": "T1",
+            "url": "u1",
+            "identifier": "i1",
+            "duration_seconds": 60,
+            "source": "youtube",
+            "is_stream": False,
+        },
+        {
+            "title": "T2",
+            "url": "u2",
+            "identifier": "i2",
+            "duration_seconds": 90,
+            "source": "youtube",
+            "is_stream": False,
+        },
+        {
+            "title": "T3",
+            "url": "u3",
+            "identifier": "i3",
+            "duration_seconds": 120,
+            "source": "youtube",
+            "is_stream": False,
+        },
     ]
     repo.load = AsyncMock(return_value=saved_tracks)
 
     resp = await cog.handle_music_request(
-        "load chill", user_id=1, guild_id=10,
+        "load chill",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "load_playlist", "name": "chill"},
     )
 
@@ -814,7 +1032,9 @@ async def test_load_playlist_missing_returns_silent_error() -> None:
     repo.load = AsyncMock(return_value=None)
 
     resp = await cog.handle_music_request(
-        "load chill", user_id=1, guild_id=10,
+        "load chill",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "load_playlist", "name": "chill"},
     )
 
@@ -828,7 +1048,9 @@ async def test_load_playlist_missing_name_returns_help() -> None:
     cog, player, repo = _make_cog_with_playlist_repo()
 
     resp = await cog.handle_music_request(
-        "load", user_id=1, guild_id=10,
+        "load",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "load_playlist"},
     )
 
@@ -842,7 +1064,9 @@ async def test_list_playlists_returns_alphabetical_names() -> None:
     repo.list_names = AsyncMock(return_value=["chill", "deep-focus", "gym"])
 
     resp = await cog.handle_music_request(
-        "list my playlists", user_id=1, guild_id=10,
+        "list my playlists",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "list_playlists"},
     )
 
@@ -859,7 +1083,9 @@ async def test_list_playlists_empty_returns_friendly_message() -> None:
     repo.list_names = AsyncMock(return_value=[])
 
     resp = await cog.handle_music_request(
-        "list", user_id=1, guild_id=10,
+        "list",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "list_playlists"},
     )
 
@@ -873,7 +1099,9 @@ async def test_delete_playlist_removes_and_replies() -> None:
     repo.delete = AsyncMock(return_value=True)
 
     resp = await cog.handle_music_request(
-        "forget chill", user_id=1, guild_id=10,
+        "forget chill",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "delete_playlist", "name": "chill"},
     )
 
@@ -888,7 +1116,9 @@ async def test_delete_playlist_missing_returns_silent_error() -> None:
     repo.delete = AsyncMock(return_value=False)
 
     resp = await cog.handle_music_request(
-        "forget nonexistent", user_id=1, guild_id=10,
+        "forget nonexistent",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "delete_playlist", "name": "nonexistent"},
     )
 
@@ -901,7 +1131,9 @@ async def test_delete_playlist_missing_name_returns_help() -> None:
     cog, player, repo = _make_cog_with_playlist_repo()
 
     resp = await cog.handle_music_request(
-        "delete", user_id=1, guild_id=10,
+        "delete",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "delete_playlist"},
     )
 
@@ -912,6 +1144,7 @@ async def test_delete_playlist_missing_name_returns_help() -> None:
 # ---------------------------------------------------------------------------
 # Spotify playlist URL import (queue_spotify_playlist)
 # ---------------------------------------------------------------------------
+
 
 def _make_cog_with_spotify(
     is_configured: bool = True,
@@ -932,7 +1165,9 @@ async def test_queue_spotify_playlist_not_configured_returns_soft_error() -> Non
     cog, player, resolver = _make_cog_with_spotify(is_configured=False)
 
     resp = await cog.handle_music_request(
-        "queue this", user_id=1, guild_id=10,
+        "queue this",
+        user_id=1,
+        guild_id=10,
         tool_args={
             "action": "queue_spotify_playlist",
             "url": "https://open.spotify.com/playlist/abc123",
@@ -949,7 +1184,9 @@ async def test_queue_spotify_playlist_missing_url_returns_help() -> None:
     cog, player, resolver = _make_cog_with_spotify(is_configured=True)
 
     resp = await cog.handle_music_request(
-        "queue spotify", user_id=1, guild_id=10,
+        "queue spotify",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "queue_spotify_playlist"},
     )
 
@@ -966,20 +1203,25 @@ async def test_queue_spotify_playlist_resolves_and_queues() -> None:
         {"title": "Track C", "artist": "Artist 3"},
     ]
     cog, player, resolver = _make_cog_with_spotify(
-        is_configured=True, resolve_return=resolved_titles,
+        is_configured=True,
+        resolve_return=resolved_titles,
     )
     # Music already playing → response uses the "Queued N from Spotify" form
     player.is_playing = True
     cog._ytdl = MagicMock()  # type: ignore[attr-defined]
-    cog._ytdl.search = AsyncMock(side_effect=[
-        _t("Track A - Artist 1"),
-        _t("Track B - Artist 2"),
-        _t("Track C - Artist 3"),
-    ])
+    cog._ytdl.search = AsyncMock(
+        side_effect=[
+            _t("Track A - Artist 1"),
+            _t("Track B - Artist 2"),
+            _t("Track C - Artist 3"),
+        ]
+    )
     player.play = AsyncMock(return_value=None)
 
     resp = await cog.handle_music_request(
-        "queue this spotify playlist", user_id=1, guild_id=10,
+        "queue this spotify playlist",
+        user_id=1,
+        guild_id=10,
         tool_args={
             "action": "queue_spotify_playlist",
             "url": "https://open.spotify.com/playlist/abc123",
@@ -1001,20 +1243,25 @@ async def test_queue_spotify_playlist_partial_resolution_reports_not_found() -> 
         {"title": "Track C", "artist": "Artist 3"},
     ]
     cog, player, resolver = _make_cog_with_spotify(
-        is_configured=True, resolve_return=resolved_titles,
+        is_configured=True,
+        resolve_return=resolved_titles,
     )
     # Music already playing → response uses the "Queued N from Spotify (M not found)" form
     player.is_playing = True
     cog._ytdl = MagicMock()  # type: ignore[attr-defined]
-    cog._ytdl.search = AsyncMock(side_effect=[
-        _t("Track A - Artist 1"),
-        None,  # second track unresolvable on YouTube
-        _t("Track C - Artist 3"),
-    ])
+    cog._ytdl.search = AsyncMock(
+        side_effect=[
+            _t("Track A - Artist 1"),
+            None,  # second track unresolvable on YouTube
+            _t("Track C - Artist 3"),
+        ]
+    )
     player.play = AsyncMock(return_value=None)
 
     resp = await cog.handle_music_request(
-        "queue this", user_id=1, guild_id=10,
+        "queue this",
+        user_id=1,
+        guild_id=10,
         tool_args={
             "action": "queue_spotify_playlist",
             "url": "spotify:playlist:abc123",
@@ -1031,8 +1278,10 @@ async def test_queue_spotify_playlist_partial_resolution_reports_not_found() -> 
 # Synced lyrics (lyrics action)
 # ---------------------------------------------------------------------------
 
+
 def _make_cog_with_lyrics(
-    lyrics_return=None, configured: bool = True,
+    lyrics_return=None,
+    configured: bool = True,
 ) -> tuple[MusicCog, MagicMock, MagicMock]:
     cog, player = _make_cog_and_player()
 
@@ -1048,7 +1297,9 @@ async def test_lyrics_no_current_track_returns_silent_error() -> None:
     player.current_track = None
 
     resp = await cog.handle_music_request(
-        "show lyrics", user_id=1, guild_id=10,
+        "show lyrics",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "lyrics"},
     )
 
@@ -1063,7 +1314,9 @@ async def test_lyrics_resolver_not_configured_returns_soft_error() -> None:
     player.current_track = _t("Some Song")
 
     resp = await cog.handle_music_request(
-        "lyrics", user_id=1, guild_id=10,
+        "lyrics",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "lyrics"},
     )
 
@@ -1074,15 +1327,20 @@ async def test_lyrics_resolver_not_configured_returns_soft_error() -> None:
 @pytest.mark.asyncio
 async def test_lyrics_synced_found_replies_with_body() -> None:
     from poob.music.lyrics import ParsedLyrics
+
     lyrics = ParsedLyrics(
-        title="Song", artist="Artist", is_synced=True,
+        title="Song",
+        artist="Artist",
+        is_synced=True,
         lines=[(0.0, "Line A"), (10.0, "Line B"), (20.0, "Line C")],
     )
     cog, player, resolver = _make_cog_with_lyrics(lyrics_return=lyrics)
     player.current_track = _t("Song - Artist")
 
     resp = await cog.handle_music_request(
-        "show me the lyrics", user_id=1, guild_id=10,
+        "show me the lyrics",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "lyrics"},
     )
 
@@ -1097,15 +1355,20 @@ async def test_lyrics_synced_found_replies_with_body() -> None:
 @pytest.mark.asyncio
 async def test_lyrics_only_plain_replies_with_plain_note() -> None:
     from poob.music.lyrics import ParsedLyrics
+
     lyrics = ParsedLyrics(
-        title="Song", artist="Artist", is_synced=False,
+        title="Song",
+        artist="Artist",
+        is_synced=False,
         lines=[(0.0, "Big block of plain text lyrics here.")],
     )
     cog, player, resolver = _make_cog_with_lyrics(lyrics_return=lyrics)
     player.current_track = _t("Some Song")
 
     resp = await cog.handle_music_request(
-        "lyrics", user_id=1, guild_id=10,
+        "lyrics",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "lyrics"},
     )
 
@@ -1120,7 +1383,9 @@ async def test_lyrics_resolver_returns_none_means_not_found() -> None:
     player.current_track = _t("Obscure Track")
 
     resp = await cog.handle_music_request(
-        "lyrics", user_id=1, guild_id=10,
+        "lyrics",
+        user_id=1,
+        guild_id=10,
         tool_args={"action": "lyrics"},
     )
 
@@ -1131,11 +1396,14 @@ async def test_lyrics_resolver_returns_none_means_not_found() -> None:
 @pytest.mark.asyncio
 async def test_queue_spotify_playlist_unparseable_url_returns_silent_error() -> None:
     cog, player, resolver = _make_cog_with_spotify(
-        is_configured=True, resolve_return=None,  # resolver.resolve returns None
+        is_configured=True,
+        resolve_return=None,  # resolver.resolve returns None
     )
 
     resp = await cog.handle_music_request(
-        "queue", user_id=1, guild_id=10,
+        "queue",
+        user_id=1,
+        guild_id=10,
         tool_args={
             "action": "queue_spotify_playlist",
             "url": "https://youtube.com/watch?v=foo",

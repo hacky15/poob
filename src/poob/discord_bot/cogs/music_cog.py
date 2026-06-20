@@ -54,7 +54,9 @@ def _track_to_dict(track: Track) -> dict:
 
 
 def _track_from_dict(
-    data: dict, requester_id: int, requester_name: str,
+    data: dict,
+    requester_id: int,
+    requester_name: str,
 ) -> Track:
     """Rebuild a :class:`Track` from a persisted-playlist dict.
 
@@ -207,7 +209,9 @@ class MusicCog(commands.Cog, name="Music"):
                 session.music_player = None
 
     async def _auto_join_requester_vc(
-        self, guild: discord.Guild, user_id: int,
+        self,
+        guild: discord.Guild,
+        user_id: int,
     ) -> discord.VoiceClient | None:
         """Join the requester's voice channel and set up full listening.
 
@@ -259,18 +263,22 @@ class MusicCog(commands.Cog, name="Music"):
             try:
                 is_stage = isinstance(channel, discord.StageChannel)
                 session = await self._setup_voice_session(
-                    vc, channel, is_stage=is_stage,
+                    vc,
+                    channel,
+                    is_stage=is_stage,
                 )
                 if session is not None:
                     log.info(
                         "Auto-join wired listening pipeline",
-                        guild=guild.id, channel=channel.name,
+                        guild=guild.id,
+                        channel=channel.name,
                     )
             except Exception as exc:
                 log.warning(
                     "Auto-join listening setup failed — music will "
                     "still play, but bot won't hear voice commands",
-                    guild=guild.id, error=str(exc)[:120],
+                    guild=guild.id,
+                    error=str(exc)[:120],
                 )
         return vc
 
@@ -334,8 +342,7 @@ class MusicCog(commands.Cog, name="Music"):
             vc = await self._auto_join_requester_vc(guild, user_id)
             if not vc:
                 return (
-                    "you gotta be in a voice channel for me to play anything. "
-                    "hop in and try again."
+                    "you gotta be in a voice channel for me to play anything. hop in and try again."
                 )
         else:
             # Already in a VC. Requester must be in THE SAME one, otherwise
@@ -381,8 +388,13 @@ class MusicCog(commands.Cog, name="Music"):
         playlist_name = (tool_args or {}).get("name")
         url_arg = (tool_args or {}).get("url")
 
-        log.info("music.action", action=action, query=query[:60] if query else "",
-                 value=value, user=user_id)
+        log.info(
+            "music.action",
+            action=action,
+            query=query[:60] if query else "",
+            value=value,
+            user=user_id,
+        )
 
         # --- Action dispatch (no regex, no keyword matching) ---
 
@@ -449,7 +461,7 @@ class MusicCog(commands.Cog, name="Music"):
             if mode_str == "status":
                 state = "on" if player.autoplay_enabled else "off"
                 return f"[SILENT]Autoplay is {state}."
-            player.autoplay_enabled = (mode_str == "on")
+            player.autoplay_enabled = mode_str == "on"
             return (
                 "[SILENT]Autoplay enabled."
                 if player.autoplay_enabled
@@ -458,34 +470,59 @@ class MusicCog(commands.Cog, name="Music"):
 
         if action == "list_effects":
             from poob.music.effects import AVAILABLE_EFFECTS
+
             names = [e for e in AVAILABLE_EFFECTS if e != "none"]
             pretty = ", ".join(n.replace("_", " ") for n in names)
-            # Deliberately NOT [SILENT]: the user asked a question, so Poob
-            # speaks the list rather than silently performing a control action.
+            # [SPEAK]: the user asked a QUESTION — speak the actual list verbatim.
+            # Without this marker the brain persona-wraps short music responses
+            # and discards the content (the "what effects → 'you poor soul'" bug).
+            # See decisions/music-effect-stacking.
             return (
-                f"I've got {len(names)} effects you can throw on: {pretty}. "
-                "Say one to apply it, or say 'none' to clear it."
+                f"[SPEAK]I've got {len(names)} effects, and you can stack them or "
+                f"dial them up and down: {pretty}. Say one to add it, 'more' / "
+                "'less' of one to crank it, 'only <effect>' to replace, or 'clear'."
             )
 
         if action == "apply_effect":
             if not effect:
                 from poob.music.effects import AVAILABLE_EFFECTS
+
                 return "[SILENT]Which effect? (" + ", ".join(AVAILABLE_EFFECTS) + ")"
+            from poob.music.effects import RELATIVE_SPEED, EffectNotFoundError
+
+            # Default to ADD (stack/layer). 'more'/'less' step an adjustable
+            # effect up/down on the fly; bare 'slower'/'faster' carry their own
+            # direction; 'replace' sets it solo; 'remove' drops one. See
+            # decisions/music-effect-stacking.
+            eff_mode = (mode or "add").strip().lower()
             try:
-                from poob.music.effects import EffectNotFoundError
-                applied = await player.set_effect(effect)
+                if eff_mode in ("more", "less"):
+                    applied = await player.adjust_effect(
+                        effect, "up" if eff_mode == "more" else "down"
+                    )
+                elif effect.strip().lower() in RELATIVE_SPEED:
+                    applied = await player.adjust_effect(effect)
+                elif eff_mode == "replace":
+                    applied = await player.set_effect(effect)
+                elif eff_mode == "remove":
+                    applied = await player.remove_effect(effect)
+                else:
+                    applied = await player.add_effect(effect)
             except EffectNotFoundError as exc:
                 return f"[SILENT]{exc}"
-            if applied is None:
-                return f"[SILENT]Effect '{player.active_effect}' set — applies on the next track."
-            if player.active_effect == "none":
-                return "[SILENT]Audio effect cleared."
-            return f"[SILENT]Applied {player.active_effect}."
+            stack = player.active_effect  # "none" or "a, b, c"
+            if stack == "none":
+                return "[SILENT]Effects cleared."
+            if applied is None:  # no current track — stored for the next play
+                return f"[SILENT]Effects set ({stack}) — applies on the next track."
+            verb = "Removed; now" if eff_mode == "remove" else "Now applying"
+            return f"[SILENT]{verb}: {stack}."
 
         if action == "seek":
             if not time_arg:
                 return "[SILENT]Where to? (e.g. '2:30', '+10', '-30s')"
             from poob.music.seek import SeekParseError, parse_seek_input
+
             try:
                 parsed = parse_seek_input(time_arg)
             except SeekParseError as exc:
@@ -585,7 +622,9 @@ class MusicCog(commands.Cog, name="Music"):
                     not_found.append(title or "(empty)")
                     continue
                 track = await self._ytdl.search(
-                    title, requester_id=user_id, requester_name=requester_name,
+                    title,
+                    requester_id=user_id,
+                    requester_name=requester_name,
                 )
                 if not track:
                     not_found.append(title)
@@ -691,7 +730,9 @@ class MusicCog(commands.Cog, name="Music"):
                     continue
                 query = f"{title} {artist}".strip()
                 track = await self._ytdl.search(
-                    query, requester_id=user_id, requester_name=requester_name,
+                    query,
+                    requester_id=user_id,
+                    requester_name=requester_name,
                 )
                 if not track:
                     not_found.append(title)
@@ -728,7 +769,8 @@ class MusicCog(commands.Cog, name="Music"):
             else:
                 title_clean, artist_clean = track.title.strip(), ""
             lyrics = await self._lyrics_resolver.fetch(
-                title_clean, artist_clean or None,
+                title_clean,
+                artist_clean or None,
             )
             if lyrics is None:
                 return f"[SILENT]No lyrics found for '{title_clean}'."
@@ -743,7 +785,9 @@ class MusicCog(commands.Cog, name="Music"):
         # Playlist URL
         if "list=" in query or "/playlist" in query:
             playlist_title, tracks = await self._ytdl.get_playlist_tracks(
-                query, requester_id=user_id, requester_name=requester_name,
+                query,
+                requester_id=user_id,
+                requester_name=requester_name,
             )
             if not tracks:
                 return "Couldn't load that playlist."
@@ -752,7 +796,9 @@ class MusicCog(commands.Cog, name="Music"):
 
         # Single track search
         track = await self._ytdl.search(
-            query, requester_id=user_id, requester_name=requester_name,
+            query,
+            requester_id=user_id,
+            requester_name=requester_name,
         )
         if not track:
             return f"Couldn't find anything for '{query}'."
@@ -770,7 +816,8 @@ class MusicCog(commands.Cog, name="Music"):
     # ------------------------------------------------------------------
 
     def build_now_playing_message(
-        self, guild_id: int,
+        self,
+        guild_id: int,
     ) -> tuple[discord.Embed, discord.ui.View] | None:
         """Render the current track as (embed, persistent-view) for posting.
 

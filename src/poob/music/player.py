@@ -38,9 +38,18 @@ import audioop
 import discord
 
 from poob.music.effects import (
+    ATOMIC_PRESETS,
+    DIMENSIONS,
     EFFECT_NONE,
+    PRESET_DIMENSION_LEVELS,
+    RELATIVE_SPEED,
     EffectNotFoundError,
-    resolve_effect_chain,
+    dimension_label,
+    dimension_of,
+    effect_category,
+    render_effect_chain,
+    resolve_effect_name,
+    step_level,
 )
 from poob.music.queue import MusicQueue, Track, LoopMode
 from poob.music.ytdl import AsyncYTDL, FFMPEG_BEFORE_OPTS, FFMPEG_OPTS
@@ -58,16 +67,16 @@ FRAME_SIZE = 3840
 # 0.25 = 25% volume, 1.0 = full volume.
 DUCK_VOLUME = 0.25
 NORMAL_VOLUME = 1.0
-RAMP_FRAMES = 15          # Frames to ramp volume (15 * 20ms = 300ms)
-GRACE_FRAMES = 8          # Empty overlay reads before cleanup (160ms grace)
+RAMP_FRAMES = 15  # Frames to ramp volume (15 * 20ms = 300ms)
+GRACE_FRAMES = 8  # Empty overlay reads before cleanup (160ms grace)
 
 # Before the player loop calls vc.play(mixer), the shared voice client may
 # be busy with a standalone TTS clip (e.g. the "Playing X" confirmation
 # spoken in VC). vc.play() raises "Already playing audio" if we barge in,
 # crashing the loop. Wait for the clip to finish — bounded so a stuck clip
 # can't hang music forever. See docs/incidents/already-playing-audio-crash.
-CLIENT_FREE_TIMEOUT_S = 8.0   # max wait for a standalone clip to clear
-CLIENT_FREE_POLL_S = 0.05     # poll interval while waiting
+CLIENT_FREE_TIMEOUT_S = 8.0  # max wait for a standalone clip to clear
+CLIENT_FREE_POLL_S = 0.05  # poll interval while waiting
 
 # Pre-allocated silence buffer (avoids per-frame allocation)
 SILENCE = b"\x00" * FRAME_SIZE
@@ -129,8 +138,8 @@ class MixingAudioSource(discord.AudioSource):
 
         # Gain ramp state — smooths volume transitions
         self._current_duck = NORMAL_VOLUME  # Current duck multiplier (ramping)
-        self._target_duck = NORMAL_VOLUME   # Target duck multiplier
-        self._ramp_step = 0.0               # Per-frame increment toward target
+        self._target_duck = NORMAL_VOLUME  # Target duck multiplier
+        self._ramp_step = 0.0  # Per-frame increment toward target
 
         # Grace period: don't kill overlay on first empty read (buffering)
         self._empty_overlay_count = 0
@@ -391,12 +400,15 @@ class GuildMusicPlayer:
         # listener-perceived track position, not the source-process uptime.
         self._track_seek_offset: float = 0.0
 
-        # ---- Effect state ----
-        # ``_active_effect`` is the user-facing name (``"none"``,
-        # ``"nightcore"``, ...). ``_active_effect_chain`` is the resolved
-        # FFmpeg ``-af`` string or ``None`` for the no-filter path. They
-        # are kept in sync via ``set_effect``.
-        self._active_effect: str = EFFECT_NONE
+        # ---- Effect state (parametric) ----
+        # ``_effect_levels`` maps an adjustable dimension (speed/bass/reverb/8d/
+        # tremolo/vibrato) to its current level; ``_atomic_effects`` holds on/off
+        # presets with no single knob (darth_vader, overload). At most one
+        # occupant per category across both. ``_active_effect_chain`` is the
+        # combined FFmpeg ``-af`` (or ``None``), re-rendered on every change via
+        # ``render_effect_chain``. See docs/decisions/music-effect-stacking.md.
+        self._effect_levels: dict[str, float] = {}
+        self._atomic_effects: list[str] = []
         self._active_effect_chain: str | None = None
 
         # ---- Respawn request ----
@@ -447,6 +459,7 @@ class GuildMusicPlayer:
         docs/incidents/already-playing-audio-crash.
         """
         import time as _t
+
         deadline = _t.monotonic() + CLIENT_FREE_TIMEOUT_S
         while self.voice_client.is_playing() and not self._destroyed:
             if _t.monotonic() >= deadline:
@@ -466,6 +479,7 @@ class GuildMusicPlayer:
         only lands the first time autoplay actually fires."""
         if self._autoplay_engine is None:
             from poob.music.autoplay import AutoplayEngine
+
             self._autoplay_engine = AutoplayEngine(
                 ytdl=self.ytdl,
                 history_accessor=lambda: self.queue.history,
@@ -509,8 +523,24 @@ class GuildMusicPlayer:
 
     @property
     def active_effect(self) -> str:
-        """The currently-active effect name (``"none"`` or a preset name)."""
-        return self._active_effect
+        """Human summary of active effects — comma-joined labels, or ``"none"``."""
+        labels = self.active_effects
+        return ", ".join(labels) if labels else EFFECT_NONE
+
+    @property
+    def active_effects(self) -> list[str]:
+        """Human labels for everything active (dimension levels + atomic
+        presets). Empty = no effect."""
+        labels = [
+            dimension_label(d, lv) for d, lv in self._effect_levels.items() if d in DIMENSIONS
+        ]
+        labels.extend(self._atomic_effects)
+        return labels
+
+    @property
+    def effect_levels(self) -> dict[str, float]:
+        """The active adjustable dimension levels (copy)."""
+        return dict(self._effect_levels)
 
     @property
     def position_seconds(self) -> float:
@@ -527,6 +557,7 @@ class GuildMusicPlayer:
         forward jump in the music.
         """
         import time as _t
+
         if self._track_started_at is None:
             return 0.0
         now = _t.monotonic()
@@ -595,8 +626,7 @@ class GuildMusicPlayer:
             if not result:
                 await self.ytdl.resolve_stream_url(track)
         except Exception:
-            log.debug("Track resolve failed; will retry at play time",
-                      title=track.title[:50])
+            log.debug("Track resolve failed; will retry at play time", title=track.title[:50])
 
     def start_deferred(self) -> None:
         """Start playback of previously deferred tracks.
@@ -690,10 +720,15 @@ class GuildMusicPlayer:
         src = self._last_played_track
         if src is not None:
             fresh = Track(
-                title=src.title, url=src.url, duration=src.duration,
-                requester_id=src.requester_id, requester_name=src.requester_name,
-                thumbnail=src.thumbnail, identifier=src.identifier,
-                source=src.source, is_stream=src.is_stream,
+                title=src.title,
+                url=src.url,
+                duration=src.duration,
+                requester_id=src.requester_id,
+                requester_name=src.requester_name,
+                thumbnail=src.thumbnail,
+                identifier=src.identifier,
+                source=src.source,
+                is_stream=src.is_stream,
             )
             self.queue.add(fresh)
             if self._player_task is None or self._player_task.done():
@@ -749,44 +784,117 @@ class GuildMusicPlayer:
             self.voice_client.stop()
         return cur, target
 
+    def _clear_category(self, category: str) -> None:
+        """Vacate a category — at most one occupant (dimension or atomic)."""
+        self._effect_levels = {
+            d: lv for d, lv in self._effect_levels.items() if DIMENSIONS[d].category != category
+        }
+        self._atomic_effects = [a for a in self._atomic_effects if effect_category(a) != category]
+
+    def _set_dimension(self, dim: str, level: float) -> None:
+        spec = DIMENSIONS[dim]
+        self._clear_category(spec.category)
+        self._effect_levels[dim] = max(spec.floor, min(spec.ceil, level))
+
+    def _set_atomic(self, name: str) -> None:
+        self._clear_category(effect_category(name))
+        self._atomic_effects.append(name)
+
+    def _apply_preset(self, name: str) -> None:
+        """Write a preset's dimension levels / atomic flag, each replacing its
+        own category but leaving the rest of the stack intact."""
+        if name in PRESET_DIMENSION_LEVELS:
+            for dim, level in PRESET_DIMENSION_LEVELS[name].items():
+                self._set_dimension(dim, level)
+        elif name in ATOMIC_PRESETS:
+            self._set_atomic(name)
+
     async def set_effect(self, effect: str) -> str | None:
-        """Apply (or clear) an audio effect on the current track.
+        """REPLACE everything with ``effect`` (``"none"`` clears all).
 
-        ``effect`` is one of the names in ``poob.music.effects.
-        AVAILABLE_EFFECTS`` (``"none"`` to clear). The effect is also
-        remembered as the default for subsequent tracks until changed —
-        so applying ``"nightcore"`` mid-song and then skipping forward
-        keeps the nightcore on the next track too.
-
-        Returns the applied effect name on success, or ``None`` if
-        there's no current track to apply it to (the effect is still
-        stored as the default for the next track in that case). Raises
-        ``EffectNotFoundError`` for unknown effect names — caller's
-        responsibility to validate before invoking from a user-facing
-        path.
-
-        Implementation: respawns the FFmpeg subprocess with the new
-        ``-af`` chain and an ``-ss`` seek to the current listener
-        position. ~200-400 ms audible gap during the respawn.
+        Resolves aliases. Use ``add_effect`` to layer instead, ``adjust_effect``
+        for "more/less". Persists across tracks. Returns the active-effects
+        summary, or ``None`` if there's no current track (stored for next play).
+        See docs/decisions/music-effect-stacking.md.
         """
-        # resolve_effect_chain raises EffectNotFoundError on unknown
-        # names — propagate; the caller wraps for the user.
-        chain = resolve_effect_chain(effect)
-        # Normalize the stored effect name to lowercase (matches the
-        # registry's canonical form).
-        self._active_effect = effect.strip().lower()
-        self._active_effect_chain = chain
+        name = resolve_effect_name(effect)  # raises EffectNotFoundError
+        self._effect_levels = {}
+        self._atomic_effects = []
+        if name != EFFECT_NONE:
+            self._apply_preset(name)
+        return await self._apply_effect_chain()
 
+    async def add_effect(self, effect: str) -> str | None:
+        """LAYER ``effect`` on top of what's playing — each effect replaces only
+        its own category (a 2nd speed effect swaps, but speed + bass + reverb all
+        stack). ``"none"`` clears all. Returns the summary (or ``None``)."""
+        name = resolve_effect_name(effect)
+        if name == EFFECT_NONE:
+            self._effect_levels = {}
+            self._atomic_effects = []
+        else:
+            self._apply_preset(name)
+        return await self._apply_effect_chain()
+
+    async def remove_effect(self, effect: str) -> str | None:
+        """Turn off one effect, leaving the rest in place. Accepts a preset name
+        ('slowed', 'darth_vader' — combos clear all their dimensions) OR a bare
+        adjustable-dimension noun ('bass', 'reverb', 'speed')."""
+        try:
+            name = resolve_effect_name(effect)
+        except EffectNotFoundError:
+            name = effect.strip().lower()  # bare dimension noun (e.g. 'bass')
+        if name in PRESET_DIMENSION_LEVELS:
+            for dim in PRESET_DIMENSION_LEVELS[name]:
+                self._effect_levels.pop(dim, None)
+        if name in ATOMIC_PRESETS:
+            self._atomic_effects = [a for a in self._atomic_effects if a != name]
+        target_dim = dimension_of(name)
+        if target_dim:
+            self._effect_levels.pop(target_dim, None)
+        return await self._apply_effect_chain()
+
+    async def adjust_effect(self, target: str, direction: str | None = None) -> str | None:
+        """Step an adjustable effect up or down on the fly — "more/less reverb",
+        "more/less bass", "slower"/"faster".
+
+        ``target`` is a dimension/effect noun (or a bare relative-speed word like
+        "slower", which carries its own direction). ``direction`` is ``"up"`` /
+        ``"down"`` (more/less). Stepping a dimension to neutral / below its floor
+        turns it off. Raises ``EffectNotFoundError`` if ``target`` isn't
+        adjustable. See docs/decisions/music-effect-stacking.md.
+        """
+        key = target.strip().lower()
+        if key in RELATIVE_SPEED:
+            dim: str | None = "speed"
+            direction = RELATIVE_SPEED[key]
+        else:
+            dim = dimension_of(target)
+        if dim is None or direction not in ("up", "down"):
+            raise EffectNotFoundError(f"can't adjust {target!r}")
+        # Capture the current level BEFORE vacating the category.
+        current = self._effect_levels.get(dim)
+        new_level = step_level(dim, current, direction)
+        self._clear_category(DIMENSIONS[dim].category)
+        if new_level is not None:
+            self._effect_levels[dim] = new_level
+        return await self._apply_effect_chain()
+
+    async def _apply_effect_chain(self) -> str | None:
+        """Re-render the combined ``-af`` from the active levels + atomic presets
+        and respawn FFmpeg at the current position. ~200-400 ms audible gap
+        (docs/gotchas/ffmpeg-effect-toggle-creates-audio-gap). Returns the
+        active-effects summary, or ``None`` if there's no current track.
+        """
+        self._active_effect_chain = render_effect_chain(self._effect_levels, self._atomic_effects)
         cur = self.queue.current
         if cur is None:
-            # No current track — effect stored for the next play.
-            return None
-
+            return None  # no track — effects stored for the next play
         pos = self.position_seconds
-        self._respawn_request = (cur, pos, chain)
+        self._respawn_request = (cur, pos, self._active_effect_chain)
         if self.voice_client.is_playing() or self._paused:
             self.voice_client.stop()
-        return self._active_effect
+        return self.active_effect
 
     def pause(self) -> bool:
         """Pause playback. Returns True if paused.
@@ -795,6 +903,7 @@ class GuildMusicPlayer:
         can subtract it when computing seek offsets for respawns.
         """
         import time as _t
+
         if self.voice_client.is_playing():
             self.voice_client.pause()
             self._paused = True
@@ -811,6 +920,7 @@ class GuildMusicPlayer:
         had at pause time.
         """
         import time as _t
+
         if self._paused:
             self.voice_client.resume()
             self._paused = False
@@ -911,7 +1021,7 @@ class GuildMusicPlayer:
         # Append to the existing before_options string when non-zero.
         seek_flag = f" -ss {seek_seconds:.3f}" if seek_seconds > 0 else ""
         # -af after input adds the filter chain. Append to options.
-        af_flag = f" -af \"{effect_chain}\"" if effect_chain else ""
+        af_flag = f' -af "{effect_chain}"' if effect_chain else ""
 
         if track.local_file and os.path.isfile(track.local_file):
             ffmpeg_source = discord.FFmpegPCMAudio(
@@ -923,7 +1033,8 @@ class GuildMusicPlayer:
             log.debug(
                 "Audio source: local file",
                 file=track.local_file[-40:],
-                seek=seek_seconds, effect=bool(effect_chain),
+                seek=seek_seconds,
+                effect=bool(effect_chain),
             )
         else:
             ffmpeg_source = discord.FFmpegPCMAudio(
@@ -934,7 +1045,8 @@ class GuildMusicPlayer:
             )
             log.debug(
                 "Audio source: network stream",
-                seek=seek_seconds, effect=bool(effect_chain),
+                seek=seek_seconds,
+                effect=bool(effect_chain),
             )
 
         return BufferedAudioSource(ffmpeg_source)
@@ -1011,7 +1123,8 @@ class GuildMusicPlayer:
                     except Exception as exc:
                         log.error(
                             "Audio source creation failed",
-                            error=str(exc)[:120], respawn=respawning,
+                            error=str(exc)[:120],
+                            respawn=respawning,
                         )
                         if not respawning:
                             # Initial source failed — abandon track, advance
@@ -1038,6 +1151,7 @@ class GuildMusicPlayer:
                     self._next_event.clear()
                     self.voice_client.play(self._mixer, after=_after_play)
                     import time as _t
+
                     self._track_started_at = _t.monotonic()
 
                     # Only prefetch on the FIRST source for this track —
