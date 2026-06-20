@@ -4,6 +4,14 @@ services:
     container_name: poob
     restart: unless-stopped
     env_file: .env
+    # CPU PRIORITY for the real-time voice path on this shared 4-core host.
+    # cpu_shares is a relative CFS weight enforced by the kernel *only under
+    # contention* — 4x the default (1024) so a co-located deploy build, an
+    # ollama fallback, or a co-tenant spike can't starve voice, with zero idle
+    # waste. Pairs with the in-process patrol-backoff (scanner yields to voice).
+    # poob is deliberately NOT cpu-capped — voice needs to burst.
+    # See docs/incidents/voice-cpu-starvation-on-shared-host.md.
+    cpu_shares: 4096
     depends_on:
       - ollama
       - searxng
@@ -21,9 +29,14 @@ services:
     restart: unless-stopped
     volumes:
       - ollama-data:/root/.ollama
+    # Local LLM is CPU-only (50-120s/call) and last-resort only. Hard-cap to 2
+    # of 4 cores + a low weight so a stray fallback call can never monopolize
+    # the box and starve the voice path during a VC.
+    cpu_shares: 256
     deploy:
       resources:
         limits:
+          cpus: "2.0"
           memory: 10G
 
   searxng:
