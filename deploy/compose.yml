@@ -4,6 +4,12 @@ services:
     container_name: poob
     restart: unless-stopped
     env_file: .env
+    environment:
+      # SCRAPER KILL-SWITCH. The marketplace patrol is OFF — host dedicated to
+      # voice/music. To re-enable: set to "true" (or delete this line), then
+      # redeploy. Overrides .env. Disabled 2026-06-20 at operator request.
+      # See docs/runbooks/scraper-kill-switch.md.
+      PATROL_SCHEDULER_AUTO_START: "false"
     # CPU PRIORITY for the real-time voice path on this shared 4-core host.
     # cpu_shares is a relative CFS weight enforced by the kernel *only under
     # contention* — 4x the default (1024) so a co-located deploy build, an
