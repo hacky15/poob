@@ -33,6 +33,55 @@ def test_wake_detector_prewarm_loads_model(mocker) -> None:
     m.assert_called_once()
 
 
+def test_ensure_model_is_thread_safe_single_construction(mocker) -> None:
+    """Concurrent first-frames (one thread per user) must not race the OWW lazy
+    init — the model is constructed exactly once and nothing raises. Regression
+    for the 'partially initialized module ... circular import' crash seen in
+    prod 2026-06-21 under multi-user VC after a restart.
+
+    Injects a fake ``openwakeword.model`` so the test runs without the package
+    (it has no 3.12+ wheels and isn't installed for local dev)."""
+    import sys
+    import threading
+    import time
+    import types
+
+    count = {"n": 0}
+    count_lock = threading.Lock()
+
+    class _FakeModel:
+        def __init__(self, *args, **kwargs) -> None:
+            with count_lock:
+                count["n"] += 1
+            time.sleep(0.02)  # widen the window — an unguarded init would double-construct
+
+    fake = types.ModuleType("openwakeword.model")
+    fake.Model = _FakeModel  # type: ignore[attr-defined]
+    mocker.patch.dict(
+        sys.modules,
+        {"openwakeword": types.ModuleType("openwakeword"), "openwakeword.model": fake},
+    )
+
+    d = WakeWordDetector(model_path=None, threshold=0.7)
+    errors: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            d._ensure_model()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == [], f"concurrent init raised: {errors}"
+    assert count["n"] == 1, f"model constructed {count['n']}x — the init lock failed"
+    assert d._model is not None
+
+
 def test_wake_detector_peak_score_tracks_and_resets() -> None:
     d = WakeWordDetector(model_path=None, threshold=0.7)
     assert d.peak_score(123) == 0.0

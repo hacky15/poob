@@ -36,6 +36,13 @@ from poob.utils.logging import get_logger
 
 log = get_logger("voice.dual_pipeline")
 
+# Serializes OpenWakeWord lazy init across threads. Audio-frame callbacks run
+# one-thread-per-user; without this, concurrent first-frames after a (re)start
+# race the `import openwakeword` package init and raise "partially initialized
+# module ... circular import", aborting the frame before STT. Module-level so it
+# holds across detector instances. See dual_pipeline._ensure_model.
+_OWW_INIT_LOCK = threading.Lock()
+
 # Audio constants
 DISCORD_SAMPLE_RATE = 48000
 DISCORD_CHANNELS = 2
@@ -73,6 +80,7 @@ class UserPipeline:
     Each user in the voice channel gets their own Porcupine instance
     and Deepgram WebSocket connection.
     """
+
     user_id: int
     user_name: str = ""
 
@@ -133,22 +141,37 @@ class WakeWordDetector:
         return self._peak_scores.get(user_id, 0.0)
 
     def _ensure_model(self) -> None:
-        """Lazy-load the OpenWakeWord model."""
+        """Lazy-load the OpenWakeWord model — thread-safe.
+
+        Double-checked locking under ``_OWW_INIT_LOCK``: the fast path (model
+        already loaded) skips the lock; the first loader holds it through the
+        ``import openwakeword`` + ``Model(...)`` construction so concurrent
+        audio-frame threads can't race the package init (the "partially
+        initialized module / circular import" crash). The fully-built model is
+        published to ``self._model`` LAST, so the fast-path check never sees a
+        half-constructed instance.
+        """
         if self._model is not None:
             return
 
-        from openwakeword.model import Model
+        with _OWW_INIT_LOCK:
+            if self._model is not None:  # re-check after acquiring the lock
+                return
 
-        if self._model_path:
-            self._model = Model(
-                wakeword_models=[self._model_path],
-                inference_framework="onnx",
-            )
-            self._model_name = "custom"
-        else:
-            # Use pre-trained "hey_jarvis" for testing
-            self._model = Model(inference_framework="onnx")
-            self._model_name = "hey_jarvis"
+            from openwakeword.model import Model
+
+            if self._model_path:
+                model = Model(
+                    wakeword_models=[self._model_path],
+                    inference_framework="onnx",
+                )
+                self._model_name = "custom"
+            else:
+                # Use pre-trained "hey_jarvis" for testing
+                model = Model(inference_framework="onnx")
+                self._model_name = "hey_jarvis"
+
+            self._model = model  # publish last — others' fast path waits on this
 
         log.info(
             "OpenWakeWord loaded",
@@ -319,8 +342,10 @@ class DeepgramStreamManager:
         This runs independently of audio frames — even when no one is speaking,
         the WebSocket stays alive. Prevents the Deepgram 1011 disconnect.
         """
+
         async def _keepalive_forever():
             import json as _json
+
             while True:
                 await asyncio.sleep(5)
                 for user_id, stream in list(self._streams.items()):
@@ -380,9 +405,7 @@ class DeepgramStreamManager:
             stream.connected = True
 
             # Start background listener for transcript updates
-            stream.listener_task = asyncio.create_task(
-                self._listen_loop(user_id, stream)
-            )
+            stream.listener_task = asyncio.create_task(self._listen_loop(user_id, stream))
 
             log.info("Deepgram stream connected", user=user_id)
         except Exception as exc:
@@ -604,12 +627,13 @@ class DeepgramStreamManager:
             return
 
         now = asyncio.get_event_loop().time()
-        last_ka = getattr(stream, '_last_keepalive', 0.0)
+        last_ka = getattr(stream, "_last_keepalive", 0.0)
         if now - last_ka < 5.0:
             return  # Throttle to once per 5 seconds
 
         try:
             import json as _json
+
             await stream.ws.send(_json.dumps({"type": "KeepAlive"}))
             stream._last_keepalive = now
         except Exception:
@@ -621,6 +645,7 @@ class DeepgramStreamManager:
         if stream and stream.ws:
             try:
                 import json as _json
+
                 await stream.ws.send(_json.dumps({"type": "CloseStream"}))
                 await stream.ws.close()
             except Exception:
@@ -691,7 +716,8 @@ class DualPipelineProcessor:
             threshold=0.7,  # Raised for multi-user — 0.5 causes false positives in group calls
         )
         self._deepgram = DeepgramStreamManager(
-            api_key=deepgram_api_key, model=deepgram_model,
+            api_key=deepgram_api_key,
+            model=deepgram_model,
         )
 
         # Wake-word false-positive PCM capture (opt-in via env var).
@@ -700,7 +726,8 @@ class DualPipelineProcessor:
         # wake-word retraining. Set WAKE_FP_CAPTURE_DIR=/app/data/wake_fp
         # in the Komodo env to enable. Each user gets a 100-frame ring.
         self._wake_fp_capture_dir = os.environ.get(
-            "WAKE_FP_CAPTURE_DIR", "",
+            "WAKE_FP_CAPTURE_DIR",
+            "",
         ).strip()
         # 100 frames × 20ms = 2s at 16kHz mono 16-bit = ~64KB per user.
         self._wake_fp_buffers: dict[int, collections.deque[bytes]] = {}
@@ -714,7 +741,8 @@ class DualPipelineProcessor:
             except OSError as exc:
                 log.warning(
                     "Wake-word FP capture dir create failed",
-                    dir=self._wake_fp_capture_dir, error=str(exc)[:80],
+                    dir=self._wake_fp_capture_dir,
+                    error=str(exc)[:80],
                 )
                 self._wake_fp_capture_dir = ""
         self._on_addressed = on_addressed_utterance
@@ -740,7 +768,7 @@ class DualPipelineProcessor:
         # 1000ms lopped the actual song name off into a passive
         # continuation. Passive utterances keep the tighter threshold
         # because they drive the rolling transcript, not a tool call.
-        self._SILENCE_THRESHOLD_PASSIVE = 50   # 1000ms — fast rolling transcript
+        self._SILENCE_THRESHOLD_PASSIVE = 50  # 1000ms — fast rolling transcript
         self._SILENCE_THRESHOLD_ADDRESSED = 100  # 2000ms — let speakers finish
         # Backwards-compat alias used by tests / external callers that
         # still reference the old single-threshold attribute.
@@ -761,7 +789,9 @@ class DualPipelineProcessor:
         """
         if self._loop and user_id not in self._deepgram._streams:
             asyncio.run_coroutine_threadsafe(
-                self._deepgram.send_audio(user_id, b"\x00" * 640),  # 20ms silence to trigger connect
+                self._deepgram.send_audio(
+                    user_id, b"\x00" * 640
+                ),  # 20ms silence to trigger connect
                 self._loop,
             )
 
@@ -774,11 +804,11 @@ class DualPipelineProcessor:
     # address_detector._WAKE_WORDS set) — this gate feeds the anti-loopback
     # dual-gate, so widening the stem here re-opens the music/TTS-loopback hole
     # that gate was built to close. See docs/decisions/wake-word-dual-gate.md.
-    _POOB_STEM = r'(?:p[ou]{1,2}b|p[ou]{1,2}be?|boob|hoob|noob|boop|poof|pub)'
+    _POOB_STEM = r"(?:p[ou]{1,2}b|p[ou]{1,2}be?|boob|hoob|noob|boop|poof|pub)"
 
     # Layer A — "hey poob" address. Requires the literal "hey" lead-in.
     _TEXT_WAKE_RE = re.compile(
-        r'\bhey[\s,.]+' + _POOB_STEM + r'\b',
+        r"\bhey[\s,.]+" + _POOB_STEM + r"\b",
         re.IGNORECASE,
     )
 
@@ -798,17 +828,16 @@ class DualPipelineProcessor:
     # The glued filler letter is restricted to single-letter filler words
     # (a, k), NOT any [a-z], so "spoof"/"scoob" can't be read as filler+stem.
     _POOB_OPENER_RE = re.compile(
-        r'^[\s,.!?]*'
-        r'(?:(?:a|uh+|um+|oh|hey|ok|okay|k)[\s,.!?]+)?'
-        r'(?:a|k)?'
-        + _POOB_STEM + r'\b',
+        r"^[\s,.!?]*"
+        r"(?:(?:a|uh+|um+|oh|hey|ok|okay|k)[\s,.!?]+)?"
+        r"(?:a|k)?" + _POOB_STEM + r"\b",
         re.IGNORECASE,
     )
     _COMMAND_VERB_RE = re.compile(
-        r'\b(?:play|queue|skip|next|stop|pause|resume|unpause|remove|clear|'
-        r'cancel|volume|louder|quieter|lower|raise|mute|unmute|nightcore|slow|'
-        r'slowed|speed|reverb|bass|shuffle|autoplay|kill|restart|replay|repeat|'
-        r'turn)\b',
+        r"\b(?:play|queue|skip|next|stop|pause|resume|unpause|remove|clear|"
+        r"cancel|volume|louder|quieter|lower|raise|mute|unmute|nightcore|slow|"
+        r"slowed|speed|reverb|bass|shuffle|autoplay|kill|restart|replay|repeat|"
+        r"turn)\b",
         re.IGNORECASE,
     )
 
@@ -869,7 +898,7 @@ class DualPipelineProcessor:
         voice_activity.mark_active(pipeline.last_audio_time)
 
         # Pre-connect Deepgram on first frame from any user — don't wait for speech
-        if not getattr(pipeline, '_deepgram_preconnected', False):
+        if not getattr(pipeline, "_deepgram_preconnected", False):
             pipeline._deepgram_preconnected = True
             self.preconnect_user(user_id)
 
@@ -927,9 +956,11 @@ class DualPipelineProcessor:
             pipeline.speech_started = True
             pipeline.speech_start_time = time.monotonic()
             # Inherit pending wake word if it fired recently (within 3s)
-            pending = getattr(pipeline, '_pending_wake', False)
-            pending_time = getattr(pipeline, '_pending_wake_time', 0.0)
-            if pending and (time.monotonic() - pending_time) < 1.5:  # Tighter window — 3s caused stale carries
+            pending = getattr(pipeline, "_pending_wake", False)
+            pending_time = getattr(pipeline, "_pending_wake_time", 0.0)
+            if (
+                pending and (time.monotonic() - pending_time) < 1.5
+            ):  # Tighter window — 3s caused stale carries
                 pipeline.is_active = True
                 pipeline._pending_wake = False
                 log.info(
@@ -1119,15 +1150,14 @@ class DualPipelineProcessor:
             oww_peak=round(_wd.peak_score(user_id), 3) if _wd is not None else -1.0,
             threshold=getattr(_wd, "_threshold", -1.0),
         )
-        self._do_emit(user_id, pipeline.user_name, pipeline.speech_start_time,
-                      is_addressed, transcript)
+        self._do_emit(
+            user_id, pipeline.user_name, pipeline.speech_start_time, is_addressed, transcript
+        )
         pipeline.is_active = False
         # Clear transcript immediately after emission to prevent replay
         self._deepgram.reset_transcript(user_id)
 
-    async def _deferred_emit(
-        self, user_id: int, user_name: str, speech_start_time: float
-    ) -> None:
+    async def _deferred_emit(self, user_id: int, user_name: str, speech_start_time: float) -> None:
         """Wait briefly for Deepgram transcript, then emit addressed utterance."""
         # Give Deepgram up to 1.5s to deliver the transcript
         for _ in range(15):
@@ -1224,7 +1254,10 @@ class DualPipelineProcessor:
                 self._emit_utterance(user_id, pipeline)
 
     def _dump_wake_fp(
-        self, user_id: int, user_name: str, transcript: str,
+        self,
+        user_id: int,
+        user_name: str,
+        transcript: str,
     ) -> None:
         """Serialize the per-user rolling PCM ring to a WAV file.
 
@@ -1247,9 +1280,9 @@ class DualPipelineProcessor:
         if not pcm_bytes:
             return
         ts = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
-        safe_user = "".join(
-            c for c in (user_name or str(user_id)) if c.isalnum() or c in "-_"
-        )[:32] or str(user_id)
+        safe_user = "".join(c for c in (user_name or str(user_id)) if c.isalnum() or c in "-_")[
+            :32
+        ] or str(user_id)
         filename = f"{ts}_{safe_user}_{user_id}.wav"
         path = os.path.join(capture_dir, filename)
         try:
@@ -1261,12 +1294,14 @@ class DualPipelineProcessor:
         except (OSError, wave.Error) as exc:
             log.warning(
                 "Wake-word FP capture write failed",
-                path=path, error=str(exc)[:80],
+                path=path,
+                error=str(exc)[:80],
             )
             return
         log.info(
             "Wake-word FP captured",
-            path=path, transcript=transcript[:60],
+            path=path,
+            transcript=transcript[:60],
             duration_ms=int(len(pcm_bytes) / 32),  # 2 bytes/sample × 16000 Hz
         )
 
