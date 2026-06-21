@@ -488,7 +488,11 @@ class MusicCog(commands.Cog, name="Music"):
                 from poob.music.effects import AVAILABLE_EFFECTS
 
                 return "[SILENT]Which effect? (" + ", ".join(AVAILABLE_EFFECTS) + ")"
-            from poob.music.effects import RELATIVE_SPEED, EffectNotFoundError
+            from poob.music.effects import (
+                RELATIVE_SPEED,
+                EffectNotFoundError,
+                adjust_direction,
+            )
 
             # Default to ADD (stack/layer). 'more'/'less' step an adjustable
             # effect up/down on the fly; bare 'slower'/'faster' carry their own
@@ -497,9 +501,8 @@ class MusicCog(commands.Cog, name="Music"):
             eff_mode = (mode or "add").strip().lower()
             try:
                 if eff_mode in ("more", "less"):
-                    applied = await player.adjust_effect(
-                        effect, "up" if eff_mode == "more" else "down"
-                    )
+                    # adjust_direction honors intent: 'more slowed' = slower.
+                    applied = await player.adjust_effect(effect, adjust_direction(effect, eff_mode))
                 elif effect.strip().lower() in RELATIVE_SPEED:
                     applied = await player.adjust_effect(effect)
                 elif eff_mode == "replace":

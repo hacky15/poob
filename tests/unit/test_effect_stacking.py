@@ -64,6 +64,36 @@ def test_dimension_of_atomic_is_none() -> None:
     assert fx.dimension_of("darth_vader") is None  # not adjustable
 
 
+@pytest.mark.parametrize(
+    "effect,mode,expected",
+    [
+        ("slowed", "more", "down"),  # more slowed = slower
+        ("slowed", "less", "up"),  # less slowed = toward normal
+        ("super_slowed", "more", "down"),
+        ("nightcore", "more", "up"),  # more nightcore = faster
+        ("nightcore", "less", "down"),
+        ("bass", "more", "up"),  # non-speed: more = up
+        ("reverb", "less", "down"),
+        ("ultrabass", "more", "up"),
+    ],
+)
+def test_adjust_direction_honors_intent(effect: str, mode: str, expected: str) -> None:
+    assert fx.adjust_direction(effect, mode) == expected
+
+
+@pytest.mark.asyncio
+async def test_more_slowed_intensifies_not_removes() -> None:
+    """Prod bug (2026-06-21): 'more slowed' on an active slow removed it. It
+    must SLOW further instead."""
+    p = _player()
+    await p.add_effect("bassboost")
+    await p.add_effect("slowed")  # speed 0.85
+    # "more slowed" → adjust_direction says 'down' → slower, not off
+    await p.adjust_effect("slowed", fx.adjust_direction("slowed", "more"))
+    assert p._effect_levels.get("speed", 1.0) < 0.85  # slower
+    assert "bass" in p._effect_levels  # bass survived
+
+
 # --- step_level (the more/less / slower-faster math) ------------------------
 
 

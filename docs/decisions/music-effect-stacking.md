@@ -35,6 +35,7 @@ Named presets become **shortcuts that set levels** (`PRESET_DIMENSION_LEVELS`): 
 
 - **"slower" / "faster"** (bare words, carry their own direction) step the `speed` factor multiplicatively (×0.82 / ÷0.82), clamped to **[0.5, 1.6]** — so "slower… slower… slower" keeps going down to half-speed instead of capping. Returning to ~1.0 turns speed off.
 - **"more <x>" / "less <x>"** step any adjustable dimension up/down (`more reverb`, `less bass`, `more 8d`). "more" from off turns it on at its audible default; "less" below the floor fades it off.
+- **Intent-aware direction** (`effects.adjust_direction`): "more" is up for most effects, but speed presets carry meaning — "more slowed" = *slower* (down), "more nightcore" = *faster* (up). Without this, "more slowed" stepped speed UP, crossed 1.0, and removed the slowdown (prod bug 2026-06-21).
 - Adjusting takes over the category — "slower" while `darth_vader` (atomic, speed) is on clears Vader and starts a clean speed factor.
 
 All of this respawns FFmpeg at the **current position** (the existing on-the-fly mechanism — [[music-on-the-fly-filter-respawn]]), so it applies mid-song with the ~200-400 ms gap and persists onto the next track.

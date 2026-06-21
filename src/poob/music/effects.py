@@ -368,6 +368,27 @@ def dimension_of(effect: object) -> str | None:
     return EFFECT_TO_DIMENSION.get(EFFECT_ALIASES.get(key, key))
 
 
+def adjust_direction(effect: object, mode: str) -> str:
+    """Map a "more"/"less" on ``effect`` to a step direction, honoring intent.
+
+    For most effects "more" = up. But SPEED presets carry directional meaning:
+    "more slowed" means *slower* (speed down), "more nightcore" means *faster*
+    (speed up). Without this, "more slowed" steps the speed factor UP and can
+    cross 1.0 — turning the slowdown OFF (the wrong-filter bug seen in prod).
+    """
+    base = "up" if mode == "more" else "down"
+    if dimension_of(effect) != "speed":
+        return base
+    try:
+        name = resolve_effect_name(effect)
+    except EffectNotFoundError:
+        return base
+    # A slow preset (factor < 1.0): "more" = slower = down, "less" = up.
+    if PRESET_DIMENSION_LEVELS.get(name, {}).get("speed", 1.0) < 1.0:
+        return "down" if mode == "more" else "up"
+    return base
+
+
 def step_level(dim: str, current: float | None, direction: str) -> float | None:
     """New level after one "more"/"less" step on dimension ``dim``.
 
