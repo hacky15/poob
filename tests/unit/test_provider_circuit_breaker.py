@@ -42,12 +42,15 @@ _GROQ_429 = (
 
 # --- retry-after parsing (the heart of "driven by the server, not a guess") ---
 
+
 def test_parses_minutes_and_seconds_from_message() -> None:
     assert abs(PoobBrain._retry_after_seconds(_FakeExc(_GROQ_429)) - (25 * 60 + 7.68)) < 0.01
 
 
 def test_parses_seconds_only_message() -> None:
-    assert abs(PoobBrain._retry_after_seconds(_FakeExc("Please try again in 9.552s")) - 9.552) < 0.01
+    assert (
+        abs(PoobBrain._retry_after_seconds(_FakeExc("Please try again in 9.552s")) - 9.552) < 0.01
+    )
 
 
 def test_parses_minutes_seconds_fractional() -> None:
@@ -65,6 +68,7 @@ def test_no_signal_returns_none() -> None:
 
 # --- rate-limit classification (timeouts must NOT cool down) ---
 
+
 def test_429_is_rate_limit() -> None:
     assert PoobBrain._is_rate_limit_error(_FakeExc(_GROQ_429)) is True
     assert PoobBrain._is_rate_limit_error(_FakeExc("RESOURCE_EXHAUSTED")) is True
@@ -76,6 +80,7 @@ def test_timeout_is_not_rate_limit() -> None:
 
 
 # --- cooldown set / expiry / clamp ---
+
 
 def test_note_rate_limit_sets_cooldown_from_message() -> None:
     b = _brain()
@@ -121,9 +126,12 @@ def test_active_providers_skips_cooled_model_only() -> None:
     b = _brain()
     b._provider_cooldown["openai/gpt-oss-20b"] = time.monotonic() + 100
     active = b._active_providers(_PROVIDERS)
-    assert ("groq", "openai/gpt-oss-20b") not in active           # capped model skipped
-    assert ("gemini", "gemini-2.5-flash-lite") in active          # → Gemini is now rung 1
-    assert ("groq", "meta-llama/llama-4-scout-17b-16e-instruct") in active  # separate TPD budget — survives
+    assert ("groq", "openai/gpt-oss-20b") not in active  # capped model skipped
+    assert ("gemini", "gemini-2.5-flash-lite") in active  # → Gemini is now rung 1
+    assert (
+        "groq",
+        "meta-llama/llama-4-scout-17b-16e-instruct",
+    ) in active  # separate TPD budget — survives
 
 
 def test_active_providers_never_strands_when_all_cooling() -> None:
@@ -183,11 +191,11 @@ def test_consecutive_timeouts_arm_cooldown() -> None:
 
     b = _brain()
     b._note_model_timeout("m", httpx.ReadTimeout("t1"))
-    assert not b._model_in_cooldown("m")          # one timeout = transient
+    assert not b._model_in_cooldown("m")  # one timeout = transient
     b._note_model_timeout("m", httpx.ReadTimeout("t2"))
-    assert b._model_in_cooldown("m")              # two in a row = hung -> eject
+    assert b._model_in_cooldown("m")  # two in a row = hung -> eject
     left = b._provider_cooldown["m"] - time.monotonic()
-    assert 115 <= left <= 121                     # short fixed window (120s)
+    assert 115 <= left <= 121  # short fixed window (120s)
 
 
 def test_success_clears_timeout_streak() -> None:
@@ -199,7 +207,7 @@ def test_success_clears_timeout_streak() -> None:
     b._provider_cooldown.pop("m", None)
     b._provider_timeouts.pop("m", None)
     b._note_model_timeout("m", httpx.ReadTimeout("t2"))
-    assert not b._model_in_cooldown("m")          # streak restarted at 1
+    assert not b._model_in_cooldown("m")  # streak restarted at 1
 
 
 def test_non_timeout_error_resets_timeout_streak() -> None:
@@ -207,9 +215,9 @@ def test_non_timeout_error_resets_timeout_streak() -> None:
 
     b = _brain()
     b._note_model_timeout("m", httpx.ReadTimeout("t1"))
-    b._note_model_timeout("m", _FakeExc(_GROQ_429))   # responded -> not hung
+    b._note_model_timeout("m", _FakeExc(_GROQ_429))  # responded -> not hung
     b._note_model_timeout("m", httpx.ReadTimeout("t2"))
-    assert not b._model_in_cooldown("m")          # 429 broke the streak
+    assert not b._model_in_cooldown("m")  # 429 broke the streak
 
 
 def test_second_gemini_rung_configured() -> None:
@@ -220,10 +228,12 @@ def test_second_gemini_rung_configured() -> None:
     import poob.brain.poob as brain_mod
 
     b = _brain()
-    # Primary = 3.1-flash-lite (fastest free, ~587ms w/ thinking off); alt =
-    # 2.5-flash-lite (separate per-model RPM bucket + GA fallback).
-    assert b.gemini_router_model == "gemini-3.1-flash-lite-preview"
-    assert b.gemini_router_model_alt == "gemini-2.5-flash-lite"
+    # Primary = 2.5-flash-lite (GA, reliable: 14/14 routes + 0 timeouts in the
+    # 2026-06-22 busy-VC audit); alt = 3.1-flash-lite-preview (demoted — it timed
+    # out >6s on ~39% of calls under load). Separate per-model RPM buckets.
+    # See docs/decisions/gemini-router-prefer-2.5-ga-over-3.1-preview.
+    assert b.gemini_router_model == "gemini-2.5-flash-lite"
+    assert b.gemini_router_model_alt == "gemini-3.1-flash-lite-preview"
     assert b.gemini_router_model != b.gemini_router_model_alt
     src = inspect.getsource(brain_mod)
     assert 'providers.append(("gemini", self.gemini_router_model_alt))' in src

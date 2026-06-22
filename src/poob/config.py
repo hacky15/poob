@@ -48,13 +48,14 @@ class AppConfig(BaseSettings):
     # fully isolate the scraper's Gemini usage from voice routing.
     vlm_google_api_key: str = ""
     google_model: str = "gemini-2.5-flash"
-    # Primary Gemini ROUTER rung. 3.1-flash-lite (preview, free) benchmarked
-    # ~587ms / 0% spikes with reasoning_effort=none — faster + stabler than
-    # 2.5-flash-lite (~714ms) and smarter on questions. The earlier "42% >2s
-    # spikes" were thinking tokens, now disabled brain-side. 2.5-flash-lite is
-    # the GA fallback rung if this preview is pulled. See
-    # docs/research/free-llm-tier-audit-2026-06.md.
-    agent_google_model: str = "gemini-3.1-flash-lite-preview"
+    # Primary Gemini ROUTER rung. 2.5-flash-lite (GA, free) is the reliable
+    # default: in the 2026-06-22 busy-VC audit it routed 14/14 with ZERO
+    # timeouts, while 3.1-flash-lite PREVIEW timed out (>6s httpx ceiling) on
+    # ~39% of calls under load — burning 6s before falling through. The earlier
+    # ~587ms 3.1 benchmark was unloaded/single-call and didn't reflect busy-VC
+    # tail latency. 3.1 is demoted to the overflow alt rung (gemini_router_model_alt).
+    # See docs/decisions/gemini-router-prefer-2.5-ga-over-3.1-preview.md.
+    agent_google_model: str = "gemini-2.5-flash-lite"
     # Gemini 3 Flash: non-thinking, fast — preferred agent fallback over 2.5-flash-lite
     agent_google_model_fast: str = "gemini-3-flash"
 
@@ -76,7 +77,9 @@ class AppConfig(BaseSettings):
     spotify_client_id: str = ""
     spotify_client_secret: str = ""
 
-    picovoice_access_key: str = ""  # Vestigial — Porcupine replaced by OpenWakeWord; field kept for back-compat
+    picovoice_access_key: str = (
+        ""  # Vestigial — Porcupine replaced by OpenWakeWord; field kept for back-compat
+    )
     # Path to the .onnx wake-word model loaded by OpenWakeWord at boot.
     # Authoritative env-var is WAKE_WORD_MODEL_PATH; the legacy
     # PORCUPINE_KEYWORD_PATH alias keeps older .env files / Komodo
@@ -295,7 +298,9 @@ class AppConfig(BaseSettings):
 
     # --- Enrichment + Comparables ---
     enrichment_tavily_enabled: bool = True  # Use Tavily for comparable sales after enrichment
-    enrichment_tavily_only_with_product_name: bool = True  # Only search when enrichment found a name
+    enrichment_tavily_only_with_product_name: bool = (
+        True  # Only search when enrichment found a name
+    )
 
     # --- Conversational Agent ---
     # Agent brain cascade: Groq GPT-OSS 120B → Groq Llama 70B → NVIDIA NIM → Gemini 3 Flash → Ollama.
@@ -326,8 +331,15 @@ class AppConfig(BaseSettings):
     patrol_scheduler_auto_start: bool = True
     patrol_sweep_mode: str = "unified"  # "unified" (1 page) or "categories" (10+ pages)
     patrol_categories: list[str] = [
-        "electronics", "furniture", "sports", "garden",
-        "appliances", "free", "toys", "apparel", "entertainment",
+        "electronics",
+        "furniture",
+        "sports",
+        "garden",
+        "appliances",
+        "free",
+        "toys",
+        "apparel",
+        "entertainment",
     ]
     patrol_base_radius_miles: int = 40
     patrol_radius_jitter: int = 4
@@ -378,7 +390,7 @@ class AppConfig(BaseSettings):
     # --- Anonymous GraphQL ---
     patrol_anonymous_graphql_enabled: bool = True  # Try depersonalized GraphQL before browser
     patrol_anonymous_browse_categories: list[str] = [
-        "",              # Empty query = general browse (returns few but free)
+        "",  # Empty query = general browse (returns few but free)
         "electronics",
         "furniture",
         "appliances",
@@ -453,7 +465,9 @@ class AppConfig(BaseSettings):
     # Poob, not a stranger. Operator knobs (test without code changes):
     voice_filler_enabled: bool = True
     voice_filler_voice: str = ""  # empty → use voice_google_tts_voice (Fenrir)
-    voice_silence_threshold_ms: int = 350  # Silence duration before utterance ends (snappier turn-taking)
+    voice_silence_threshold_ms: int = (
+        350  # Silence duration before utterance ends (snappier turn-taking)
+    )
     voice_energy_threshold: float = 150.0  # RMS energy threshold for speech detection
     voice_min_speech_ms: int = 200  # Minimum speech duration to avoid spurious triggers
     voice_max_utterance_seconds: int = 30  # Max single utterance length

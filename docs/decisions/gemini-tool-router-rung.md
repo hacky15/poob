@@ -8,6 +8,12 @@ related: [[brain-routing-audit]] [[groq-daily-token-cap-degrades-routing]] [[gro
 
 # Add Google Gemini Flash-Lite as a tool-router rung (no daily token cap)
 
+> **2026-06-22 revision:** the *gemini-as-a-rung* decision below still holds, but the
+> **model order within the Gemini rungs was reversed** — `gemini-2.5-flash-lite` (GA) is now the
+> primary Gemini rung and `gemini-3.1-flash-lite-preview` the overflow alt, after a busy-VC audit
+> found 3.1 timing out >6s on ~39% of calls under load (2.5 was 14/14). See
+> [[gemini-router-prefer-2.5-ga-over-3.1-preview]].
+
 ## Context
 
 Groq's free `gpt-oss-20b` primary hits its **200k-tokens/DAY** cap mid-session ([[groq-daily-token-cap-degrades-routing]]), dropping all routing onto the NVIDIA `qwen3-next-80b` rung — which mishandled ~24% of music requests. The fix needs a $0, no-card rung whose free tier is **RPD-limited, not token-capped**, so it survives past Groq's daily wall.
