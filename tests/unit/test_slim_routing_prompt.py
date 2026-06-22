@@ -72,6 +72,7 @@ _GENERATION_ONLY_SUBSTRINGS = [
 
 # --- the slim routing prompt itself -----------------------------------------
 
+
 def test_routing_prompt_keeps_every_music_routing_rule() -> None:
     p = _build_routing_prompt(with_music=True)
     for s in _MUSIC_RULE_SUBSTRINGS:
@@ -118,14 +119,22 @@ def test_routing_prompt_is_substantially_shorter() -> None:
 
 # --- guard the MOVE: generation-only text survives on the generation paths --
 
+
 def test_casual_generation_prompt_still_carries_persona_and_rules() -> None:
     """_build_system_prompt(with_tools=False) is the casual reply prompt
     (via _rebuild_messages_no_tools / _casual_text_fallback). Every clause the
     audit moved off routing must still live here."""
     c = _build_system_prompt(5, voice=False, with_tools=False)
     for s in (
-        "loud, bold", "RULES:", "NEVER:", "as an AI", "I cannot",
-        "don't make stuff up", "spurradic", "avoid vocatives", "crude",
+        "loud, bold",
+        "RULES:",
+        "NEVER:",
+        "as an AI",
+        "I cannot",
+        "don't make stuff up",
+        "spurradic",
+        "avoid vocatives",
+        "crude",
         "Reference things nobody actually said",
     ):
         assert s in c, f"casual prompt lost a moved clause: {s!r}"
@@ -151,7 +160,44 @@ def test_full_system_prompt_with_tools_output_unchanged_by_refactor() -> None:
     assert "loud, bold" in full
 
 
+# --- routing-context trim (the per-route token lever) -----------------------
+
+
+def test_trim_for_routing_keeps_last_turns_and_strips_crosstalk() -> None:
+    """Routing gets a trimmed copy (last N turns, no crosstalk); the original
+    messages are untouched so generation keeps full context. The token lever
+    behind the 2026-06-22 daily-cap exhaustion fix (decisions/slim-routing-context)."""
+    from poob.brain.poob import _ROUTING_HISTORY_TURNS
+
+    b = _brain()
+    messages = [{"role": "system", "content": "ROUTING PROMPT"}]
+    for i in range(10):
+        messages.append({"role": "user", "content": f"u{i}"})
+        messages.append({"role": "assistant", "content": f"a{i}"})
+    messages.append(
+        {
+            "role": "user",
+            "content": (
+                "[Recent conversation you've been listening to:\n"
+                "tons of multi-user crosstalk]\n\nHey Poob play Wonderwall"
+            ),
+        }
+    )
+    before = len(messages)
+
+    trimmed = b._trim_for_routing(messages)
+
+    assert [m for m in trimmed if m["role"] == "system"] == [messages[0]]  # system kept
+    convo = [m for m in trimmed if m["role"] != "system"]
+    assert len(convo) == _ROUTING_HISTORY_TURNS  # only last N turns
+    assert trimmed[-1]["content"] == "Hey Poob play Wonderwall"  # crosstalk stripped
+    # original untouched → generation still has full history + crosstalk
+    assert len(messages) == before
+    assert "crosstalk" in messages[-1]["content"]
+
+
 # --- wiring: _build_messages routing path uses the slim prompt --------------
+
 
 def test_build_messages_routing_prompt_is_slim_with_handler() -> None:
     b = _brain()
@@ -160,12 +206,12 @@ def test_build_messages_routing_prompt_is_slim_with_handler() -> None:
     sys = next(m["content"] for m in msgs if m["role"] == "system")
     assert "music_assistant" in sys
     assert "VOLUME IS NOT AN EFFECT" in sys
-    assert "loud, bold" not in sys      # persona is NOT in the routing prompt
+    assert "loud, bold" not in sys  # persona is NOT in the routing prompt
     assert "NEVER:" not in sys
 
 
 def test_build_messages_routing_prompt_drops_music_without_handler() -> None:
-    b = _brain()                         # default: no music handler
+    b = _brain()  # default: no music handler
     assert b._music_handler is None
     msgs = b._build_messages("u", "what's on my list", voice=False, guild_id=0)
     sys = next(m["content"] for m in msgs if m["role"] == "system")

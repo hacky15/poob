@@ -540,6 +540,26 @@ def _split_context(raw: str) -> tuple[str, str]:
     return "", raw
 
 
+# Routing is intent CLASSIFICATION — it doesn't need the full 15-turn history or
+# the passive crosstalk. Trimming both is the main per-route token lever (a busy
+# multi-user VC was burning the daily free-tier caps on history+crosstalk →
+# slow NVIDIA fallback). See PoobBrain._trim_for_routing + decisions/slim-routing-context.
+_ROUTING_HISTORY_TURNS = 4
+
+# Strips the wrapper _build_messages prepends to the last user turn:
+# "[Recent conversation you've been listening to:\n...]\n\n<message>".
+_CHANNEL_CTX_PREFIX_RE = re.compile(
+    r"^\[Recent conversation you've been listening to:.*?\]\n\n",
+    re.DOTALL,
+)
+
+
+def _strip_channel_context(content: str) -> str:
+    """Remove the passive-crosstalk wrapper from a routing message (the crosstalk
+    is generation-only — it colors the persona reply, not intent classification)."""
+    return _CHANNEL_CTX_PREFIX_RE.sub("", content, count=1)
+
+
 # ---------------------------------------------------------------------------
 # PoobBrain
 # ---------------------------------------------------------------------------
@@ -592,12 +612,12 @@ class PoobBrain:
     # Primary Gemini router rung (wired from config.agent_google_model).
     # 2.5-flash-lite (GA): 14/14 routes, 0 timeouts in the 2026-06-22 load audit.
     gemini_router_model: str = "gemini-2.5-flash-lite"
-    # Second (overflow) Gemini rung on a DIFFERENT model = separate per-model RPM
-    # bucket (~20 req/min each), doubling burst capacity when a busy VC exceeds
-    # one bucket. 3.1-flash-lite PREVIEW sits here (demoted from primary — it
-    # timed out ~39% under load): acceptable as a rarely-hit overflow, not the
-    # front line. See docs/decisions/gemini-router-prefer-2.5-ga-over-3.1-preview.md.
-    gemini_router_model_alt: str = "gemini-3.1-flash-lite-preview"
+    # Optional second (overflow) Gemini rung — a DIFFERENT model = separate
+    # per-model RPM bucket. DISABLED ("") after the 2026-06-22 audit: the
+    # 3.1-flash-lite PREVIEW that sat here hung to the 6s timeout on ~39% of
+    # calls, a flat 6s tax with no upside (shared project quota). Set to a
+    # reliable GA model (e.g. gemini-3-flash) to re-enable.
+    gemini_router_model_alt: str = ""
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3:8b"
     max_history: int = 15
@@ -994,7 +1014,7 @@ class PoobBrain:
 
         if self.groq_api_key:
             try:
-                result = await self._groq_with_tools(messages, max_tok)
+                result = await self._groq_with_tools(self._trim_for_routing(messages), max_tok)
                 if result is not None:
                     text, tool_name, tool_args = result
 
@@ -1137,7 +1157,7 @@ class PoobBrain:
         tool_name = None
         tool_args = None
         try:
-            result = await self._groq_with_tools(messages, max_tok)
+            result = await self._groq_with_tools(self._trim_for_routing(messages), max_tok)
             if result is not None:
                 _, tool_name, tool_args = result
         except Exception as exc:
@@ -1362,6 +1382,25 @@ class PoobBrain:
         messages.append({"role": "user", "content": last_content})
 
         return messages
+
+    def _trim_for_routing(self, messages: list[dict]) -> list[dict]:
+        """Return a TRIMMED copy of ``messages`` for the tool-routing call only.
+
+        Routing is intent classification: it needs the system prompt + the last
+        few turns (enough for follow-ups like "more" / "yes" / "that one"), not
+        the full 15-turn history or the passive crosstalk. The original
+        ``messages`` is untouched and still drives the casual reply with full
+        context. This is the main per-route token lever — a busy multi-user VC
+        was dragging the whole history + crosstalk into every routing call,
+        burning the daily free-tier caps (Groq TPD / Gemini RPD) and forcing the
+        slow NVIDIA rung. See docs/decisions/slim-routing-context.
+        """
+        system = [m for m in messages if m.get("role") == "system"][:1]
+        convo = [m for m in messages if m.get("role") != "system"]
+        trimmed = [dict(m) for m in convo[-_ROUTING_HISTORY_TURNS:]]
+        if trimmed and trimmed[-1].get("role") == "user":
+            trimmed[-1]["content"] = _strip_channel_context(trimmed[-1]["content"])
+        return system + trimmed
 
     def _save_response(
         self,
@@ -2247,10 +2286,18 @@ class PoobBrain:
         #    docs/gotchas/groq-daily-token-cap-degrades-routing.
         if self.google_api_key:
             providers.append(("gemini", self.gemini_router_model))
-        # 2b. Second Gemini model = separate per-model ~20 RPM bucket. Busy
-        #     VC bursts past one bucket while Groq's daily cap is spent
-        #     (2026-06-09: 15x gemini-429/hour); same latency, double burst.
-        if self.google_api_key:
+        # 2b. Optional second Gemini model = separate per-model RPM bucket.
+        #     DISABLED by default (alt="") after the 2026-06-22 audit: the 3.1
+        #     PREVIEW that sat here hung to the 6s timeout on ~39% of calls,
+        #     adding a flat 6s tax with no upside (shared project quota → when the
+        #     primary is 429'd the alt is too). Set gemini_router_model_alt to a
+        #     reliable GA model to re-enable. See
+        #     decisions/gemini-router-prefer-2.5-ga-over-3.1-preview.
+        if (
+            self.google_api_key
+            and self.gemini_router_model_alt
+            and self.gemini_router_model_alt != self.gemini_router_model
+        ):
             providers.append(("gemini", self.gemini_router_model_alt))
         # 3. NVIDIA NIM — different provider, sidesteps Groq rate limits.
         if self.nvidia_api_key:

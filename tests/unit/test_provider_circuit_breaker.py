@@ -229,11 +229,13 @@ def test_second_gemini_rung_configured() -> None:
 
     b = _brain()
     # Primary = 2.5-flash-lite (GA, reliable: 14/14 routes + 0 timeouts in the
-    # 2026-06-22 busy-VC audit); alt = 3.1-flash-lite-preview (demoted — it timed
-    # out >6s on ~39% of calls under load). Separate per-model RPM buckets.
+    # 2026-06-22 busy-VC audit). The alt rung is DISABLED ("") after the same-day
+    # follow-up audit: the 3.1-preview that sat there hung to the 6s timeout on
+    # ~39% of calls — a flat 6s tax with no upside (shared project quota).
     # See docs/decisions/gemini-router-prefer-2.5-ga-over-3.1-preview.
     assert b.gemini_router_model == "gemini-2.5-flash-lite"
-    assert b.gemini_router_model_alt == "gemini-3.1-flash-lite-preview"
-    assert b.gemini_router_model != b.gemini_router_model_alt
+    assert b.gemini_router_model_alt == ""  # disabled
     src = inspect.getsource(brain_mod)
-    assert 'providers.append(("gemini", self.gemini_router_model_alt))' in src
+    # The alt rung is appended only when set + distinct (guarded), so an empty
+    # alt adds no second gemini rung / no 6s timeout tax.
+    assert "self.gemini_router_model_alt != self.gemini_router_model" in src
