@@ -269,10 +269,20 @@ class VoiceCog(commands.Cog, name="Voice"):
                     return
                 session.process_audio_frame(user_id, pcm_data)
 
+            def _stale_check() -> None:
+                # The pipeline is torn down to None on session cleanup
+                # (incidents/deepgram-streams-leak-on-cleanup). An orphaned sink
+                # whose recording wasn't stopped must NO-OP here, not deref None
+                # 10x/sec — that AttributeError storm starved the audio threads
+                # and crippled the whole bot (incidents/stale-check-none-flood).
+                dp = session._dual_pipeline
+                if dp is not None:
+                    dp.check_stale_buffers()
+
             if session.uses_dual_pipeline:
                 sink = RealtimeAudioSink(
                     on_audio_frame=on_audio_frame,
-                    on_stale_check=lambda: session._dual_pipeline.check_stale_buffers(),
+                    on_stale_check=_stale_check,
                 )
             else:
                 sink = RealtimeAudioSink(

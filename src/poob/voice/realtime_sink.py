@@ -65,6 +65,7 @@ class RealtimeAudioSink(Sink):
         self._on_stale_check = on_stale_check  # For dual pipeline stale detection
         self._stopped = threading.Event()
         self._stale_thread: threading.Thread | None = None
+        self._last_err_log = 0.0  # throttle: the stale loop runs 10x/sec
 
         # Start the stale-buffer checker thread
         if get_buffers is not None or on_stale_check is not None:
@@ -89,7 +90,18 @@ class RealtimeAudioSink(Sink):
             try:
                 self._check_stale_buffers()
             except Exception:
-                logger.exception("Error in stale buffer check")
+                self._log_throttled("Error in stale buffer check")
+
+    def _log_throttled(self, msg: str) -> None:
+        """Log an exception at most once per 30s. The stale loop runs 10x/sec, so
+        a recurring error (e.g. an orphaned sink dereferencing a torn-down
+        pipeline) must NEVER flood the log the way it did 2026-06-22 — 59k
+        tracebacks in 5h starved the audio threads and crippled the bot. See
+        docs/incidents/stale-check-none-flood."""
+        now = time.monotonic()
+        if now - self._last_err_log > 30.0:
+            self._last_err_log = now
+            logger.exception(msg + " (throttled to 1/30s; may be recurring)")
 
     def _check_stale_buffers(self) -> None:
         """Check all user buffers for stale speech that needs flushing."""
@@ -98,7 +110,7 @@ class RealtimeAudioSink(Sink):
             try:
                 self._on_stale_check()
             except Exception:
-                logger.exception("Error in dual pipeline stale check")
+                self._log_throttled("Error in dual pipeline stale check")
             return
 
         if self._get_buffers is None:
