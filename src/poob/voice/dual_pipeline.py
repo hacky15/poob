@@ -304,8 +304,11 @@ class DeepgramStreamManager:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._keepalive_task: asyncio.Task | None = None
         self._pending_audio: dict[int, collections.deque[bytes]] = {}
-        # Per-user consecutive "wake fired but no transcript" misses; reset to
-        # 0 the instant any transcript arrives. Drives zombie-stream recovery.
+        # Per-user consecutive "wake fired but no transcript" misses. Reset ONLY
+        # by a wake-fired SUCCESS (note_transcript_delivered) or an explicit
+        # force_reconnect — NOT by arbitrary background transcript content,
+        # which is not evidence the wake path specifically works (see the
+        # 2026-07-02 regression note in _listen_loop). Drives zombie recovery.
         self._consecutive_lost: dict[int, int] = {}
 
     def _buffer_pending(self, user_id: int, frame: bytes) -> None:
@@ -435,9 +438,19 @@ class DeepgramStreamManager:
                     speech_final = data.get("speech_final", False)
 
                     if transcript:
-                        # Any transcript = the stream is alive; clear the
-                        # zombie-miss counter for this user.
-                        self._consecutive_lost[user_id] = 0
+                        # NOTE: do NOT reset the zombie-miss counter here. It used
+                        # to ("any transcript = alive"), but that let unrelated
+                        # background/passive content mask a stream that
+                        # specifically fails to deliver WAKE-FIRED utterances in
+                        # time — the counter almost never reached
+                        # _ZOMBIE_LOST_THRESHOLD because some other passive
+                        # transcript kept clearing it between misses (2026-07-02
+                        # regression: 11/12 wake-fired misses for one user, only 1
+                        # auto-recovery all night). The only valid "this user's
+                        # wake path is healthy" signal is a wake-fired SUCCESS —
+                        # that's note_transcript_delivered(), called from
+                        # _deferred_emit's success path. See
+                        # docs/incidents/deepgram-zombie-stream-no-transcript.md.
                         # First content of a NEW utterance (our speech-start
                         # bumped utterance_seq via begin_utterance): start the
                         # transcript fresh + tag it with the new seq so it never

@@ -80,6 +80,7 @@ def test_passive_emits_not_deduped() -> None:
 # down are flushed in order on reconnect, instead of being dropped.
 # ---------------------------------------------------------------------------
 
+
 def _connected_stream() -> tuple[_UserStream, list[bytes]]:
     """A connected _UserStream whose ws.send records frames."""
     sent: list[bytes] = []
@@ -190,8 +191,8 @@ async def test_report_lost_transcript_recovers_at_threshold() -> None:
 async def test_transcript_delivered_resets_miss_counter() -> None:
     mgr = DeepgramStreamManager("key")
     mgr.force_reconnect = AsyncMock()
-    await mgr.report_lost_transcript(42)          # miss 1
-    mgr.note_transcript_delivered(42)             # stream proved alive → reset
+    await mgr.report_lost_transcript(42)  # miss 1
+    mgr.note_transcript_delivered(42)  # stream proved alive → reset
     recovered = await mgr.report_lost_transcript(42)  # miss 1 again, not 2
     assert recovered is False
     mgr.force_reconnect.assert_not_awaited()
@@ -214,9 +215,61 @@ async def test_force_reconnect_closes_clears_throttle_and_counter() -> None:
     mgr._last_connect_time[42] = 123.0
     mgr._consecutive_lost[42] = 5
     await mgr.force_reconnect(42)
-    mgr.close_user.assert_awaited_once_with(42)   # zombie stream torn down
-    assert 42 not in mgr._last_connect_time        # throttle cleared → next frame reconnects now
-    assert mgr._consecutive_lost[42] == 0          # counter reset
+    mgr.close_user.assert_awaited_once_with(42)  # zombie stream torn down
+    assert 42 not in mgr._last_connect_time  # throttle cleared → next frame reconnects now
+    assert mgr._consecutive_lost[42] == 0  # counter reset
+
+
+class _FakeWS:
+    """Async-iterable that yields one Deepgram "Results" JSON message, then ends
+    (mimics `async for msg in stream.ws` returning after a single frame)."""
+
+    def __init__(self, transcript: str) -> None:
+        self._transcript = transcript
+        self._sent = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._sent:
+            raise StopAsyncIteration
+        self._sent = True
+        import json
+
+        return json.dumps(
+            {
+                "type": "Results",
+                "is_final": True,
+                "speech_final": True,
+                "channel": {"alternatives": [{"transcript": self._transcript}]},
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_listen_loop_does_not_reset_miss_counter_on_unrelated_content() -> None:
+    """2026-07-02 regression: `_listen_loop` used to reset `_consecutive_lost` on
+    ANY transcript, so a chronically-degraded stream's unrelated background
+    content kept clearing the counter and it almost never reached
+    `_ZOMBIE_LOST_THRESHOLD` (11/12 wake-fired misses for one user in prod, only
+    1 auto-recovery all night). The counter must be reset ONLY by a genuine
+    wake-fired success (`note_transcript_delivered`) or `force_reconnect` — not
+    by this listener loop. Drives the REAL `_listen_loop` code path (not a
+    reimplementation), so it would have caught the regression.
+    See docs/incidents/deepgram-zombie-stream-no-transcript.md."""
+    mgr = DeepgramStreamManager("key")
+    stream = _UserStream()
+    stream.ws = _FakeWS("just some background chatter")
+    mgr._streams[42] = stream
+    mgr._consecutive_lost[42] = 1  # simulate one prior wake-fired miss
+
+    await mgr._listen_loop(42, stream)
+
+    assert mgr.get_transcript(42)[0] == "just some background chatter"  # content still lands
+    assert mgr._consecutive_lost[42] == 1, (
+        "unrelated transcript content must NOT reset the zombie-miss counter"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -243,9 +296,7 @@ def _feed(stream: _UserStream, text: str, *, is_final: bool = True) -> None:
         stream.latest_interim = ""
         stream.transcript_seq = stream.utterance_seq
     if is_final:
-        stream.transcript = (
-            f"{stream.transcript} {text}".strip() if stream.transcript else text
-        )
+        stream.transcript = f"{stream.transcript} {text}".strip() if stream.transcript else text
         stream.latest_interim = ""
     else:
         stream.latest_interim = text
@@ -255,11 +306,11 @@ def test_seal_suppresses_reaccumulation_but_allows_genuine_reissue() -> None:
     mgr, stream = _mgr_with_stream(1)
 
     # Utterance 1 — user says it once.
-    mgr.begin_utterance(1)                          # our speech-start
+    mgr.begin_utterance(1)  # our speech-start
     _feed(stream, "hey poob play funny friends")
     assert mgr.get_transcript(1)[0] == "hey poob play funny friends"
 
-    mgr.mark_emitted(1)                             # VAD emit -> SEAL
+    mgr.mark_emitted(1)  # VAD emit -> SEAL
     mgr.reset_transcript(1)
 
     # Deepgram re-appends to the SAME open utterance (no new speech-start) —
@@ -281,12 +332,12 @@ def test_seal_covers_the_latest_interim_fallback() -> None:
     (the exact original double-fire route)."""
     mgr, stream = _mgr_with_stream(1)
     mgr.begin_utterance(1)
-    _feed(stream, "hey poob play x", is_final=False)   # interim only
+    _feed(stream, "hey poob play x", is_final=False)  # interim only
     assert mgr.get_transcript(1)[0] == "hey poob play x"
 
     mgr.mark_emitted(1)
     mgr.reset_transcript(1)
-    _feed(stream, "hey poob play x", is_final=False)   # interim re-arrives, same utterance
+    _feed(stream, "hey poob play x", is_final=False)  # interim re-arrives, same utterance
     assert mgr.get_transcript(1)[0] == "", "interim fallback must also be sealed"
 
 
