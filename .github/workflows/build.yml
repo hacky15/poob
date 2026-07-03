@@ -46,16 +46,17 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/poob:latest
             ghcr.io/${{ github.repository_owner }}/poob:${{ github.sha }}
-          # Registry cache is persistent across builds and not subject to
-          # GHA cache's 10 GB / 7-day eviction policy. GHA cache is kept as
-          # a fallback for the first build on a branch without a warm
-          # registry cache yet.
-          cache-from: |
-            type=registry,ref=ghcr.io/${{ github.repository_owner }}/poob:buildcache
-            type=gha
-          cache-to: |
-            type=registry,ref=ghcr.io/${{ github.repository_owner }}/poob:buildcache,mode=max
-            type=gha,mode=max
+          # Registry cache (type=registry, mode=max) DISABLED 2026-07-03: a
+          # 3rd stuck build (after the provenance fix above) showed the runner
+          # reading a `reference for unknown type:
+          # application/vnd.buildkit.cacheconfig.v0` from the registry
+          # buildcache tag and hanging — almost certainly a corrupted cache
+          # manifest left by an earlier cancelled mode=max push interrupted
+          # mid-write. GHA cache alone is the fallback path and doesn't share
+          # this registry-manifest fragility; kept as the sole cache. See
+          # docs/gotchas/buildx-provenance-attestation-hangs.md.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       # Event-driven deploy trigger. Before this, build.yml only built+pushed,
       # so deploys rode Komodo's slow auto_update poll (non-deterministic, up to
