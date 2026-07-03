@@ -565,6 +565,49 @@ class DeepgramStreamManager:
             text = stream.latest_interim
         return text, stream.is_final
 
+    def current_utterance_seq(self, user_id: int) -> int:
+        """The stream's current utterance id (bumped by ``begin_utterance``).
+        Callers that need to wait for a SPECIFIC utterance's transcript (e.g.
+        ``_deferred_emit``) capture this at the moment they start waiting, then
+        pass it to ``get_transcript_for_utterance`` so they never adopt a later,
+        unrelated utterance's content. 0 if the stream doesn't exist yet."""
+        stream = self._streams.get(user_id)
+        return stream.utterance_seq if stream else 0
+
+    def get_transcript_for_utterance(
+        self, user_id: int, expected_seq: int
+    ) -> tuple[str, bool] | None:
+        """Like ``get_transcript``, but pinned to one specific utterance.
+
+        Returns ``None`` if the stream has moved on to a NEWER utterance
+        (``utterance_seq != expected_seq``) — the content the caller is waiting
+        for will never arrive, so the caller should treat this as a miss
+        immediately rather than keep polling (or, worse, silently accept the
+        newer, unrelated utterance's transcript as if it were the one it asked
+        for). Otherwise behaves like ``get_transcript`` (possibly returning ""
+        if no content has landed for OUR utterance yet).
+
+        Exists because ``_deferred_emit`` previously accepted the first
+        non-empty ``get_transcript`` result within its poll window with no
+        check that it belonged to the wake-fired utterance — if the user spoke
+        again during the ~1.5s wait, that LATER utterance's content could be
+        misattributed as an addressed command (bypassing the dual-gate) and
+        could falsely clear the zombie-miss counter. See
+        docs/incidents/deepgram-zombie-stream-no-transcript.md (2026-07-02
+        addendum).
+        """
+        stream = self._streams.get(user_id)
+        if stream is None:
+            return "", False
+        if stream.utterance_seq != expected_seq:
+            return None  # moved on — our utterance's content will never come
+        if stream.transcript_seq <= stream.emitted_seq:
+            return "", stream.is_final
+        text = stream.transcript
+        if not text and stream.latest_interim:
+            text = stream.latest_interim
+        return text, stream.is_final
+
     def mark_emitted(self, user_id: int) -> None:
         """Seal the just-emitted utterance: get_transcript returns "" for it
         until a NEW utterance arrives (utterance_seq bump). Closes the
@@ -1075,8 +1118,13 @@ class DualPipelineProcessor:
                     "Wake word active but transcript empty — deferring",
                     user=pipeline.user_name or user_id,
                 )
+                # Pin the defer to THIS utterance now, synchronously, before any
+                # other thread can bump utterance_seq — see _deferred_emit.
+                expected_seq = self._deepgram.current_utterance_seq(user_id)
                 asyncio.run_coroutine_threadsafe(
-                    self._deferred_emit(user_id, pipeline.user_name, pipeline.speech_start_time),
+                    self._deferred_emit(
+                        user_id, pipeline.user_name, pipeline.speech_start_time, expected_seq
+                    ),
                     self._loop,
                 )
                 pipeline.is_active = False
@@ -1170,12 +1218,29 @@ class DualPipelineProcessor:
         # Clear transcript immediately after emission to prevent replay
         self._deepgram.reset_transcript(user_id)
 
-    async def _deferred_emit(self, user_id: int, user_name: str, speech_start_time: float) -> None:
-        """Wait briefly for Deepgram transcript, then emit addressed utterance."""
+    async def _deferred_emit(
+        self, user_id: int, user_name: str, speech_start_time: float, expected_seq: int
+    ) -> None:
+        """Wait briefly for Deepgram transcript, then emit addressed utterance.
+
+        ``expected_seq`` pins this wait to the SPECIFIC utterance that fired the
+        wake word (captured synchronously in ``_emit_utterance_locked`` before
+        this coroutine was scheduled). If the user speaks again before Deepgram
+        delivers our content, ``begin_utterance`` bumps the stream past
+        ``expected_seq`` and ``get_transcript_for_utterance`` returns ``None`` —
+        that LATER utterance's content is never adopted as ours; we drop straight
+        to the miss/zombie-recovery path instead of misattributing it as an
+        addressed command or falsely proving our wake path healthy. See
+        docs/incidents/deepgram-zombie-stream-no-transcript.md (2026-07-02
+        addendum).
+        """
         # Give Deepgram up to 1.5s to deliver the transcript
         for _ in range(15):
             await asyncio.sleep(0.1)
-            transcript, _is_final = self._deepgram.get_transcript(user_id)
+            result = self._deepgram.get_transcript_for_utterance(user_id, expected_seq)
+            if result is None:
+                break  # moved to a newer utterance — ours will never arrive
+            transcript, _is_final = result
             if transcript:
                 self._deepgram.note_transcript_delivered(user_id)
                 self._do_emit(user_id, user_name, speech_start_time, True, transcript)

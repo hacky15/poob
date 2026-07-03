@@ -273,6 +273,84 @@ async def test_listen_loop_does_not_reset_miss_counter_on_unrelated_content() ->
 
 
 # ---------------------------------------------------------------------------
+# Defect B (2026-07-02, found in the perfection-check adversarial audit of the
+# fix above): _deferred_emit accepted the FIRST non-empty get_transcript()
+# result within its 1.5s poll window with no check that it belonged to the
+# wake-fired utterance. If the user spoke again during the wait, that LATER,
+# unrelated utterance's content could be misattributed as an addressed command
+# (bypassing the dual-gate) AND could falsely clear the zombie-miss counter --
+# reopening the exact bug class Defect A's fix just closed, one layer removed.
+# Fixed by pinning _deferred_emit to expected_seq (captured synchronously
+# before scheduling) via get_transcript_for_utterance.
+# ---------------------------------------------------------------------------
+
+
+def test_get_transcript_for_utterance_none_once_stream_moves_on() -> None:
+    mgr, stream = _mgr_with_stream(1)
+    assert mgr.get_transcript_for_utterance(1, 0) == ("", False)  # still ours, no content yet
+    mgr.begin_utterance(1)  # a NEW utterance starts (utterance_seq -> 1)
+    assert mgr.get_transcript_for_utterance(1, 0) is None, (
+        "moved to a newer utterance -- the pinned (seq=0) content will never arrive"
+    )
+
+
+def test_get_transcript_for_utterance_returns_matching_content() -> None:
+    mgr, stream = _mgr_with_stream(1)
+    expected = mgr.current_utterance_seq(1)  # 0
+    _feed(stream, "hey poob play tiki tiki fong")
+    assert mgr.get_transcript_for_utterance(1, expected)[0] == "hey poob play tiki tiki fong"
+
+
+def _make_proc_with_real_deepgram(uid: int = 1) -> DualPipelineProcessor:
+    proc = DualPipelineProcessor.__new__(DualPipelineProcessor)
+    proc._deepgram = DeepgramStreamManager("key")
+    proc._deepgram._streams[uid] = _UserStream()
+    proc._on_addressed = MagicMock()
+    proc._on_passive = MagicMock()
+    proc._last_emitted = {}
+    return proc
+
+
+@pytest.mark.asyncio
+async def test_deferred_emit_does_not_adopt_later_unrelated_utterance() -> None:
+    proc = _make_proc_with_real_deepgram(1)
+    stream = proc._deepgram._streams[1]
+    expected_seq = proc._deepgram.current_utterance_seq(
+        1
+    )  # 0 -- pinned before anything else happens
+
+    # Before our deferred content arrives, the user starts speaking again --
+    # a genuinely new, unrelated utterance that DOES get transcribed in time.
+    proc._deepgram.begin_utterance(1)  # utterance_seq -> 1
+    _feed(stream, "completely unrelated thing said next")
+
+    await proc._deferred_emit(1, "tester", time.monotonic(), expected_seq)
+
+    proc._on_addressed.assert_not_called()  # unrelated content NOT executed as a command
+    assert proc._deepgram._consecutive_lost.get(1, 0) == 1  # correctly counted as OUR miss
+    # The unrelated utterance's content is untouched -- available for its OWN
+    # (separate) emit, not swallowed by ours.
+    assert proc._deepgram.get_transcript_for_utterance(1, 1)[0] == (
+        "completely unrelated thing said next"
+    )
+
+
+@pytest.mark.asyncio
+async def test_deferred_emit_still_delivers_when_seq_matches() -> None:
+    """Regression guard: the pin must not break the normal, correct case —
+    Deepgram delivers OUR utterance's content within the window."""
+    proc = _make_proc_with_real_deepgram(1)
+    stream = proc._deepgram._streams[1]
+    expected_seq = proc._deepgram.current_utterance_seq(1)
+    _feed(stream, "hey poob play tiki tiki fong")  # lands for the SAME utterance
+
+    await proc._deferred_emit(1, "tester", time.monotonic(), expected_seq)
+
+    proc._on_addressed.assert_called_once()
+    assert proc._deepgram._consecutive_lost.get(1, 0) == 0  # proven healthy, not a miss
+
+
+# ---------------------------------------------------------------------------
 # Defect A — the double-emit SEAL (2026-06-11 double-queue). After our VAD
 # emit+reset, Deepgram re-appends to the SAME still-open utterance rebuilt the
 # phrase and double-fired. The seal (utterance_seq/transcript_seq/emitted_seq,

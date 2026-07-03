@@ -137,3 +137,64 @@ the listener's blanket "any content" reset vs. the intentional
 success-only reset), the more generous path silently wins and the narrow,
 correct one becomes dead code that never gets to do its job. Grep for every
 writer of shared recovery state, not just the one you're adding.
+
+## 2026-07-02 addendum #2 — `_deferred_emit` wasn't pinned to its own utterance
+
+Found the same day, in an adversarial "ensure it's actually fixed" audit of the
+fix directly above (before it saw any more prod traffic) — not from a new
+prod symptom.
+
+### The deeper defect
+
+`_deferred_emit` polls `get_transcript(user_id)` for up to 1.5 s after a
+wake-fired utterance ends with no transcript yet, and accepts the **first
+non-empty result** as *the* wake-fired transcript — unconditionally, with no
+check that the content actually belongs to that utterance. If the user speaks
+again during the wait (very plausible: the addressed silence threshold that
+triggers this path is itself 2000 ms, well inside the 1.5 s window), Deepgram's
+sequence-based SEAL (`utterance_seq`/`transcript_seq`, from the 2026-06-11
+double-emit fix) correctly advances to the NEW utterance — but `_deferred_emit`
+had no idea a new utterance had even started. It would happily adopt that
+unrelated content as the wake-fired command, which:
+
+1. **Executes unrelated speech as an addressed command**, bypassing the entire
+   dual-gate (text_match/audio_match/loopback) logic in `_emit_utterance_locked`
+   that every other path is required to pass.
+2. **Falsely calls `note_transcript_delivered()`** — clearing the zombie-miss
+   counter based on content that is not evidence the wake-fired delivery
+   specifically works. This reopens addendum #1's exact bug, one layer removed:
+   the "only legitimate reset" path turned out not to be pinned to what it was
+   claiming to prove.
+
+### Fix
+
+`_emit_utterance_locked` now captures `expected_seq =
+self._deepgram.current_utterance_seq(user_id)` **synchronously**, at the
+moment it decides to defer — before `_deferred_emit` is even scheduled onto the
+event loop, so no other thread can advance the sequence first. `_deferred_emit`
+polls the new `get_transcript_for_utterance(user_id, expected_seq)` instead of
+`get_transcript`: it returns `None` the instant the stream has moved to a newer
+utterance, and the poll breaks immediately to the miss/zombie-recovery path
+(correct — the wake-fired utterance's transcript genuinely never arrived)
+instead of adopting the newer utterance's content. The newer utterance's own
+content is untouched and available for its own, separate emit.
+
+### Validation
+
+`tests/unit/test_dual_pipeline.py`:
+`test_get_transcript_for_utterance_none_once_stream_moves_on`,
+`test_get_transcript_for_utterance_returns_matching_content`,
+`test_deferred_emit_does_not_adopt_later_unrelated_utterance` (proves the exact
+misattribution scenario no longer fires and is correctly counted as a miss
+instead), `test_deferred_emit_still_delivers_when_seq_matches` (regression
+guard for the normal case).
+
+### Lesson (extending the one above)
+
+The "only legitimate reset" path from addendum #1 turned out to itself be
+unpinned — it trusted *any* content arriving during its wait window without
+checking it was the SPECIFIC content it was waiting for. Fixing a shared-state
+bug isn't complete until the narrow path you funneled everything into is
+independently verified to be as narrow as it claims — a fix that "only allows
+resets from the ONE correct signal" is only as sound as that signal's own
+identity check.
