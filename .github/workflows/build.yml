@@ -31,6 +31,16 @@ jobs:
         with:
           context: .
           push: true
+          # docker/build-push-action defaults provenance:true, which adds an
+          # extra `--attest type=provenance,...` export step. Combined with
+          # cache-to type=registry,mode=max on this self-hosted runner, that
+          # step hung indefinitely (2 back-to-back builds, byte-identical
+          # stall at "exporting to image" / attestation, ~7min+ with zero
+          # further log/network activity) — a known buildx friction point.
+          # Poob's deploy doesn't consume provenance metadata; disabled at the
+          # source rather than cancel-and-retrying forever. See
+          # docs/gotchas/buildx-provenance-attestation-hangs.md.
+          provenance: false
           build-args: |
             GIT_SHA=${{ github.sha }}
           tags: |
