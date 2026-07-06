@@ -47,3 +47,9 @@ Gotchas differ from incidents: an incident is a specific event in the past, a go
 - [[compose-container-name-collisions]] — `container_name:` overrides without a project prefix collide with other stacks; namespace them as `poob-*`
 - [[docker-desktop-data-vhd-separate-from-engine]] — moving Docker Desktop's WSL distro does NOT move its image-store VHD; relocate both or C: silently fills (Windows)
 - [[wake-word-model-path-conventions]] — wake-word ONNX files MUST live at `/app/*.onnx`, never under `/app/data/`; env var is `WAKE_WORD_MODEL_PATH` (legacy `PORCUPINE_KEYWORD_PATH` aliased for one rotation)
+
+#### "Built but not deployed" family (three distinct causes)
+
+- [[poob-deploy-frozen-by-dead-gha-runners]] — the shared GHA-runner image crash-looped; `git push` queued a build that never ran, so no image was produced
+- [[komodo-mangled-container-name-wedges-deploy]] — a hash-prefixed `poob` container name wedges Komodo's recreate step; build succeeds, deploy silently stops
+- [[ghcr-credential-expiry-freezes-komodo-deploy]] — an expired GHCR token inside `komodo-periphery` 401s every `compose pull`; build + redeploy both look fine, image never lands
