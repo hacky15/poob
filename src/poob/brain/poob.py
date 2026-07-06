@@ -125,6 +125,10 @@ _MUSIC_ROUTING_RULES = (
     "sounds like nonsense or a made-up name. Take those words from THIS "
     "message only; never pull a song title from earlier turns or from "
     "what other people said.\n"
+    "BASIC CONTROLS (no extra args needed): 'stop' / 'stop it' / 'stop the "
+    "music' → action=stop. 'skip' / 'next' → action=skip. 'pause' → "
+    "action=pause. (For 'unpause'/'resume', see action=restore below — it "
+    "already covers both cases.)\n"
     "AUDIO EFFECTS ROUTING (effects STACK — layering is the default):\n"
     "- 'nightcore it' / 'make it nightcore' → action=apply_effect, effect='nightcore'\n"
     "- 'slow it down' / 'slowed' → action=apply_effect, effect='slowed'\n"
@@ -682,23 +686,52 @@ class PoobBrain:
         self._music_handler = handler
         log.info("Music handler registered with PoobBrain")
 
+    # Bare, unambiguous "stop" phrases — the ENTIRE message, nothing else, so
+    # there's no other plausible reading. Kept deliberately narrow (unlike
+    # e.g. "shut it off", which has room for non-music meanings) to avoid
+    # false-positives; the cost of a rare false-positive is a harmless silent
+    # no-op (action=stop always returns "[SILENT]Music stopped and queue
+    # cleared" even with nothing playing — see music_cog.py). See
+    # docs/incidents/bare-stop-command-misrouted-to-autoplay.md.
+    _BARE_STOP_PHRASES: frozenset[str] = frozenset(
+        {"stop", "stop it", "stop the music", "stop the song", "stop playing"}
+    )
+
     def _music_safety_net(
         self,
         clean_message: str,
         tool_name: str | None,
         tool_args: dict | None,
     ) -> tuple[str | None, dict | None]:
-        """Catch obvious music requests the LLM failed to route.
+        """Catch obvious music requests the LLM failed to route (or routed
+        WRONG).
 
         The LLM occasionally decides to *talk about* music instead of calling
-        music_assistant. This backstop detects clear play-intent patterns and
-        forces the tool call. It does NOT replace the LLM as intent classifier
-        — it only catches the most unambiguous misses.
+        music_assistant — the play-intent check below catches that. Separately,
+        a bare "stop." with no other content has no example to anchor on in the
+        routing prompt, and a weak fallback rung can hallucinate a bizarre
+        action for it (2026-07-06 prod: gemini-2.5-flash-lite routed a bare
+        "stop." to {action: autoplay, mode: on, name: stop}) — the bare-stop
+        check below runs FIRST and overrides regardless of what was routed,
+        since there's no other plausible reading of the exact phrase "stop".
+        Neither check replaces the LLM as intent classifier — they only catch
+        the most unambiguous misses.
 
         Returns:
             (tool_name, tool_args) — unchanged if no override, or
-            ("music_assistant", {action, query}) if overridden.
+            ("music_assistant", {action: ...}) if overridden.
         """
+        stripped = clean_message.strip().lower().rstrip(".!")
+        if stripped in self._BARE_STOP_PHRASES:
+            if tool_name != "music_assistant" or (tool_args or {}).get("action") != "stop":
+                log.warning(
+                    "Safety net overrode misrouted stop command",
+                    original=clean_message[:60],
+                    routed_tool=tool_name,
+                    routed_args=tool_args,
+                )
+            return "music_assistant", {"action": "stop"}
+
         if tool_name is not None:
             return tool_name, tool_args
 

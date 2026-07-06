@@ -35,21 +35,26 @@ def _brain(**kw: Any) -> PoobBrain:
 
 # --- _music_safety_net: the deterministic play-intent backstop --------------
 
+
 def test_music_safety_net_forces_tool_on_clear_play_intent() -> None:
     """Clear "play X" / "put on X" / "queue X" phrasing the LLM missed is
     forced to music_assistant(play) with a best-effort extracted query."""
     b = _brain()
     assert b._music_safety_net("play tiki tiki", None, None) == (
-        "music_assistant", {"action": "play", "query": "tiki tiki"},
+        "music_assistant",
+        {"action": "play", "query": "tiki tiki"},
     )
     assert b._music_safety_net("put on some jazz", None, None) == (
-        "music_assistant", {"action": "play", "query": "jazz"},
+        "music_assistant",
+        {"action": "play", "query": "jazz"},
     )
     assert b._music_safety_net("can you play despacito", None, None) == (
-        "music_assistant", {"action": "play", "query": "despacito"},
+        "music_assistant",
+        {"action": "play", "query": "despacito"},
     )
     assert b._music_safety_net("queue up phonk", None, None) == (
-        "music_assistant", {"action": "play", "query": "phonk"},
+        "music_assistant",
+        {"action": "play", "query": "phonk"},
     )
 
 
@@ -66,11 +71,82 @@ def test_music_safety_net_never_overrides_an_existing_tool() -> None:
     the gap when the model returned no tool)."""
     b = _brain()
     assert b._music_safety_net("play x", "deal_assistant", {"request": "x"}) == (
-        "deal_assistant", {"request": "x"},
+        "deal_assistant",
+        {"request": "x"},
     )
 
 
+# --- _music_safety_net: bare-stop override (2026-07-06 prod regression) -----
+# gemini-2.5-flash-lite routed a bare "stop." to {action: autoplay, mode: on,
+# name: stop} -- there's no explicit "stop" example in the routing prompt to
+# anchor on. This is the ONE exception to "never overrides an existing tool":
+# a bare, unambiguous stop phrase overrides regardless, since there's no other
+# plausible reading. See docs/incidents/bare-stop-command-misrouted-to-autoplay.md.
+
+
+def test_music_safety_net_overrides_misrouted_stop_command() -> None:
+    """The exact prod regression: a bare 'stop.' routed to the wrong action
+    entirely must be corrected to action=stop, overriding whatever the LLM
+    (or a weak fallback rung) actually returned."""
+    b = _brain()
+    assert b._music_safety_net(
+        "stop.", "music_assistant", {"action": "autoplay", "mode": "on"}
+    ) == (
+        "music_assistant",
+        {"action": "stop"},
+    )
+
+
+def test_music_safety_net_overrides_stop_when_no_tool_at_all() -> None:
+    b = _brain()
+    assert b._music_safety_net("stop", None, None) == ("music_assistant", {"action": "stop"})
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "stop",
+        "stop.",
+        "Stop!",
+        "  STOP  ",
+        "stop it",
+        "stop the music",
+        "stop the song",
+        "stop playing",
+    ],
+)
+def test_music_safety_net_recognizes_bare_stop_variants(phrase: str) -> None:
+    b = _brain()
+    assert b._music_safety_net(phrase, "music_assistant", {"action": "autoplay"}) == (
+        "music_assistant",
+        {"action": "stop"},
+    )
+
+
+def test_music_safety_net_leaves_correct_stop_routing_alone() -> None:
+    """No spurious log/behavior difference when the LLM already got it right."""
+    b = _brain()
+    assert b._music_safety_net("stop", "music_assistant", {"action": "stop"}) == (
+        "music_assistant",
+        {"action": "stop"},
+    )
+
+
+def test_music_safety_net_does_not_override_non_bare_stop_phrasing() -> None:
+    """Only the EXACT bare phrase overrides — 'stop the effects' or a longer
+    sentence containing 'stop' keeps the LLM's routing, since those have other
+    plausible readings (e.g. apply_effect) the narrow bare-phrase list must
+    not swallow."""
+    b = _brain()
+    assert b._music_safety_net(
+        "stop the effects please",
+        "music_assistant",
+        {"action": "apply_effect", "effect": "none"},
+    ) == ("music_assistant", {"action": "apply_effect", "effect": "none"})
+
+
 # --- _scrub_music_query: strip the user's intent verb, not the song ---------
+
 
 def test_scrub_music_query_strips_leading_verb_only() -> None:
     """The leading intent verb (+ its prep) is stripped; the rest of the
@@ -80,12 +156,13 @@ def test_scrub_music_query_strips_leading_verb_only() -> None:
     scrub = PoobBrain._scrub_music_query
     assert scrub("play red hot chili peppers") == "red hot chili peppers"
     assert scrub("queue despacito") == "despacito"
-    assert scrub("queue up some jazz") == "some jazz"   # NOT 'jazz' — verb+prep only
-    assert scrub("Can't Stop") == "Can't Stop"          # no leading verb → unchanged
+    assert scrub("queue up some jazz") == "some jazz"  # NOT 'jazz' — verb+prep only
+    assert scrub("Can't Stop") == "Can't Stop"  # no leading verb → unchanged
     assert scrub("") == ""
 
 
 # --- empty/short play-query gate (STT cutoff: "Hey Poob. Play") -------------
+
 
 @pytest.mark.asyncio
 async def test_empty_short_play_query_prompts_instead_of_fanning_out() -> None:
@@ -97,20 +174,27 @@ async def test_empty_short_play_query_prompts_instead_of_fanning_out() -> None:
     b._music_handler = handler
 
     text = await b._handle_music(
-        "Hey Poob play", "u", voice=False, max_tok=80,
+        "Hey Poob play",
+        "u",
+        voice=False,
+        max_tok=80,
         tool_args={"action": "play", "query": ""},
     )
     assert text == "Play what?"
 
     voice = await b._handle_music(
-        "Hey Poob play", "u", voice=True, max_tok=80,
+        "Hey Poob play",
+        "u",
+        voice=True,
+        max_tok=80,
         tool_args={"action": "play", "query": "a"},
     )
     assert voice == ""
-    assert handler.mock_calls == []   # never fanned out to the music handler
+    assert handler.mock_calls == []  # never fanned out to the music handler
 
 
 # --- _TOOL_DETECTION_MAX_TOKENS floor (mid-arguments truncation guard) ------
+
 
 @pytest.mark.asyncio
 async def test_tool_detection_token_floor_overrides_small_response_cap() -> None:
@@ -132,6 +216,7 @@ async def test_tool_detection_token_floor_overrides_small_response_cap() -> None
 
 # --- looks_tool_worthy gate: the DEAL side (music side was already tested) --
 
+
 @pytest.mark.asyncio
 async def test_deal_tool_worthy_query_continues_past_no_tool_rung() -> None:
     """A clear deal query ("what's on my wishlist") that a weak rung answers
@@ -144,7 +229,7 @@ async def test_deal_tool_worthy_query_continues_past_no_tool_rung() -> None:
     async def fake_call(provider, model, messages, tools, max_tokens):  # type: ignore[no-untyped-def]
         calls.append(model)
         if len(calls) == 1:
-            return "let me think", None, None          # weak rung: no tool
+            return "let me think", None, None  # weak rung: no tool
         return "", "deal_assistant", {"request": "what is on my wishlist"}
 
     b._call_provider_with_tools = fake_call  # type: ignore[method-assign]
@@ -159,6 +244,7 @@ async def test_deal_tool_worthy_query_continues_past_no_tool_rung() -> None:
 
 
 # --- _build_messages: routing-prompt context injection ----------------------
+
 
 def _system_of(messages: list[dict]) -> str:
     return next(m["content"] for m in messages if m["role"] == "system")
@@ -192,13 +278,22 @@ def test_music_context_block_marker_and_clauses_preserved() -> None:
 
 # --- DEAL_TOOL schema is the deal-routing surface --------------------------
 
+
 def test_deal_tool_advertises_all_trigger_tokens() -> None:
     """DEAL_TOOL.description IS the deal-routing surface (function-calling
     reads it natively). Guard that every trigger token stays present — a
     prompt-content regression guard mirroring the MUSIC_TOOL guards."""
     desc = DEAL_TOOL["function"]["description"].lower()
     for token in (
-        "wishlist", "watchlist", "show my", "add", "clear list",
-        "scan", "find deals", "price", "when in doubt", "verbatim",
+        "wishlist",
+        "watchlist",
+        "show my",
+        "add",
+        "clear list",
+        "scan",
+        "find deals",
+        "price",
+        "when in doubt",
+        "verbatim",
     ):
         assert token in desc, f"DEAL_TOOL.description lost trigger token: {token!r}"
