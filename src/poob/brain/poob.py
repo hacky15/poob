@@ -1708,15 +1708,90 @@ class PoobBrain:
             self._save_response(guild_id, user_id, music_response)
             return music_response
 
-        wrapped = await self._wrap_in_personality(
+        wrapped = await self._wrap_music_response_text(
             original_message,
             music_response,
-            voice=False,
-            max_tokens=max_tok,
-            guild_id=guild_id,
+            max_tok,
         )
         self._save_response(guild_id, user_id, wrapped)
         return wrapped
+
+    async def _wrap_music_response_text(
+        self,
+        user_message: str,
+        music_result: str,
+        max_tokens: int,
+    ) -> str:
+        """Wrap a music action result in Poob's personality for a TEXT reply.
+
+        Text-channel counterpart to ``_wrap_music_response`` (Toob's voice-only
+        reaction — the persona swap only matters for TTS pitch/timbre, so text
+        stays Poob). Previously this path reused ``_wrap_in_personality``,
+        which is built for DEAL responses: its label ("[My deal system
+        says: ...]") and instruction ("include items, prices, questions
+        asked, confirmations") don't apply to a bare "Playing X (3:42)". Since
+        a music result has none of those things, the model narrated their
+        ABSENCE instead of just relaying the song — e.g. "no items, no
+        prices, no questions, no confirmations... just the song's name,
+        length" for a plain play request. Fixed at the source with a
+        correctly-labeled, music-only instruction that never surfaces
+        deal-shaped categories to check off, plus a tight token cap so a
+        one-line status can't balloon into a paragraph. See
+        docs/incidents/music-text-wrap-inherited-deal-instructions.md.
+        """
+        # Text always stays at the neutral level (5) regardless of whatever
+        # horniness level the guild's voice session last rolled via
+        # roll_horniness() — matching _wrap_in_personality's
+        # `if voice else 5` convention. This method has exactly one caller
+        # and it is always text (see _handle_music's `if voice:` branch,
+        # which returns earlier via _wrap_music_response), so there's no
+        # `voice` param to gate on; pinned directly.
+        level = 5
+        wrap_messages = [
+            {
+                "role": "system",
+                "content": _build_system_prompt(level, voice=False),
+            },
+            {"role": "user", "content": user_message},
+            {
+                "role": "assistant",
+                "content": f"[Music system result: {music_result}]",
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Relay that to me in your own style. ONE short sentence, "
+                    "10 words or fewer. It's just a song status — react to "
+                    "it, don't list or narrate anything else."
+                ),
+            },
+        ]
+
+        # Hard cap, matching Toob's voice-wrap tightness (min(max_tokens, 40))
+        # — this function's whole purpose is preventing a one-line status
+        # from ballooning, so it gets the same rigor, not Poob's chattier
+        # casual-conversation length latitude.
+        music_max_tokens = min(max_tokens, 40)
+
+        if self.groq_api_key:
+            try:
+                from groq import AsyncGroq
+
+                client = AsyncGroq(api_key=self.groq_api_key, max_retries=0, timeout=12.0)
+                resp = await client.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages=wrap_messages,  # type: ignore[arg-type]
+                    max_tokens=music_max_tokens,
+                    temperature=0.8,
+                )
+                result = resp.choices[0].message.content
+                if result:
+                    return result
+            except Exception as exc:
+                log.warning("Music text personality wrap failed", error=str(exc)[:80])
+
+        # Fallback: return the raw music result as-is.
+        return music_result
 
     async def _wrap_music_response(
         self,
