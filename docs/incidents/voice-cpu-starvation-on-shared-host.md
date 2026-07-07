@@ -2,7 +2,7 @@
 type: incident
 status: resolved
 date: 2026-06-20
-tags: [voice, latency, cpu, homelab, infra, scanner]
+tags: [voice, latency, cpu, homelab, infra, scanner, cpuset]
 related: [[patrol-backoff-during-voice]] [[voice-synth-ahead-pipeline]] [[voice-pipeline-cold-start-drops-requests]] [[homelab-cpu-only]]
 ---
 
@@ -77,3 +77,60 @@ If `cpu_shares` proves insufficient under a pathological load, escalate to
 **`cpuset` core-pinning** (reserve cores 0–1 for poob, pin runners/ollama to
 2–3) — a hard guarantee at the cost of idle capacity. Deferred unless needed;
 the weight-based approach is the lower-risk first move on a 4-core box.
+
+## 2026-07-07 recurrence — escalation shipped
+
+**Symptom:** repeated `WARNING [discord.gateway] Shard ID None has stopped
+responding to the gateway` + voice WS `code=1006` closures + forced voice
+reconnects, 3 occurrences within one hour window. Confirmed NOT the CPU-limit
+regression from above — `docker inspect poob` showed `CpuShares=4096` (the
+2026-06-20 fix) correctly live throughout.
+
+**Root cause:** a **previously-unknown, unrelated `ollama` stack**
+(`ollama/ollama:latest`, compose project `ollama`, working dir
+`/host-apps/stacks/ollama/docker` — a THIRD, standalone stack, not
+`poob-ollama` and not permitscope) with **zero CPU limit** burst to **311%
+CPU / 5.6 GiB** during a single long-running local-LLM prompt (~183s
+processing time, per its own logs). `poob-ollama` itself measured 0% CPU the
+entire time — it was correctly capped and idle; the damage came from a
+sibling stack nobody had capped, because nobody knew it existed until this
+investigation.
+
+This confirms the layered design in this note was sound (weight + capping
+*known* contenders), but exposed its blind spot: **weight-based priority only
+protects against contenders you've already identified and capped.** A new,
+uncapped heavy neighbor — on ANY project sharing this host — can reproduce
+the exact same starvation regardless of poob's own configuration. This is a
+whack-a-mole risk, not a one-time fluke: today it was a standalone `ollama`
+stack; tomorrow it could be anything else spun up on the box.
+
+**Fix shipped (two parts):**
+
+1. **Immediate mitigation (live, this stack):** capped the newly-found
+   `ollama` container to match the already-proven `poob-ollama` pattern —
+   `cpu_shares: 256` + `cpuset: "2,3"` (kept off poob's reserved cores; see
+   below). Applied live via `docker update --cpus 2.0 --cpu-shares 256
+   --cpuset-cpus 2,3 ollama`. This is a live cgroup change on infra outside
+   this repo (a different project's stack) — durable persistence across a
+   future recreate of THAT container needs the equivalent change made in its
+   own compose file, which lives outside this repo.
+
+2. **Durable escalation (this repo, `deploy/compose.yml`):** finally executed
+   the exact escalation tier this note pre-named — **`cpuset: "0,1"`
+   reserving 2 of 4 cores exclusively for poob**, kernel-enforced, no other
+   cgroup can ever preempt them regardless of who or what it is. `poob`'s own
+   `ollama` sibling (`poob-ollama`) moved to `cpuset: "2,3"` to match. This
+   closes the whack-a-mole risk structurally: a FUTURE unknown contender
+   (capped or not) physically cannot land on poob's reserved cores, so this
+   specific failure mode cannot recur regardless of what gets added to the
+   host later. Trade-off (accepted, matches this note's original framing):
+   poob can no longer burst past 2 cores even when the box is otherwise idle.
+
+**Validation:** live cgroup checks confirmed both the immediate mitigation
+(`cpu.max = 200000 100000` on the rogue container, i.e. exactly 2.0 cores;
+`cpuset.cpus.effective = 2-3`) and, post-deploy, confirm poob's own
+`cpuset.cpus.effective = 0-1` inside the container. Re-verify no further
+gateway-stall lines appear across a subsequent multi-hour voice-active window.
+Only 3 stalls occurred in the 24h window (all clustered in the single burst
+hour), consistent with one contained event rather than constant contention —
+still zero-tolerance given voice is the product's core loop.

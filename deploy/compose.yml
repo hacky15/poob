@@ -10,14 +10,25 @@ services:
       # redeploy. Overrides .env. Disabled 2026-06-20 at operator request.
       # See docs/runbooks/scraper-kill-switch.md.
       PATROL_SCHEDULER_AUTO_START: "false"
-    # CPU PRIORITY for the real-time voice path on this shared 4-core host.
-    # cpu_shares is a relative CFS weight enforced by the kernel *only under
-    # contention* — 4x the default (1024) so a co-located deploy build, an
-    # ollama fallback, or a co-tenant spike can't starve voice, with zero idle
-    # waste. Pairs with the in-process patrol-backoff (scanner yields to voice).
-    # poob is deliberately NOT cpu-capped — voice needs to burst.
+    # CPU ISOLATION for the real-time voice path on this shared 4-core host.
+    # Escalated 2026-07-07 from weight-only (cpu_shares) to a HARD cpuset
+    # reservation: a previously-unknown, uncapped local-LLM stack (unrelated
+    # to this repo) burst to 300%+ CPU and starved poob's Discord gateway
+    # heartbeat (WS 1006 / "stopped responding to the gateway", voice torn
+    # down) even with cpu_shares:4096 already in place. Weight-based priority
+    # bounds the long-run CPU-time split but not worst-case scheduling
+    # latency — a single-threaded real-time event loop needs sub-second
+    # dispatch, which proportional shares don't guarantee under a sustained
+    # multi-core burst from ANY contender, known or not. cpuset is a hard
+    # kernel guarantee: no other cgroup can ever preempt these cores, so a
+    # future surprise contender (whack-a-mole is not a fix) can't repeat this.
+    # Cores 2,3 are reserved for this host's known heavy/bursty local-LLM
+    # containers (see the `ollama` service below); cost is poob can't burst
+    # past 2 cores even when the box is otherwise idle — an accepted
+    # trade-off given the alternative is a dropped voice session.
     # See docs/incidents/voice-cpu-starvation-on-shared-host.md.
     cpu_shares: 4096
+    cpuset: "0,1"
     depends_on:
       - ollama
       - searxng
@@ -37,8 +48,11 @@ services:
       - ollama-data:/root/.ollama
     # Local LLM is CPU-only (50-120s/call) and last-resort only. Hard-cap to 2
     # of 4 cores + a low weight so a stray fallback call can never monopolize
-    # the box and starve the voice path during a VC.
+    # the box and starve the voice path during a VC. Pinned to cores 2,3 (the
+    # OTHER half of the host from poob's reserved 0,1 above) so this can never
+    # physically land on poob's cores even during a full-box CPU storm.
     cpu_shares: 256
+    cpuset: "2,3"
     deploy:
       resources:
         limits:
