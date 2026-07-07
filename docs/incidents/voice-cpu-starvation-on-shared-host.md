@@ -115,22 +115,43 @@ stack; tomorrow it could be anything else spun up on the box.
    future recreate of THAT container needs the equivalent change made in its
    own compose file, which lives outside this repo.
 
-2. **Durable escalation (this repo, `deploy/compose.yml`):** finally executed
-   the exact escalation tier this note pre-named — **`cpuset: "0,1"`
-   reserving 2 of 4 cores exclusively for poob**, kernel-enforced, no other
-   cgroup can ever preempt them regardless of who or what it is. `poob`'s own
-   `ollama` sibling (`poob-ollama`) moved to `cpuset: "2,3"` to match. This
-   closes the whack-a-mole risk structurally: a FUTURE unknown contender
-   (capped or not) physically cannot land on poob's reserved cores, so this
-   specific failure mode cannot recur regardless of what gets added to the
-   host later. Trade-off (accepted, matches this note's original framing):
-   poob can no longer burst past 2 cores even when the box is otherwise idle.
+2. **Durable escalation (this repo, `deploy/compose.yml`) — corrected design:**
+   the first version of this fix `cpuset`-capped poob ITSELF to cores 0,1 —
+   a symmetric hard partition (poob confined to 0,1; `poob-ollama` confined
+   to 2,3). Operator correctly flagged this before it ever deployed: poob
+   "barely ever runs hard," so permanently halving its ceiling trades away
+   real burst capacity for a guarantee achievable without that cost.
 
-**Validation:** live cgroup checks confirmed both the immediate mitigation
+   **Corrected to an asymmetric fence:** poob is left with **no cpuset
+   restriction at all** — free to use all 4 cores whenever nothing else
+   needs them, which is nearly always. Only the KNOWN heavy background
+   contenders (`poob-ollama`, and the newly-found rogue `ollama` stack, live
+   via `docker update --cpuset-cpus 2,3`) are cpuset-fenced OUT of cores 0,1.
+   This is a one-way fence, not a shared partition: those containers can
+   never touch 0,1 no matter how hard they burst, but poob may still use
+   2,3 when they're free. Net effect: poob is unconditionally guaranteed at
+   least 2 fully-clear cores under the worst-case burst from either known
+   heavy neighbor, with **zero capacity lost** in the overwhelmingly common
+   uncontended case — strictly better than the symmetric-partition version,
+   for the same worst-case protection.
+
+   Residual gap (accepted, not solved tonight): this protects against the
+   two *known* heavy contenders, not a hypothetical brand-new one that
+   might appear later uncapped and unfenced — that would need the same
+   treatment (cpuset-fence it out of 0,1) applied when/if it's discovered,
+   the same way this incident found and fenced today's contender. A
+   stronger, still-uncapped-for-poob answer exists (cgroup v2 `cpu.idle` /
+   `SCHED_IDLE` on all non-poob containers, which never delays a normal
+   task even fractionally) but isn't exposed by plain Docker Compose keys
+   and would need custom tooling — noted here as a future option, not
+   implemented.
+
+**Validation:** live cgroup checks confirmed the immediate mitigation
 (`cpu.max = 200000 100000` on the rogue container, i.e. exactly 2.0 cores;
-`cpuset.cpus.effective = 2-3`) and, post-deploy, confirm poob's own
-`cpuset.cpus.effective = 0-1` inside the container. Re-verify no further
-gateway-stall lines appear across a subsequent multi-hour voice-active window.
-Only 3 stalls occurred in the 24h window (all clustered in the single burst
-hour), consistent with one contained event rather than constant contention —
-still zero-tolerance given voice is the product's core loop.
+`cpuset.cpus.effective = 2-3`). Post-deploy, confirm poob's own
+`cpuset.cpus.effective` is unset/all-cores (NOT restricted) and `poob-ollama`'s
+is `2-3`. Re-verify no further gateway-stall lines appear across a subsequent
+multi-hour voice-active window. Only 3 stalls occurred in the 24h window (all
+clustered in the single burst hour), consistent with one contained event
+rather than constant contention — still zero-tolerance given voice is the
+product's core loop.
