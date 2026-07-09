@@ -2026,6 +2026,71 @@ class PoobBrain:
         async for sentence in _stream_sentences_from_chunks(_chunks()):
             yield sentence
 
+    async def _stream_toob_no_command_understood(
+        self,
+        user_message: str,
+        max_tokens: int,
+    ) -> AsyncIterator[str]:
+        """Toob's reaction when addressed but no real song request landed.
+
+        Used when the hallucination guard in _handle_music_voice_streaming
+        drops a fabricated play query (stale-context pull, no genuine
+        play-intent in the current turn) — see
+        docs/decisions/voice-hallucination-drop-gets-a-line.md. Distinct
+        from _stream_toob_wrap_from_query: that one reacts to a REAL
+        request ("mock them for wanting it"); this one reacts to there
+        being no request at all, so it must not fabricate one either.
+        """
+        if not self.groq_api_key:
+            return
+
+        wrap_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Toob — a dark, malevolent spirit cursed to DJ for mortals. "
+                    "Someone just said your name mid-conversation but didn't actually "
+                    "ask you to play anything. Menacing, absurdly dramatic, like a demon "
+                    "working retail.\n"
+                    "RULES:\n"
+                    "- NEVER introduce yourself or say your name. Your voice IS your identity.\n"
+                    "- ONE sentence. 6-10 words MAX. Tight, venomous.\n"
+                    "- React to being summoned for NOTHING — don't invent a song or "
+                    "request that wasn't made.\n"
+                    "- No caps, no markdown, no emojis. Spoken aloud through TTS."
+                ),
+            },
+            {"role": "user", "content": user_message},
+            {
+                "role": "user",
+                "content": (
+                    "React as Toob in ONE sentence (6-10 words). Menacing. "
+                    "They said your name but didn't ask for anything."
+                ),
+            },
+        ]
+
+        toob_max_tokens = min(max_tokens, 40)
+
+        from groq import AsyncGroq
+
+        client = AsyncGroq(api_key=self.groq_api_key, max_retries=0, timeout=12.0)
+        stream = await client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=wrap_messages,  # type: ignore[arg-type]
+            max_tokens=toob_max_tokens,
+            temperature=0.9,
+            stream=True,
+        )
+
+        async def _chunks() -> AsyncIterator[str]:
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+
+        async for sentence in _stream_sentences_from_chunks(_chunks()):
+            yield sentence
+
     async def _handle_music_voice_streaming(
         self,
         original_message: str,
@@ -2141,6 +2206,16 @@ class PoobBrain:
                             hallucinated_query=query[:80],
                             user=user_id,
                         )
+                        # Dead air here reads as "Poob ignored me" — the user
+                        # WAS validly addressing Poob (dual wake-gate already
+                        # passed upstream), it just wasn't a real song request.
+                        # Speak an in-character line instead of staying silent.
+                        # See docs/decisions/voice-hallucination-drop-gets-a-line.md.
+                        async for sentence in self._stream_toob_no_command_understood(
+                            original_message,
+                            max_tok,
+                        ):
+                            yield sentence
                         return
 
             if self._is_duplicate_play(guild_id, user_id, query):
