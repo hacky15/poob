@@ -19,6 +19,7 @@ import time
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Awaitable
 
 import httpx
@@ -129,6 +130,9 @@ _MUSIC_ROUTING_RULES = (
     "music' → action=stop. 'skip' / 'next' → action=skip. 'pause' → "
     "action=pause. (For 'unpause'/'resume', see action=restore below — it "
     "already covers both cases.)\n"
+    "AUTOPLAY is a MODE TOGGLE, never an effect: 'autoplay on'→"
+    "action=autoplay, mode='on'. 'autoplay off'→mode='off'. 'autoplay "
+    "status'→mode='status'. Never apply_effect for this.\n"
     "AUDIO EFFECTS ROUTING (effects STACK — layering is the default):\n"
     "- 'nightcore it' / 'make it nightcore' → action=apply_effect, effect='nightcore'\n"
     "- 'slow it down' / 'slowed' → action=apply_effect, effect='slowed'\n"
@@ -160,6 +164,9 @@ _MUSIC_ROUTING_RULES = (
     "(or volume_up / volume_down), NEVER apply_effect. Effects are NAMED "
     "audio filters (nightcore, slowed, reverb, bassboost); volume is just "
     "how loud it is.\n"
+    "'show queue'→action=queue (not 'queue up X'=play). 'remove track "
+    "3'→action=remove, position=3 (not 'remove effect'). 'seek to "
+    "1:30'→action=seek, time='1:30'.\n"
     "Be DILIGENT about catching real song requests (call the tool):\n"
     "- 'play some jazz' → action=play, query='jazz'\n"
     "- 'play something chill' → action=play, query='chill music'\n"
@@ -697,6 +704,32 @@ class PoobBrain:
         {"stop", "stop it", "stop the music", "stop the song", "stop playing"}
     )
 
+    # Bare, unambiguous autoplay-toggle phrases -- same failure class as
+    # _BARE_STOP_PHRASES above (2026-07-09 prod: gemini-2.5-flash-lite routed
+    # "autoplay turn ON" to {action: apply_effect, effect: faster, mode:
+    # more} after several consecutive apply_effect calls biased the passive
+    # context toward that action). Maps a normalized phrase straight to the
+    # mode, since unlike "stop" this command has three real outcomes.
+    # See docs/incidents/autoplay-misrouted-to-apply-effect.md.
+    _BARE_AUTOPLAY_PHRASES: MappingProxyType[str, str] = MappingProxyType(
+        {
+            "autoplay on": "on",
+            "autoplay turn on": "on",
+            "turn on autoplay": "on",
+            "turn autoplay on": "on",
+            "enable autoplay": "on",
+            "autoplay enable": "on",
+            "autoplay off": "off",
+            "autoplay turn off": "off",
+            "turn off autoplay": "off",
+            "turn autoplay off": "off",
+            "disable autoplay": "off",
+            "autoplay disable": "off",
+            "autoplay status": "status",
+            "is autoplay on": "status",
+        }
+    )
+
     def _music_safety_net(
         self,
         clean_message: str,
@@ -708,20 +741,21 @@ class PoobBrain:
 
         The LLM occasionally decides to *talk about* music instead of calling
         music_assistant — the play-intent check below catches that. Separately,
-        a bare "stop." with no other content has no example to anchor on in the
-        routing prompt, and a weak fallback rung can hallucinate a bizarre
-        action for it (2026-07-06 prod: gemini-2.5-flash-lite routed a bare
-        "stop." to {action: autoplay, mode: on, name: stop}) — the bare-stop
-        check below runs FIRST and overrides regardless of what was routed,
-        since there's no other plausible reading of the exact phrase "stop".
-        Neither check replaces the LLM as intent classifier — they only catch
-        the most unambiguous misses.
+        a bare command with no other content has no example to anchor on in
+        the routing prompt, and a weak fallback rung — or heavy recent bias
+        toward one action in the passive context — can hallucinate a bizarre
+        action for it (2026-07-06: bare "stop." routed to autoplay; 2026-07-09:
+        "autoplay turn ON" routed to apply_effect after a run of apply_effect
+        calls). The bare-phrase checks below run FIRST and override regardless
+        of what was routed, since there's no other plausible reading of these
+        exact phrases. Neither check replaces the LLM as intent classifier —
+        they only catch the most unambiguous misses.
 
         Returns:
             (tool_name, tool_args) — unchanged if no override, or
             ("music_assistant", {action: ...}) if overridden.
         """
-        stripped = clean_message.strip().lower().rstrip(".!")
+        stripped = clean_message.strip().lower().rstrip(".!?")
         if stripped in self._BARE_STOP_PHRASES:
             if tool_name != "music_assistant" or (tool_args or {}).get("action") != "stop":
                 log.warning(
@@ -731,6 +765,22 @@ class PoobBrain:
                     routed_args=tool_args,
                 )
             return "music_assistant", {"action": "stop"}
+
+        if stripped in self._BARE_AUTOPLAY_PHRASES:
+            mode = self._BARE_AUTOPLAY_PHRASES[stripped]
+            correct_args = tool_args or {}
+            if (
+                tool_name != "music_assistant"
+                or correct_args.get("action") != "autoplay"
+                or correct_args.get("mode") != mode
+            ):
+                log.warning(
+                    "Safety net overrode misrouted autoplay command",
+                    original=clean_message[:60],
+                    routed_tool=tool_name,
+                    routed_args=tool_args,
+                )
+            return "music_assistant", {"action": "autoplay", "mode": mode}
 
         if tool_name is not None:
             return tool_name, tool_args
