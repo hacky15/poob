@@ -24,6 +24,7 @@ Gotchas differ from incidents: an incident is a specific event in the past, a go
 ### Music
 
 - [[ffmpeg-effect-toggle-creates-audio-gap]] — ~200-400ms silence on effect change / replay / previous is intentional; don't "fix" it without migrating to Lavalink
+- [[control-action-must-honor-explicit-target]] — a control shared by a button (bare toggle) and voice/text (explicit target) must SET the target when given, cycle only when bare; the `loop` handler cycled unconditionally and "loop off" turned loop ON
 
 ### Discord / Voice / Music
 

@@ -3,7 +3,7 @@ type: incident
 status: resolved
 date: 2026-07-06
 tags: [brain, routing, music, tool-calling, gemini]
-related: [[groq-gpt-oss-20b-swap]] [[gemini-router-prefer-2.5-ga-over-3.1-preview]] [[tool-hallucination-from-passive-context]]
+related: [[groq-gpt-oss-20b-swap]] [[gemini-router-prefer-2.5-ga-over-3.1-preview]] [[tool-hallucination-from-passive-context]] [[autoplay-request-enables-loop-one]]
 ---
 
 # A bare "stop." routed to `{action: autoplay, mode: on}` instead of stopping
@@ -88,3 +88,9 @@ similarly misrouted; adding an unproven safety net for them would be premature
 scope creep. If skip/pause are observed failing the same way in prod, extend
 `_BARE_STOP_PHRASES`-style coverage to them then, with the same evidence-first
 discipline.
+
+**Update 2026-07-11:** evidence arrived — "max volume" was routed to
+`{action: skip}` in prod. Skip and volume phrases now have deterministic
+overrides, and the net runs on every routing result (it previously never
+fired when a wrong tool was *present*, and couldn't see past the voice wake
+prefix). See [[control-command-misroute-by-weak-rung]].

@@ -25,6 +25,7 @@ from discord.ext import commands
 
 from poob.music.player import GuildMusicPlayer
 from poob.music.queue import LoopMode, Track
+from poob.music.spotify import parse_playlist_id, parse_track_id
 from poob.music.ytdl import AsyncYTDL
 from poob.utils.logging import get_logger
 
@@ -34,6 +35,34 @@ if TYPE_CHECKING:
     from poob.voice.session import VoiceSession
 
 log = get_logger("discord.music_cog")
+
+
+# Maps a spoken/typed loop target (from the LLM's `mode`, or `value` when the
+# model packs it there) to a concrete LoopMode. Absent or unrecognized input
+# falls back to the 3-way cycle — the behavior the 🔁 button relies on. See
+# docs/incidents/autoplay-request-enables-loop-one.md.
+_LOOP_MODE_TARGETS: dict[str, LoopMode] = {
+    "off": LoopMode.OFF,
+    "none": LoopMode.OFF,
+    "no": LoopMode.OFF,
+    "stop": LoopMode.OFF,
+    "disable": LoopMode.OFF,
+    "disabled": LoopMode.OFF,
+    "cancel": LoopMode.OFF,
+    "one": LoopMode.LOOP_ONE,
+    "single": LoopMode.LOOP_ONE,
+    "current": LoopMode.LOOP_ONE,
+    "track": LoopMode.LOOP_ONE,
+    "song": LoopMode.LOOP_ONE,
+    "this": LoopMode.LOOP_ONE,
+    "on": LoopMode.LOOP_ONE,
+    "repeat": LoopMode.LOOP_ONE,
+    "queue": LoopMode.LOOP_QUEUE,
+    "all": LoopMode.LOOP_QUEUE,
+    "everything": LoopMode.LOOP_QUEUE,
+    "playlist": LoopMode.LOOP_QUEUE,
+    "entire": LoopMode.LOOP_QUEUE,
+}
 
 
 def _track_to_dict(track: Track) -> dict:
@@ -583,13 +612,27 @@ class MusicCog(commands.Cog, name="Music"):
             return f"[SILENT]Shuffle {'enabled' if shuffled else 'disabled'}."
 
         if action == "loop":
-            mode = player.queue.cycle_loop_mode()
             mode_names = {
                 LoopMode.OFF: "off",
                 LoopMode.LOOP_ONE: "looping current track",
                 LoopMode.LOOP_QUEUE: "looping entire queue",
             }
-            return f"[SILENT]Loop mode: {mode_names[mode]}."
+            # Voice/text carry an explicit target ('off'/'one'/'queue'/'status');
+            # the 🔁 button carries none and means "cycle to the next mode".
+            # Honor an explicit target when given, else cycle. Read 'mode', or
+            # 'value' when the model packs the target there ({loop, value:'off'}
+            # seen in prod). See docs/incidents/autoplay-request-enables-loop-one.
+            raw_target = mode if mode is not None else value
+            target_key = str(raw_target).strip().lower() if raw_target is not None else ""
+            if target_key == "status":
+                return f"[SILENT]Loop mode: {mode_names[player.queue.loop_mode]}."
+            loop_target = _LOOP_MODE_TARGETS.get(target_key)
+            if loop_target is not None:
+                player.queue.set_loop_mode(loop_target)
+                new_mode = loop_target
+            else:
+                new_mode = player.queue.cycle_loop_mode()
+            return f"[SILENT]Loop mode: {mode_names[new_mode]}."
 
         if action == "volume":
             vol = value if value is not None else 50
@@ -718,40 +761,9 @@ class MusicCog(commands.Cog, name="Music"):
             url_clean = (url_arg or "").strip()
             if not url_clean:
                 return "[SILENT]Spotify playlist URL?"
-            tracks_meta = await resolver.resolve(url_clean)
-            if tracks_meta is None:
-                return "[SILENT]That doesn't look like a Spotify playlist URL."
-            if not tracks_meta:
-                return "[SILENT]Couldn't find any tracks from that playlist."
-            resolved: list[str] = []
-            not_found: list[str] = []
-            already_playing = player.is_playing
-            for meta in tracks_meta:
-                title = meta.get("title", "").strip()
-                artist = meta.get("artist", "").strip()
-                if not title:
-                    continue
-                query = f"{title} {artist}".strip()
-                track = await self._ytdl.search(
-                    query,
-                    requester_id=user_id,
-                    requester_name=requester_name,
-                )
-                if not track:
-                    not_found.append(title)
-                    continue
-                await player.play(track, deferred=voice)
-                resolved.append(track.title)
-            if not resolved:
-                return "[SILENT]Couldn't find any tracks from that playlist."
-            head = (
-                f"[SILENT]Queued {len(resolved)} from Spotify"
-                if already_playing
-                else f"[SILENT]Playing {resolved[0]}, queued {len(resolved) - 1} more from Spotify"
+            return await self._queue_spotify_playlist_url(
+                url_clean, player, user_id, requester_name, voice
             )
-            if not_found:
-                head += f" ({len(not_found)} not found)"
-            return f"{head}."
 
         # --- Lyrics fetch ---
         # v1 returns formatted lyrics inline in the [SILENT] reply
@@ -782,8 +794,42 @@ class MusicCog(commands.Cog, name="Music"):
             return f"[SILENT]Lyrics for {title_clean}{sync_note}:\n\n{body}"
 
         # Default: "play" action (or unrecognized action treated as play)
+        # A pasted link sometimes lands in 'url' instead of 'query' (the
+        # schema documents 'url' for queue_spotify_playlist and the router
+        # follows that instinct for any music link). A link IS the query.
+        # See docs/incidents/spotify-track-link-play-dead-end.md.
+        if (not query or len(query) < 2) and url_arg:
+            query = str(url_arg).strip()
         if not query or len(query) < 2:
             return "What do you want me to play?"
+
+        # Spotify links can't be streamed (DRM). A track link resolves to
+        # title+artist metadata → normal YT search; a playlist link routes
+        # to the same flow queue_spotify_playlist uses. Checked BEFORE the
+        # generic playlist branch below — a Spotify URL contains
+        # "/playlist" and would otherwise dead-end in the YT extractor.
+        if parse_track_id(query):
+            resolver = self._spotify_resolver
+            if resolver is None or not resolver.is_configured():
+                return (
+                    "That's a Spotify link and Spotify isn't set up here — "
+                    "just tell me the song name and I'll find it."
+                )
+            meta = await resolver.resolve_track(query)
+            if meta is None:
+                return "Couldn't read that Spotify link — tell me the song name and I'll find it."
+            query = f"{meta.get('title', '')} {meta.get('artist', '')}".strip()
+            log.info("play: spotify track link resolved", query=query[:80])
+        elif parse_playlist_id(query):
+            resolver = self._spotify_resolver
+            if resolver is None or not resolver.is_configured():
+                return (
+                    "That's a Spotify playlist and Spotify isn't set up "
+                    "here — name some songs instead."
+                )
+            return await self._queue_spotify_playlist_url(
+                query, player, user_id, requester_name, voice
+            )
 
         # Playlist URL
         if "list=" in query or "/playlist" in query:
@@ -813,6 +859,57 @@ class MusicCog(commands.Cog, name="Music"):
             return f"Playing {track.title} [{track.duration_str}]."
         pos = player.queue.size
         return f"Queued {track.title} [{track.duration_str}] at position {pos}."
+
+    async def _queue_spotify_playlist_url(
+        self,
+        url_clean: str,
+        player: GuildMusicPlayer,
+        user_id: int,
+        requester_name: str,
+        voice: bool,
+    ) -> str:
+        """Resolve a Spotify playlist URL and queue each track via YT search.
+
+        Shared by the ``queue_spotify_playlist`` action and the ``play``
+        branch (users paste playlist links with "play this"). The caller
+        has already verified the resolver is configured.
+        """
+        resolver = self._spotify_resolver
+        assert resolver is not None  # caller-checked; narrow for mypy
+        tracks_meta = await resolver.resolve(url_clean)
+        if tracks_meta is None:
+            return "[SILENT]That doesn't look like a Spotify playlist URL."
+        if not tracks_meta:
+            return "[SILENT]Couldn't find any tracks from that playlist."
+        resolved: list[str] = []
+        not_found: list[str] = []
+        already_playing = player.is_playing
+        for meta in tracks_meta:
+            title = meta.get("title", "").strip()
+            artist = meta.get("artist", "").strip()
+            if not title:
+                continue
+            search_query = f"{title} {artist}".strip()
+            track = await self._ytdl.search(
+                search_query,
+                requester_id=user_id,
+                requester_name=requester_name,
+            )
+            if not track:
+                not_found.append(title)
+                continue
+            await player.play(track, deferred=voice)
+            resolved.append(track.title)
+        if not resolved:
+            return "[SILENT]Couldn't find any tracks from that playlist."
+        head = (
+            f"[SILENT]Queued {len(resolved)} from Spotify"
+            if already_playing
+            else f"[SILENT]Playing {resolved[0]}, queued {len(resolved) - 1} more from Spotify"
+        )
+        if not_found:
+            head += f" ({len(not_found)} not found)"
+        return f"{head}."
 
     # ------------------------------------------------------------------
     # Now-playing UI (embed + persistent buttons)

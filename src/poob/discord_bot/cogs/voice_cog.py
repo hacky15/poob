@@ -409,7 +409,10 @@ class VoiceCog(commands.Cog, name="Voice"):
     # ------------------------------------------------------------------
 
     async def speak_if_in_channel(
-        self, message: discord.Message, text: str,
+        self,
+        message: discord.Message,
+        text: str,
+        persona: str = "poob",
     ) -> bool:
         """Speak ``text`` via TTS iff the message author is in Poob's VC.
 
@@ -421,6 +424,9 @@ class VoiceCog(commands.Cog, name="Voice"):
         Args:
             message: The triggering text message.
             text: The response text to synthesize.
+            persona: Which voice speaks — "poob" (default), "toob" (music
+                replies — same string-keyed dispatch the session's streaming
+                path uses), or "boob". Unknown values fall back to Poob.
 
         Returns:
             True if audio was played, False otherwise.
@@ -444,13 +450,20 @@ class VoiceCog(commands.Cog, name="Voice"):
             return False
 
         try:
-            audio = await session._synthesize(text)
+            synth_dispatch = {
+                "poob": session._synthesize,
+                "toob": session._synthesize_toob,
+                "boob": session._synthesize_boob,
+            }
+            synth = synth_dispatch.get(persona, session._synthesize)
+            audio = await synth(text)
             if not audio:
                 return False
             await session._play_audio(audio)
             log.info(
                 "Spoke chat response in VC",
                 user=message.author.id,
+                persona=persona,
                 bytes=len(audio),
             )
             return True

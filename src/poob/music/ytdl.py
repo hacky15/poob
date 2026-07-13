@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import os
+import re
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -193,49 +194,198 @@ class AsyncYTDL:
         requester_id: int = 0,
         requester_name: str = "",
     ) -> Track | None:
-        """Search YouTube and return the top result as a Track.
+        """Search YouTube and return the best-matching result as a Track.
 
         Handles both direct URLs and text search queries (via
-        default_search: auto). Two-pass fallback for typos / misheard
-        STT: if the first pass returns no result (yt-dlp returned None
-        OR the search came back with empty entries — common when the
-        ytsearch1 didn't have a tight match), retry with `ytsearch5`
-        and take the first viable entry. Lets users hear a best-guess
-        for a slightly-mangled query rather than dead-end on
-        "Couldn't find anything."
+        default_search: auto). Two-pass best-guess for non-URL queries
+        (see [[ytdl-search-best-guess-fallback]]), now with candidate
+        RE-RANKING on the widened pass (see
+        [[music-search-candidate-rerank]]):
 
-        Direct URLs skip the fallback — if a URL fails to extract,
-        the URL is the source of truth and a relaxed search would be
-        the wrong song.
+        1. Pass 1: ``extract_info(query)`` (→ ytsearch1). Returned as-is
+           when the hit looks plausible for the query.
+        2. Pass 2: when pass 1 came back empty OR its hit looks
+           implausible (long-form video for a song-shaped query — the
+           "31-minute pottery video" failure), widen to ``ytsearch5``
+           and pick the highest-scoring candidate by title-token
+           overlap + duration fit. The pass-1 hit competes in the
+           ranking (with a small incumbent bonus), so the outcome is
+           never worse than take-first — best-guess still beats
+           dead-end, it's just a better guess.
+
+        Direct URLs skip both the fallback and the plausibility check —
+        the URL is the source of truth.
         """
         info = await self.extract_info(query)
         track = self._first_track_from_info(info, requester_id, requester_name)
-        if track is not None:
+        if track is not None and not self._is_implausible_hit(query, track):
             return track
 
         # Don't widen for direct URLs — we know what they wanted.
         if self._looks_like_url(query):
-            return None
+            return track
 
         # Best-guess fallback: ytsearch5 picks up near-matches that
-        # ytsearch1's exact-title pass misses.
-        log.info("ytdl.search fallback to ytsearch5", query=query[:80])
-        widened = await self.extract_info(f"ytsearch5:{query}")
-        widened_track = self._first_track_from_info(
-            widened, requester_id, requester_name,
+        # ytsearch1's exact-title pass misses; re-rank picks the most
+        # song-plausible candidate instead of blindly taking the first.
+        log.info(
+            "ytdl.search widening to ytsearch5",
+            query=query[:80],
+            reason="empty" if track is None else "implausible_top_hit",
         )
-        if widened_track is not None:
-            log.info(
-                "ytdl.search recovered via ytsearch5",
-                query=query[:80], picked=widened_track.title[:80],
-            )
-        return widened_track
+        widened = await self.extract_info(f"ytsearch5:{query}")
+        candidates: list[Track] = []
+        if widened is not None:
+            entries = widened.get("entries") if "entries" in widened else [widened]
+            for entry in entries or []:
+                if entry is None:
+                    continue
+                candidates.append(self._info_to_track(entry, requester_id, requester_name))
+        if track is not None:
+            candidates.append(track)
+        if not candidates:
+            return None
+
+        # Incumbent bonus: the pass-1 hit wins ties so a plausible-enough
+        # original pick isn't churned for a marginally-scored alternative.
+        def _key(cand: Track) -> float:
+            bonus = 0.1 if cand is track else 0.0
+            return self._relevance_score(query, cand) + bonus
+
+        best = max(candidates, key=_key)
+        log.info(
+            "ytdl.search picked via rerank",
+            query=query[:80],
+            picked=best.title[:80],
+            candidates=len(candidates),
+        )
+        return best
 
     @staticmethod
     def _looks_like_url(query: str) -> bool:
         """Quick check for direct URL — skips the fallback path."""
         q = query.strip().lower()
         return q.startswith(("http://", "https://", "www.")) or "youtube.com" in q or "youtu.be" in q
+
+    # ------------------------------------------------------------------
+    # Candidate re-ranking (see docs/decisions/music-search-candidate-rerank)
+    # ------------------------------------------------------------------
+
+    # Query words that signal the user WANTS long-form content — duration
+    # scoring is disabled for these so a 2-hour mix isn't penalized.
+    _LONGFORM_QUERY_SIGNALS = frozenset(
+        {
+            "mix",
+            "mixtape",
+            "playlist",
+            "compilation",
+            "album",
+            "megamix",
+            "mashup",
+            "medley",
+            "hour",
+            "hours",
+            "podcast",
+            "audiobook",
+            "asmr",
+            "radio",
+            "session",
+            "sessions",
+            "marathon",
+            "sleep",
+            "study",
+            "lofi",
+            "lo-fi",
+            "episode",
+            "full",
+            "concert",
+        }
+    )
+
+    # Dropped before overlap scoring — connectives and video-title chrome
+    # that would inflate matches without carrying song identity.
+    _QUERY_STOPWORDS = frozenset(
+        {
+            "the",
+            "a",
+            "an",
+            "by",
+            "of",
+            "and",
+            "feat",
+            "ft",
+            "featuring",
+            "official",
+            "video",
+            "audio",
+            "lyrics",
+            "lyric",
+            "song",
+            "music",
+        }
+    )
+
+    # A pass-1 hit longer than this for a song-shaped query triggers the
+    # widened re-rank pass. Matches MAX_PREDOWNLOAD_DURATION_SEC — the
+    # system already treats >15 min as "not a normal song" for downloads.
+    LONGFORM_HIT_THRESHOLD_SEC = 900
+
+    @classmethod
+    def _query_tokens(cls, text: str) -> set[str]:
+        """Lowercased content tokens with stopwords removed."""
+        return {t for t in re.findall(r"[a-z0-9']+", text.lower()) if t not in cls._QUERY_STOPWORDS}
+
+    @classmethod
+    def _has_longform_intent(cls, query: str) -> bool:
+        """True when the query itself asks for long-form content."""
+        return bool(
+            {t for t in re.findall(r"[a-z0-9'-]+", query.lower())} & cls._LONGFORM_QUERY_SIGNALS
+        )
+
+    @classmethod
+    def _relevance_score(cls, query: str, track: Track) -> float:
+        """Score a candidate for a search query — higher is better.
+
+        Title-token overlap (0..1) plus a duration-fit adjustment for
+        song-shaped queries: typical song lengths get a bonus, long-form
+        results a growing penalty. Queries with long-form intent skip
+        the duration term entirely.
+        """
+        qtokens = cls._query_tokens(query)
+        ttokens = cls._query_tokens(track.title)
+        overlap = len(qtokens & ttokens) / len(qtokens) if qtokens else 0.0
+        score = overlap
+
+        if cls._has_longform_intent(query):
+            return score
+
+        if track.duration is None:
+            # Livestreams for a song-shaped query are almost never the ask.
+            return score - 0.25 if track.is_stream else score
+
+        seconds = track.duration.total_seconds()
+        if 60 <= seconds <= 900:
+            score += 0.3  # typical song length
+        elif seconds > 1800:
+            score -= 0.5  # 30-minute-plus long-form
+        elif seconds > 900:
+            score -= 0.2  # mildly long
+        return score
+
+    def _is_implausible_hit(self, query: str, track: Track) -> bool:
+        """True when a pass-1 hit warrants the widened re-rank pass.
+
+        Narrow by design: only fires on long-form results (>15 min) for
+        queries that did not ask for long-form content, and never for
+        direct URLs (the user picked that video themselves).
+        """
+        if self._looks_like_url(query):
+            return False
+        if track.duration is None:
+            return False
+        if track.duration.total_seconds() <= self.LONGFORM_HIT_THRESHOLD_SEC:
+            return False
+        return not self._has_longform_intent(query)
 
     def _first_track_from_info(
         self,

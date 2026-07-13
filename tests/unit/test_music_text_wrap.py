@@ -1,40 +1,35 @@
 """Tests for the text-channel music response wrap.
 
-Prod report (2026-07-03): "@Poob play gobble glitch remix 808 backwoods" (a
-plain text play request) got wrapped into "Sure thing—no items, no prices, no
-questions, no confirmations. Just the song's name, length, and the fact it's
-playing." — a bizarre, off-topic, oversized reply to a one-line status.
+History of this contract (each stage pinned here at the time):
 
-Root cause: the text-channel short-response path in `_handle_music` reused
-`_wrap_in_personality`, which is built for DEAL responses — its assistant-turn
-label ("[My deal system says: ...]") and instruction ("include items, prices,
-questions asked, confirmations") are deal-shaped. A music result has none of
-those things, so the model narrated their ABSENCE instead of just relaying the
-song. Fixed with a dedicated `_wrap_music_response_text` (the text-channel
-counterpart to the existing voice-only `_wrap_music_response` / Toob wrap),
-with a correctly-labeled, music-only instruction and a tight token cap.
-`_wrap_in_personality` itself is UNCHANGED and still exclusively serves
-`_handle_deal` — zero risk to deal-response wrapping.
+1. 2026-07-03: text music replies reused the DEAL wrap and narrated absent
+   deal categories ("no items, no prices…"). Fixed with a dedicated
+   Poob-personality text wrap (music-only instruction, tight token cap).
+2. 2026-07-12: operator decision — music replies are TOOB's everywhere, not
+   just in voice ("it's supposed to just be toob. toob can say it in chat").
+   The text path now reuses ``_wrap_music_response`` (the SAME Toob wrap the
+   voice path uses) and returns it prefixed with the ``VOICE_TOOB`` sentinel
+   so the agent handler strips it from the posted text and speaks the reply
+   in Toob's voice when the requester shares the VC. The dedicated Poob text
+   wrap was deleted. See decisions/music-text-replies-are-toob (supersedes
+   the "text stays Poob" convention) and
+   incidents/music-text-wrap-inherited-deal-instructions (stage 1).
 
-Adversarial re-review of the fix (same day) caught two further issues, both
-fixed here too: `_wrap_music_response_text` was pulling the guild's ROLLED
-VOICE horniness level into a text reply (removed — text is always neutral,
-level pinned to 5, and the now-unused `guild_id` param was dropped); and its
-token cap (60) was looser than the analogous Toob wrap (40) despite this
-function's whole purpose being to prevent a one-line status from ballooning —
-tightened to match.
+The anti-deal-vocabulary guards from stage 1 remain — the Toob wrap must
+never regress into deal-shaped instructions either.
 """
 
 from __future__ import annotations
 
 import inspect
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import poob.brain.poob as poob_module
-from poob.brain.poob import PoobBrain
+from poob.brain.poob import VOICE_TOOB, PoobBrain
+from poob.discord_bot.agent_handler import _split_persona
 
 
 def _make_brain(**kw: Any) -> PoobBrain:
@@ -56,13 +51,13 @@ def _fake_groq_client(content: str | None) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# _handle_music dispatches text (non-voice) short responses to the NEW
-# music-specific wrap, not the deal-shaped _wrap_in_personality.
+# _handle_music dispatches text (non-voice) short responses to the TOOB wrap
+# and tags the result with the VOICE_TOOB sentinel.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_text_music_response_uses_music_wrap_not_deal_wrap() -> None:
+async def test_text_music_response_uses_toob_wrap_with_sentinel() -> None:
     brain = _make_brain()
 
     async def _handler(message, uid, gid, *, voice, tool_args):  # type: ignore[no-untyped-def]
@@ -72,8 +67,8 @@ async def test_text_music_response_uses_music_wrap_not_deal_wrap() -> None:
 
     with (
         patch.object(
-            brain, "_wrap_music_response_text", new=AsyncMock(return_value="wrapped!")
-        ) as music_wrap,
+            brain, "_wrap_music_response", new=AsyncMock(return_value="your taste disgusts me")
+        ) as toob_wrap,
         patch.object(brain, "_wrap_in_personality", new=AsyncMock()) as deal_wrap,
     ):
         out = await brain._handle_music(
@@ -85,34 +80,120 @@ async def test_text_music_response_uses_music_wrap_not_deal_wrap() -> None:
             guild_id=10,
         )
 
-    # Exact-args check, not just "was called" — catches argument-order or
-    # omission regressions at the call site, not just the wrong method firing.
-    music_wrap.assert_awaited_once_with(
+    toob_wrap.assert_awaited_once_with(
         "play gobble glitch remix 808 backwoods",
         "Playing gobble glitch remix 808 backwoods [3:42]",
         200,
     )
     deal_wrap.assert_not_called()
-    assert out == "wrapped!"
+    # Sentinel-prefixed so the agent handler can strip it and pick Toob's voice.
+    assert out == VOICE_TOOB + "your taste disgusts me"
+
+
+@pytest.mark.asyncio
+async def test_text_music_history_saves_clean_text_not_sentinel() -> None:
+    """The sentinel is transport, not content — conversation history must
+    store the clean Toob line, or later persona calls see the marker."""
+    brain = _make_brain()
+
+    async def _handler(message, uid, gid, *, voice, tool_args):  # type: ignore[no-untyped-def]
+        return "Playing tiki tiki [3:00]"
+
+    brain.set_music_handler(_handler)
+
+    with patch.object(
+        brain, "_wrap_music_response", new=AsyncMock(return_value="suffer through it")
+    ):
+        await brain._handle_music(
+            "play tiki tiki",
+            "123",
+            voice=False,
+            max_tok=200,
+            tool_args={"action": "play", "query": "tiki tiki"},
+            guild_id=10,
+        )
+
+    history = brain._histories[(10, "123")]
+    assert any(m.content == "suffer through it" for m in history)
+    assert not any(VOICE_TOOB in m.content for m in history)
+
+
+@pytest.mark.asyncio
+async def test_silent_control_acks_are_not_toob_tagged() -> None:
+    """Control acks (skip/pause/volume) stay persona-neutral — in voice they
+    are never spoken at all; in text they post as plain status with no
+    sentinel, so the VC speak (if any) stays Poob."""
+    brain = _make_brain()
+
+    async def _handler(message, uid, gid, *, voice, tool_args):  # type: ignore[no-untyped-def]
+        return "[SILENT]Skipped Old Song."
+
+    brain.set_music_handler(_handler)
+
+    out = await brain._handle_music(
+        "skip",
+        "123",
+        voice=False,
+        max_tok=200,
+        tool_args={"action": "skip"},
+        guild_id=10,
+    )
+
+    assert out == "Skipped Old Song."
+    assert VOICE_TOOB not in out
+
+
+@pytest.mark.asyncio
+async def test_speak_responses_toob_tagged_in_text_but_not_voice() -> None:
+    """[SPEAK] verbatim answers (list_effects) are spoken by Toob in voice
+    mode via the STREAMED sentinel — so the text return must carry the
+    embedded sentinel ONLY in text mode. Embedding it for voice would leak
+    the marker into TTS."""
+    brain = _make_brain()
+
+    async def _handler(message, uid, gid, *, voice, tool_args):  # type: ignore[no-untyped-def]
+        return "[SPEAK]I've got 15 effects: nightcore, slowed..."
+
+    brain.set_music_handler(_handler)
+
+    text_out = await brain._handle_music(
+        "what effects do you have",
+        "123",
+        voice=False,
+        max_tok=200,
+        tool_args={"action": "list_effects"},
+        guild_id=10,
+    )
+    voice_out = await brain._handle_music(
+        "what effects do you have",
+        "123",
+        voice=True,
+        max_tok=200,
+        tool_args={"action": "list_effects"},
+        guild_id=10,
+    )
+
+    assert text_out.startswith(VOICE_TOOB)
+    assert not voice_out.startswith(VOICE_TOOB)
+    assert "15 effects" in text_out and "15 effects" in voice_out
 
 
 # ---------------------------------------------------------------------------
-# _wrap_music_response_text — the actual prompt contract.
+# _wrap_music_response — the shared Toob prompt contract (voice AND text).
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_music_text_wrap_label_is_music_not_deal() -> None:
-    """The exact regression: the assistant-turn label must say 'Music system
-    result', never 'My deal system says' (which caused the model to treat a
-    song status as if it were a deal listing)."""
+async def test_music_wrap_label_is_music_not_deal() -> None:
+    """The 2026-07-03 regression guard, carried forward: the assistant-turn
+    label must say 'Music system result', never 'My deal system says'."""
     brain = _make_brain()
-    client = _fake_groq_client("Bumping gobble glitch remix now.")
+    client = _fake_groq_client("your lake vibes will drown you")
 
     with patch("groq.AsyncGroq", return_value=client):
-        await brain._wrap_music_response_text(
-            "play gobble glitch remix 808 backwoods",
-            "Playing gobble glitch remix 808 backwoods [3:42]",
+        await brain._wrap_music_response(
+            "play backwoods 808 fishing",
+            "Playing Draggin Bottom [3:43]",
             200,
         )
 
@@ -123,15 +204,14 @@ async def test_music_text_wrap_label_is_music_not_deal() -> None:
 
 
 @pytest.mark.asyncio
-async def test_music_text_wrap_instruction_has_no_deal_vocabulary() -> None:
-    """The instruction line must never mention items/prices/questions/
-    confirmations — those categories don't exist for a music result, and
-    listing them is exactly what caused the model to narrate their absence."""
+async def test_music_wrap_instruction_has_no_deal_vocabulary() -> None:
+    """Deal-shaped categories (items/prices/questions/confirmations) must
+    never appear — listing them made the model narrate their absence."""
     brain = _make_brain()
-    client = _fake_groq_client("Bumping it now.")
+    client = _fake_groq_client("mock line")
 
     with patch("groq.AsyncGroq", return_value=client):
-        await brain._wrap_music_response_text(
+        await brain._wrap_music_response(
             "play tiki tiki",
             "Playing tiki tiki [3:00]",
             200,
@@ -144,47 +224,33 @@ async def test_music_text_wrap_instruction_has_no_deal_vocabulary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_music_text_wrap_uses_poob_persona_at_neutral_level() -> None:
-    """Text stays Poob's own persona at the neutral level (5) — NOT the
-    guild's rolled voice-session horniness level, and not Toob (a voice-only
-    pitch/timbre swap with no meaning in a text reply).
-
-    Spies on the actual `_build_system_prompt` call rather than checking for
-    absent strings: a bare string-absence check would have passed against the
-    old buggy code too (it also called voice=False), so it wouldn't have
-    caught the horniness-level regression this test guards against.
-    """
+async def test_music_wrap_is_toob_persona() -> None:
+    """The system prompt is TOOB's — dark music spirit, one venomous
+    sentence — for text and voice alike."""
     brain = _make_brain()
-    # Simulate an elevated ROLLED VOICE horniness level for this guild — the
-    # text wrap must NOT pick this up.
-    brain._horniness_levels[10] = 9
-    client = _fake_groq_client("Bumping it now.")
+    client = _fake_groq_client("mock line")
 
-    with (
-        patch("groq.AsyncGroq", return_value=client),
-        patch(
-            "poob.brain.poob._build_system_prompt",
-            wraps=poob_module._build_system_prompt,
-        ) as spy,
-    ):
-        await brain._wrap_music_response_text(
+    with patch("groq.AsyncGroq", return_value=client):
+        await brain._wrap_music_response(
             "play tiki tiki",
             "Playing tiki tiki [3:00]",
             200,
         )
 
-    spy.assert_called_once_with(5, voice=False)  # neutral level, not the rolled 9
+    sent_messages = client.chat.completions.create.call_args.kwargs["messages"]
+    system = next(m["content"] for m in sent_messages if m["role"] == "system")
+    assert "Toob" in system
+    assert "ONE sentence" in system
 
 
 @pytest.mark.asyncio
-async def test_music_text_wrap_caps_tokens_tightly() -> None:
-    """A one-line status has no business ballooning into a paragraph — capped
-    to match the equally-tight Toob voice wrap (min(max_tokens, 40))."""
+async def test_music_wrap_caps_tokens_tightly() -> None:
+    """A one-line status has no business ballooning into a paragraph."""
     brain = _make_brain()
-    client = _fake_groq_client("Bumping it now.")
+    client = _fake_groq_client("mock line")
 
     with patch("groq.AsyncGroq", return_value=client):
-        await brain._wrap_music_response_text(
+        await brain._wrap_music_response(
             "play tiki tiki",
             "Playing tiki tiki [3:00]",
             500,
@@ -194,22 +260,7 @@ async def test_music_text_wrap_caps_tokens_tightly() -> None:
 
 
 @pytest.mark.asyncio
-async def test_music_text_wrap_returns_model_text() -> None:
-    brain = _make_brain()
-    client = _fake_groq_client("Solid pick, bumping it.")
-
-    with patch("groq.AsyncGroq", return_value=client):
-        out = await brain._wrap_music_response_text(
-            "play tiki tiki",
-            "Playing tiki tiki [3:00]",
-            200,
-        )
-
-    assert out == "Solid pick, bumping it."
-
-
-@pytest.mark.asyncio
-async def test_music_text_wrap_falls_back_to_raw_result_on_exception() -> None:
+async def test_music_wrap_falls_back_to_raw_result_on_exception() -> None:
     brain = _make_brain()
     client = type("Client", (), {})()
     client.chat = type("Chat", (), {})()
@@ -217,7 +268,7 @@ async def test_music_text_wrap_falls_back_to_raw_result_on_exception() -> None:
     client.chat.completions.create = AsyncMock(side_effect=RuntimeError("groq down"))
 
     with patch("groq.AsyncGroq", return_value=client):
-        out = await brain._wrap_music_response_text(
+        out = await brain._wrap_music_response(
             "play tiki tiki",
             "Playing tiki tiki [3:00]",
             200,
@@ -227,9 +278,9 @@ async def test_music_text_wrap_falls_back_to_raw_result_on_exception() -> None:
 
 
 @pytest.mark.asyncio
-async def test_music_text_wrap_falls_back_when_no_groq_key() -> None:
+async def test_music_wrap_falls_back_when_no_groq_key() -> None:
     brain = PoobBrain(groq_api_key="", deal_agent=None)
-    out = await brain._wrap_music_response_text(
+    out = await brain._wrap_music_response(
         "play tiki tiki",
         "Playing tiki tiki [3:00]",
         200,
@@ -238,14 +289,95 @@ async def test_music_text_wrap_falls_back_when_no_groq_key() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _split_persona — the agent handler's sentinel → persona translation.
+# ---------------------------------------------------------------------------
+
+
+def test_split_persona_strips_toob_sentinel() -> None:
+    persona, text = _split_persona(VOICE_TOOB + "your taste disgusts me")
+    assert persona == "toob"
+    assert text == "your taste disgusts me"
+    assert VOICE_TOOB not in text
+
+
+def test_split_persona_defaults_to_poob() -> None:
+    persona, text = _split_persona("just a normal chat reply")
+    assert persona == "poob"
+    assert text == "just a normal chat reply"
+
+
+def test_split_persona_sentinel_mid_string_is_not_a_tag() -> None:
+    """Only a PREFIX is transport — a sentinel-looking string inside content
+    (however unlikely) is left alone rather than mangled."""
+    msg = f"someone typed {VOICE_TOOB} in chat"
+    persona, text = _split_persona(msg)
+    assert persona == "poob"
+    assert text == msg
+
+
+# ---------------------------------------------------------------------------
+# speak_if_in_channel — persona-keyed synth dispatch.
+# ---------------------------------------------------------------------------
+
+
+def _speaking_fixture():
+    """(fake VoiceCog self, message, session) wired so the VC gate passes."""
+    from poob.discord_bot.cogs.voice_cog import VoiceCog
+
+    session = MagicMock()
+    session._synthesize = AsyncMock(return_value=b"poob-audio")
+    session._synthesize_toob = AsyncMock(return_value=b"toob-audio")
+    session._synthesize_boob = AsyncMock(return_value=b"boob-audio")
+    session._play_audio = AsyncMock()
+
+    fake_self = MagicMock()
+    fake_self._get_session.return_value = session
+
+    channel = MagicMock()
+    session.voice_client.channel = channel
+    message = MagicMock()
+    message.guild = MagicMock()
+    message.author.voice.channel = channel
+
+    return VoiceCog.speak_if_in_channel, fake_self, message, session
+
+
+@pytest.mark.asyncio
+async def test_speak_if_in_channel_toob_persona_uses_toob_synth() -> None:
+    speak, fake_self, message, session = _speaking_fixture()
+
+    ok = await speak(fake_self, message, "suffer through this song", persona="toob")
+
+    assert ok is True
+    session._synthesize_toob.assert_awaited_once_with("suffer through this song")
+    session._synthesize.assert_not_awaited()
+    session._play_audio.assert_awaited_once_with(b"toob-audio")
+
+
+@pytest.mark.asyncio
+async def test_speak_if_in_channel_defaults_to_poob_synth() -> None:
+    speak, fake_self, message, session = _speaking_fixture()
+
+    ok = await speak(fake_self, message, "hey what's up")
+
+    assert ok is True
+    session._synthesize.assert_awaited_once_with("hey what's up")
+    session._synthesize_toob.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_speak_if_in_channel_unknown_persona_falls_back_to_poob() -> None:
+    speak, fake_self, message, session = _speaking_fixture()
+
+    ok = await speak(fake_self, message, "hello", persona="gloob")
+
+    assert ok is True
+    session._synthesize.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
 # Regression guard: _wrap_in_personality (the deal wrap) is UNTOUCHED and
 # still the sole wrap for _handle_deal. Zero risk to deal functionality.
-#
-# The structural check (below) only proves two substrings survive and the
-# right method names are called — it can't catch a behavioral regression
-# (wrong model/max_tokens/temperature/voice-branch). The behavioral tests
-# above it actually exercise _wrap_in_personality's real Groq call for both
-# voice=True and voice=False, closing that gap.
 # ---------------------------------------------------------------------------
 
 
@@ -327,4 +459,6 @@ def test_wrap_in_personality_structurally_unchanged() -> None:
 
     handle_music_src = inspect.getsource(poob_module.PoobBrain._handle_music)
     assert "_wrap_in_personality(" not in handle_music_src
-    assert "_wrap_music_response_text(" in handle_music_src
+    assert "_wrap_music_response(" in handle_music_src
+    # The dedicated Poob text wrap is GONE — text reuses the Toob wrap.
+    assert not hasattr(poob_module.PoobBrain, "_wrap_music_response_text")

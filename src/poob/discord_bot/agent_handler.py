@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 import discord
 from discord.ext import commands
 
+from poob.brain.poob import VOICE_BOOB, VOICE_TOOB
 from poob.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -126,6 +127,15 @@ class AgentMessageHandler(commands.Cog):
 
         guild_id = message.guild.id if message.guild else 0
 
+        # Snapshot the current track BEFORE the brain call — the brain call is
+        # what queues/plays as a side effect, and a fresh track's download can
+        # finish while the brain is still generating the wrap. Snapshotting
+        # after the call sees the NEW track as the baseline, so the poll below
+        # waits for a change that already happened and no card ever posts.
+        # See docs/incidents/now-playing-card-snapshot-after-brain-call.md.
+        music_cog = self._bot.get_cog("Music")
+        track_before = _current_track(music_cog, guild_id)
+
         log.info("agent.calling_brain", user=user_id, content=content[:80])
         try:
             async with message.channel.typing():
@@ -138,17 +148,16 @@ class AgentMessageHandler(commands.Cog):
             log.exception("agent.run_error", user=user_id)
             response = "Sorry, something went wrong processing your request."
 
-        # Track whether music just started so we can attach the now-playing
-        # card. We snapshot the current track *before* the brain call (which
-        # may queue/play as a side effect) and compare after.
-        music_cog = self._bot.get_cog("Music")
-        track_before = _current_track(music_cog, message.guild.id if message.guild else 0)
+        # Music replies arrive tagged with the VOICE_TOOB sentinel: strip it
+        # from the posted text and speak them in Toob's voice below. See
+        # decisions/music-text-replies-are-toob.
+        persona, response = _split_persona(response)
 
         # Discord has a 2000-char limit; split if needed
         try:
             for chunk in _split_message(response):
                 await message.reply(chunk, mention_author=False)
-            log.info("agent.reply_sent", user=user_id)
+            log.info("agent.reply_sent", user=user_id, persona=persona)
         except Exception:
             log.exception("agent.reply_error", user=user_id)
             return
@@ -158,7 +167,7 @@ class AgentMessageHandler(commands.Cog):
         voice_cog = self._bot.get_cog("Voice")
         if voice_cog is not None and hasattr(voice_cog, "speak_if_in_channel"):
             try:
-                await voice_cog.speak_if_in_channel(message, response)
+                await voice_cog.speak_if_in_channel(message, response, persona=persona)
             except Exception:
                 log.exception("agent.voice_speak_error", user=user_id)
 
@@ -239,6 +248,21 @@ class AgentMessageHandler(commands.Cog):
         # Strip any remaining unresolved mentions
         text = _MENTION_RE.sub("", text).strip()
         return text
+
+
+def _split_persona(response: str) -> tuple[str, str]:
+    """Split a brain response into (persona, clean_text).
+
+    Text-mode music replies are prefixed with the VOICE_TOOB sentinel (the
+    single-string analog of the sentinel respond_streaming yields as its
+    first item). The sentinel is transport, not content — it must never
+    appear in the posted message. Unrecognized/absent prefix → ("poob", text
+    unchanged). See decisions/music-text-replies-are-toob.
+    """
+    for sentinel, persona in ((VOICE_TOOB, "toob"), (VOICE_BOOB, "boob")):
+        if response.startswith(sentinel):
+            return persona, response[len(sentinel) :].lstrip()
+    return "poob", response
 
 
 def _current_track(music_cog, guild_id: int):
