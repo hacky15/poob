@@ -3,7 +3,7 @@ type: incident
 status: resolved
 date: 2026-06-02
 tags: [music, discord, now-playing, race, ux]
-related: [[music-now-playing-embed-buttons]] [[one-handler-music-contract]]
+related: [[music-now-playing-embed-buttons]] [[one-handler-music-contract]] [[now-playing-card-snapshot-after-brain-call]]
 ---
 
 # Now-playing card only appears for some tracks (download race)

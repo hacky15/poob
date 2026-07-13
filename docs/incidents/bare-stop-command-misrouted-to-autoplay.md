@@ -3,7 +3,7 @@ type: incident
 status: resolved
 date: 2026-07-06
 tags: [brain, routing, music, tool-calling, gemini]
-related: [[groq-gpt-oss-20b-swap]] [[gemini-router-prefer-2.5-ga-over-3.1-preview]] [[tool-hallucination-from-passive-context]] [[autoplay-misrouted-to-apply-effect]]
+related: [[groq-gpt-oss-20b-swap]] [[gemini-router-prefer-2.5-ga-over-3.1-preview]] [[tool-hallucination-from-passive-context]] [[autoplay-misrouted-to-apply-effect]] [[autoplay-request-enables-loop-one]] [[control-command-misroute-by-weak-rung]]
 ---
 
 # A bare "stop." routed to `{action: autoplay, mode: on}` instead of stopping
@@ -96,3 +96,11 @@ class — a mode toggle, not a transport control — so it wasn't even in this
 note's consideration set) hit the identical failure mode 3 days later. See
 [[autoplay-misrouted-to-apply-effect]] for the fix, which this time included
 a full audit of the action enum rather than reacting to one more word.
+
+**Update 2026-07-11:** evidence arrived — "max volume" was routed to
+`{action: skip}` in prod. Skip and volume phrases now have deterministic
+overrides, and the net runs on every routing result (it previously never
+fired when a wrong tool was *present*, and couldn't see past the voice wake
+prefix). The autoplay override from the 2026-07-09 audit was consolidated
+into this generalized control override (same behavior, one mechanism). See
+[[control-command-misroute-by-weak-rung]].

@@ -22,7 +22,7 @@ rules is caught regardless of the prompt refactor.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -143,6 +143,340 @@ def test_music_safety_net_does_not_override_non_bare_stop_phrasing() -> None:
         "music_assistant",
         {"action": "apply_effect", "effect": "none"},
     ) == ("music_assistant", {"action": "apply_effect", "effect": "none"})
+
+
+# --- _music_safety_net: autoplay/loop overrides (2026-07 prod regression) ---
+# The weak fallback rung confuses autoplay <-> loop (no anchoring example in
+# the routing prompt): "turn autoplay on" routed to {loop, off}, which the
+# handler then cycled into LOOP_ONE — the same song looping forever while new
+# requests never played. These exact phrases have no other plausible reading,
+# so the net forces the right control (mirrors the bare-stop override).
+# See docs/incidents/autoplay-request-enables-loop-one.md.
+
+
+def test_music_safety_net_forces_autoplay_on() -> None:
+    b = _brain()
+    for phrase in (
+        "autoplay on",
+        "turn on autoplay",
+        "turn autoplay on",
+        "enable autoplay",
+        "start autoplay",
+    ):
+        assert b._music_safety_net(phrase, None, None) == (
+            "music_assistant",
+            {"action": "autoplay", "mode": "on"},
+        ), phrase
+
+
+def test_music_safety_net_forces_autoplay_on_over_misrouted_loop() -> None:
+    """The exact prod class: 'turn autoplay on' was routed to {loop, off}.
+    The override wins even over a present (wrong) tool call."""
+    b = _brain()
+    assert b._music_safety_net(
+        "turn autoplay on", "music_assistant", {"action": "loop", "mode": "off"}
+    ) == ("music_assistant", {"action": "autoplay", "mode": "on"})
+
+
+def test_music_safety_net_forces_autoplay_off() -> None:
+    b = _brain()
+    for phrase in (
+        "autoplay off",
+        "turn off autoplay",
+        "disable autoplay",
+        "stop autoplaying",
+    ):
+        assert b._music_safety_net(phrase, None, None) == (
+            "music_assistant",
+            {"action": "autoplay", "mode": "off"},
+        ), phrase
+
+
+def test_music_safety_net_forces_loop_off() -> None:
+    b = _brain()
+    for phrase in ("turn off loop", "loop off", "stop looping", "no loop"):
+        assert b._music_safety_net(phrase, None, None) == (
+            "music_assistant",
+            {"action": "loop", "mode": "off"},
+        ), phrase
+
+
+def test_music_safety_net_loop_off_overrides_misrouted_cycle() -> None:
+    """'turn off loop' forces mode=off even if the LLM routed a bare
+    {loop} (which the handler would otherwise cycle)."""
+    b = _brain()
+    assert b._music_safety_net(
+        "turn off loop", "music_assistant", {"action": "loop"}
+    ) == ("music_assistant", {"action": "loop", "mode": "off"})
+
+
+def test_music_safety_net_autoplay_loop_no_false_positives() -> None:
+    """Non-control phrasing must NOT be hijacked into autoplay/loop control.
+    'play autoplay ...' is a real play; 'loop me in' is not a music command."""
+    b = _brain()
+    for msg in (
+        "play autoplay by some band",
+        "loop me in on the plan",
+        "keep the loop tight",
+        "how are you",
+    ):
+        _tool, args = b._music_safety_net(msg, None, None)
+        assert args != {"action": "autoplay", "mode": "on"}, msg
+        assert args != {"action": "autoplay", "mode": "off"}, msg
+        assert args != {"action": "loop", "mode": "off"}, msg
+
+
+# --- _music_safety_net: volume/skip control overrides, wake-aware -----------
+# 2026-07-11 prod: the_._gamer said "Hey, Poob. Max volume." and the weak
+# fallback rung (gemini-2.5-flash-lite) routed {action: skip} — the song got
+# skipped instead of louder. Two structural gaps made the old net useless
+# here: it only ran when NO tool was routed, and it couldn't see past the
+# "Hey, Poob." wake prefix the voice transcript keeps. The unified override
+# now runs on every routing result and strips wake/attribution heads before
+# the exact-phrase match. See
+# docs/incidents/control-command-misroute-by-weak-rung.md.
+
+
+def test_control_override_corrects_max_volume_misrouted_to_skip() -> None:
+    """The exact prod failure, wake prefix and all."""
+    b = _brain()
+    assert b._music_safety_net(
+        "Hey, Poob. Max volume.", "music_assistant", {"action": "skip"}
+    ) == ("music_assistant", {"action": "volume", "value": 200})
+
+
+def test_control_override_volume_phrases() -> None:
+    b = _brain()
+    for phrase, expected in (
+        ("max volume", {"action": "volume", "value": 200}),
+        ("full volume", {"action": "volume", "value": 200}),
+        ("mute", {"action": "volume", "value": 0}),
+        ("louder", {"action": "volume_up"}),
+        ("turn it up", {"action": "volume_up"}),
+        ("quieter", {"action": "volume_down"}),
+        ("turn it down", {"action": "volume_down"}),
+    ):
+        assert b._music_safety_net(phrase, None, None) == (
+            "music_assistant",
+            expected,
+        ), phrase
+
+
+def test_control_override_skip_phrases_wake_aware() -> None:
+    b = _brain()
+    for msg in ("skip", "Poob, skip.", "hey poob skip", "next song", "skip this one"):
+        assert b._music_safety_net(msg, None, None) == (
+            "music_assistant",
+            {"action": "skip"},
+        ), msg
+
+
+def test_control_override_sees_past_speaker_attribution_on_voice() -> None:
+    """Voice without a passive transcript prepends 'Name: ' — the override
+    must still see the command underneath (voice=True)."""
+    b = _brain()
+    assert b._music_safety_net(
+        "Ben: Hey, Poob. Max volume.", None, None, voice=True
+    ) == ("music_assistant", {"action": "volume", "value": 200})
+
+
+def test_control_override_does_NOT_strip_attribution_on_text() -> None:
+    """Regression (review-caught): the attribution stripper matched ANY short
+    'word: ' head, so ordinary TEXT chat whose tail is a control phrase got
+    force-executed. On the text path (voice=False) the 'note to self:'/'edit:'
+    head is real content and must NOT be stripped — the LLM's routing stands.
+    See docs/incidents/control-command-misroute-by-weak-rung.md."""
+    b = _brain()
+    for msg in (
+        "note to self: skip this song",
+        "edit: next",
+        "fyi: mute",
+        "my vote: louder",
+        "ps: skip this",
+    ):
+        # No override on text — attribution head is not stripped.
+        assert b._match_control_override(msg, voice=False) is None, msg
+        # And with no tool routed, the net leaves it alone (falls to no-op).
+        assert b._music_safety_net(msg, None, None, voice=False) == (None, None), msg
+    # The SAME shape on the voice path (a real 'Speaker: ' prepend) DOES strip.
+    assert b._match_control_override("Ben: skip this song", voice=True) == {"action": "skip"}
+
+
+def test_control_override_never_clobbers_a_routed_deal() -> None:
+    """Regression (review-caught): the unconditional net must NOT hijack a
+    correctly-routed deal_assistant. During a deal Q&A the router sends a
+    terse 'stop'/'skip'/'next' answer to the deal agent — overriding it into a
+    music action silently drops the deal command.
+    See docs/incidents/control-command-misroute-by-weak-rung.md."""
+    b = _brain()
+    for phrase in ("stop", "skip", "next", "mute"):
+        assert b._music_safety_net(phrase, "deal_assistant", {"request": phrase}) == (
+            "deal_assistant",
+            {"request": phrase},
+        ), phrase
+    # But it STILL corrects a missing route and a music<->music misroute.
+    assert b._music_safety_net("skip", None, None) == ("music_assistant", {"action": "skip"})
+    assert b._music_safety_net(
+        "max volume", "music_assistant", {"action": "skip"}
+    ) == ("music_assistant", {"action": "volume", "value": 200})
+
+
+def test_control_override_stop_now_fires_on_voice_wake_prefix() -> None:
+    """The bare-stop net was text-only before (exact match failed on the
+    wake prefix); the unified matcher covers voice too."""
+    b = _brain()
+    assert b._music_safety_net("Hey, Poob. Stop.", "music_assistant", {"action": "autoplay"}) == (
+        "music_assistant",
+        {"action": "stop"},
+    )
+
+
+def test_control_override_leaves_longer_sentences_alone() -> None:
+    """Only the WHOLE remaining command matches — sentences that merely
+    contain a control word keep the LLM's routing. (Messages with play
+    intent still hit the pre-existing play backfill when NO tool routed —
+    that behavior is separate and unchanged.)"""
+    b = _brain()
+    for msg in (
+        "what's next on the agenda",
+        "the volume knob on my amp broke",
+        "2:30",
+    ):
+        assert b._music_safety_net(msg, None, None) == (None, None), msg
+    # With a tool already present, NONE of these longer sentences (play-
+    # flavored or not) get overridden — the control override is exact-match
+    # only and the play backfill never touches a present tool.
+    for msg in (
+        "what's next on the agenda",
+        "play the next song by AJR",
+        "skip the intro and play the chorus",
+        "the volume knob on my amp broke",
+        "2:30",
+    ):
+        assert b._music_safety_net(
+            msg, "music_assistant", {"action": "play", "query": "x"}
+        ) == ("music_assistant", {"action": "play", "query": "x"}), msg
+
+
+def test_control_override_no_log_when_routing_was_already_right() -> None:
+    """Same action already routed -> forced args still returned (normalizes
+    value) but it's not a 'misroute' — behavior contract only, no crash."""
+    b = _brain()
+    tool, args = b._music_safety_net("skip", "music_assistant", {"action": "skip"})
+    assert (tool, args) == ("music_assistant", {"action": "skip"})
+
+
+def test_music_routing_rules_distinguish_autoplay_from_loop() -> None:
+    """The routing prompt must carry explicit, separate anchors for autoplay
+    and loop so a weak rung stops collapsing one into the other."""
+    from poob.brain.poob import _MUSIC_ROUTING_RULES
+
+    rules = _MUSIC_ROUTING_RULES.lower()
+    assert "action=autoplay" in rules
+    assert "action=loop" in rules
+    assert "mode=one" in rules
+    assert "mode=queue" in rules
+
+
+def test_looks_like_playable_link_matches_ytdl_recognition() -> None:
+    """The url->query promotion predicate must recognize exactly what the
+    resolver can play — including scheme-less YouTube forms — so a link the
+    router put in tool_args['url'] doesn't dead-end at 'Play what?'.
+    Review-caught: it previously only accepted http/https/spotify schemes."""
+    from poob.brain.poob import _looks_like_playable_link
+
+    for link in (
+        "https://open.spotify.com/track/abc?si=x",
+        "spotify:track:abc",
+        "http://youtu.be/dQw4w9WgXcQ",
+        "https://www.youtube.com/watch?v=abc",
+        "www.youtube.com/watch?v=abc",  # scheme-less
+        "youtu.be/dQw4w9WgXcQ",  # scheme-less — the gap that dead-ended
+        "youtube.com/watch?v=abc",  # scheme-less
+    ):
+        assert _looks_like_playable_link(link) is True, link
+    for not_link in ("tiki tiki", "play some jazz", "", "backwoods 808 fishing"):
+        assert _looks_like_playable_link(not_link) is False, not_link
+
+
+# --- _is_content_free: bare-address guard ------------------------------------
+# 2026-07-11 prod: user spoke for 9.7s but STT only produced "Hey, Poob." —
+# the router back-filled {autoplay, on} from his request 17 minutes earlier
+# and acknowledged it silently. A content-free address must never reach tool
+# routing. See docs/incidents/bare-wake-address-routes-hallucinated-tool.md.
+
+
+def test_is_content_free_on_bare_addresses() -> None:
+    b = _brain()
+    # Wake-only reductions are content-free regardless of path.
+    for msg in ("Hey, Poob.", "Poob", "hey poob!!!", "Poob?"):
+        assert b._is_content_free(msg, voice=False) is True, msg
+        assert b._is_content_free(msg, voice=True) is True, msg
+    # The 'Speaker: ' voice prepend only reduces to empty on the voice path.
+    assert b._is_content_free("Ben: Hey, Poob.", voice=True) is True
+    assert b._is_content_free("Ben: Hey, Poob.", voice=False) is False
+
+
+def test_is_content_free_false_when_content_present() -> None:
+    b = _brain()
+    for msg in (
+        "Hey, Poob. Max volume.",
+        "Hey, Poob. Hmm.",
+        "hi",
+        "play tiki tiki",
+        "Hey Poob play thirsty thirsty Thursday",
+    ):
+        assert b._is_content_free(msg, voice=True) is False, msg
+        assert b._is_content_free(msg, voice=False) is False, msg
+
+
+@pytest.mark.asyncio
+async def test_content_free_address_skips_tool_routing_entirely() -> None:
+    """respond() must not consult the tool router for a bare address — even
+    a router that WOULD return a tool (the prod hallucination) is bypassed,
+    and the casual reply path answers instead."""
+    b = PoobBrain(deal_agent=None, groq_api_key="test-key")
+    b._music_handler = object()  # music wired, so the temptation exists
+
+    with (
+        patch.object(
+            b,
+            "_groq_with_tools",
+            new=AsyncMock(return_value=("", "music_assistant", {"action": "autoplay", "mode": "on"})),
+        ) as router,
+        patch.object(
+            b, "_casual_text_fallback", new=AsyncMock(return_value="what's up")
+        ),
+        patch.object(b, "_handle_music", new=AsyncMock()) as handle_music,
+    ):
+        out = await b.respond("Hey, Poob.", user_id="u1", guild_id=10)
+
+    router.assert_not_awaited()
+    handle_music.assert_not_called()
+    assert out == "what's up"
+
+
+@pytest.mark.asyncio
+async def test_message_with_content_still_routes_normally() -> None:
+    """The guard is narrow: any real content keeps the normal routing path."""
+    b = PoobBrain(deal_agent=None, groq_api_key="test-key")
+    b._music_handler = object()
+
+    with (
+        patch.object(
+            b,
+            "_groq_with_tools",
+            new=AsyncMock(return_value=("", "music_assistant", {"action": "play", "query": "tiki tiki"})),
+        ) as router,
+        patch.object(
+            b, "_handle_music", new=AsyncMock(return_value="Playing tiki tiki.")
+        ) as handle_music,
+    ):
+        out = await b.respond("Hey, Poob. Play tiki tiki.", user_id="u1", guild_id=10)
+
+    router.assert_awaited_once()
+    handle_music.assert_called_once()
+    assert out == "Playing tiki tiki."
 
 
 # --- _music_safety_net: bare-autoplay override (2026-07-09 prod regression) -

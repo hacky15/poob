@@ -14,6 +14,15 @@ Resolved incidents stay `status: resolved`. Open ones stay `status: active`. If 
 
 ## Entries
 
+### 2026-07
+
+- [[now-playing-card-snapshot-after-brain-call]] — the now-playing card stopped posting for text play requests: the `track_before` snapshot ran AFTER the brain call (contradicting its own comment), so the track that started mid-call was the baseline and the change-poll timed out. Fixed by snapshotting before the call; the poll helper unchanged (2026-07-12, resolved)
+- [[music-text-wrap-inherited-deal-instructions]] — (backfilled note) text music replies narrated absent deal categories because the text path reused the deal wrap; fixed 2026-07-03 with a music-only Poob text wrap, later superseded by the Toob wrap (2026-07-03, resolved → [[music-text-replies-are-toob]])
+- [[spotify-track-link-play-dead-end]] — pasted Spotify track link → {play, url:…} → "play what?" ("Yeah. It didn't work."): the play path only read `query`, the resolver was playlist-only, and a Spotify playlist URL via play would trap in the YT extractor. Fixed: url→query promotion at both brain gates, `resolve_track` metadata→YT-search, playlist links delegate to the shared Spotify flow (2026-07-11, resolved)
+- [[bare-wake-address-routes-hallucinated-tool]] — a bare "Hey, Poob." (STT dropped 9.7s of speech) routed to {autoplay, on}, echoing a request from 17 min earlier, acked silently so the user heard nothing. Fixed: content-free addresses skip tool routing entirely and get a casual reply (2026-07-11, resolved)
+- [[control-command-misroute-by-weak-rung]] — "max volume" skipped the song (and "bass boost" applied *slowed*): gemini-flash-lite hallucinates actions for terse control commands, and the deterministic net couldn't catch it — it only ran when NO tool was routed and couldn't see past the voice wake prefix. Fixed: unified wake/attribution-aware control override (stop/skip/volume/autoplay/loop) run unconditionally on every routing result (2026-07-11, resolved)
+- [[autoplay-request-enables-loop-one]] — "turn autoplay on" silently enabled LOOP_ONE (same song forever, new requests never played); three stacked defects: the `loop` handler ignored its `mode` arg and blind-cycled, the router had no autoplay/loop examples so gemini-flash-lite collapsed one into the other, and the schema gave loop no way to express a target. Fixed: handler honors the target (cycle only for the bare button), routing rules + schema distinguish autoplay from loop, deterministic safety net for the exact phrases (2026-07-11, resolved)
+
 ### 2026-06
 
 - [[cascade-outage-nvidia-hang-gemini-rpm]] — ~15.5s to first word on every VC turn: Groq daily-capped + Gemini burst-throttled (20 RPM/model) + Scout capped + NVIDIA NIM hung; each turn paid the full 15s REST timeout re-probing the hung rung. Fixed: consecutive-timeout ejection (2 → 120s cooldown), routing timeout 15s→6s, Gemini body/"retry in" parsing, second Gemini model rung. Also surfaced: routing prompt ≈4k tokens/call → only ~50 Groq turns/day (2026-06-09, resolved)

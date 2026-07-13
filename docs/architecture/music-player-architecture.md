@@ -69,7 +69,7 @@ All yt-dlp calls run in ThreadPoolExecutor (3 workers, dedicated pool) — yt-dl
 
 List-backed (not deque) — queues need random access for display pagination, `random.shuffle()`, and remove-by-index. `pop(0)` performance on sub-500 queues is negligible.
 
-Loop modes: `OFF → LOOP_ONE → LOOP_QUEUE`, resolved in a single `get_next()` method.
+Loop modes: `OFF → LOOP_ONE → LOOP_QUEUE`, resolved in a single `get_next()` method. The `loop` **action** honors an explicit target (`off`/`one`/`queue` via `mode`, or `value` as a fallback) and `set_loop_mode`s it; it cycles via `cycle_loop_mode()` only when no target is given (the 🔁 button's contract). Blind-cycling on an explicit target is the [[autoplay-request-enables-loop-one]] bug — see [[control-action-must-honor-explicit-target]].
 
 Shuffle: Fisher-Yates with saved original order. Unshuffle restores only the remaining tracks.
 

@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from poob.discord_bot.cogs.music_cog import MusicCog
-from poob.music.queue import Track
+from poob.music.queue import LoopMode, MusicQueue, Track
 
 
 def _t(name: str) -> Track:
@@ -879,6 +879,348 @@ async def test_autoplay_missing_mode_returns_help() -> None:
     assert resp.startswith("[SILENT]")
     assert "mode" in resp.lower() or "on" in resp.lower()
     assert player.autoplay_enabled is False  # untouched on bad input
+
+
+# ---------------------------------------------------------------------------
+# loop action dispatch — honor the explicit target, cycle only on bare toggle.
+#
+# Regression: the handler used to call cycle_loop_mode() unconditionally,
+# discarding the mode/value the router passed. "turn loop off" then CYCLED
+# (OFF -> LOOP_ONE), so loop could never be turned off and a misrouted
+# "autoplay on" enabled LOOP_ONE — replaying the same song forever. The 🔁
+# button still sends {action: loop} with no mode and MUST keep cycling.
+# See docs/incidents/autoplay-request-enables-loop-one.md.
+# ---------------------------------------------------------------------------
+
+
+def _make_cog_and_real_queue() -> tuple[MusicCog, MagicMock]:
+    """Like _make_cog_and_player but with a REAL MusicQueue so loop-mode
+    transitions can be asserted for real (not a MagicMock stand-in)."""
+    cog, player = _make_cog_and_player()
+    player.queue = MusicQueue()
+    return cog, player
+
+
+@pytest.mark.asyncio
+async def test_loop_off_sets_off_from_loop_one() -> None:
+    cog, player = _make_cog_and_real_queue()
+    player.queue.set_loop_mode(LoopMode.LOOP_ONE)
+
+    resp = await cog.handle_music_request(
+        "turn off loop",
+        user_id=1,
+        guild_id=10,
+        tool_args={"action": "loop", "mode": "off"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert "off" in resp.lower()
+    assert player.queue.loop_mode is LoopMode.OFF
+
+
+@pytest.mark.asyncio
+async def test_loop_off_stays_off_when_already_off() -> None:
+    """The exact prod bug: "loop off" while already OFF must NOT cycle to
+    LOOP_ONE. Honoring the target makes this idempotent."""
+    cog, player = _make_cog_and_real_queue()
+    assert player.queue.loop_mode is LoopMode.OFF
+
+    resp = await cog.handle_music_request(
+        "turn off loop",
+        user_id=1,
+        guild_id=10,
+        tool_args={"action": "loop", "mode": "off"},
+    )
+
+    assert player.queue.loop_mode is LoopMode.OFF
+    assert "off" in resp.lower()
+
+
+@pytest.mark.asyncio
+async def test_loop_one_sets_loop_one() -> None:
+    cog, player = _make_cog_and_real_queue()
+
+    resp = await cog.handle_music_request(
+        "loop this song",
+        user_id=1,
+        guild_id=10,
+        tool_args={"action": "loop", "mode": "one"},
+    )
+
+    assert player.queue.loop_mode is LoopMode.LOOP_ONE
+    assert "current" in resp.lower() or "track" in resp.lower()
+
+
+@pytest.mark.asyncio
+async def test_loop_queue_sets_loop_queue() -> None:
+    cog, player = _make_cog_and_real_queue()
+
+    resp = await cog.handle_music_request(
+        "loop the whole queue",
+        user_id=1,
+        guild_id=10,
+        tool_args={"action": "loop", "mode": "queue"},
+    )
+
+    assert player.queue.loop_mode is LoopMode.LOOP_QUEUE
+    assert "queue" in resp.lower()
+
+
+@pytest.mark.asyncio
+async def test_loop_target_accepted_via_value_field() -> None:
+    """STT/model sometimes packs the target in 'value' ({loop, value: 'off'},
+    observed in prod). Read value as a fallback for mode."""
+    cog, player = _make_cog_and_real_queue()
+    player.queue.set_loop_mode(LoopMode.LOOP_ONE)
+
+    resp = await cog.handle_music_request(
+        "loop off",
+        user_id=1,
+        guild_id=10,
+        tool_args={"action": "loop", "value": "off"},
+    )
+
+    assert player.queue.loop_mode is LoopMode.OFF
+    assert "off" in resp.lower()
+
+
+@pytest.mark.asyncio
+async def test_loop_bare_toggle_cycles_for_button() -> None:
+    """The 🔁 button sends {action: loop} with NO mode -> must CYCLE
+    OFF -> LOOP_ONE -> LOOP_QUEUE -> OFF (behavior preserved)."""
+    cog, player = _make_cog_and_real_queue()
+    assert player.queue.loop_mode is LoopMode.OFF
+
+    await cog.handle_music_request("", 1, 10, tool_args={"action": "loop"})
+    assert player.queue.loop_mode is LoopMode.LOOP_ONE
+    await cog.handle_music_request("", 1, 10, tool_args={"action": "loop"})
+    assert player.queue.loop_mode is LoopMode.LOOP_QUEUE
+    await cog.handle_music_request("", 1, 10, tool_args={"action": "loop"})
+    assert player.queue.loop_mode is LoopMode.OFF
+
+
+@pytest.mark.asyncio
+async def test_loop_status_reports_without_mutating() -> None:
+    cog, player = _make_cog_and_real_queue()
+    player.queue.set_loop_mode(LoopMode.LOOP_QUEUE)
+
+    resp = await cog.handle_music_request(
+        "what's the loop mode",
+        user_id=1,
+        guild_id=10,
+        tool_args={"action": "loop", "mode": "status"},
+    )
+
+    assert player.queue.loop_mode is LoopMode.LOOP_QUEUE  # unchanged
+    assert "queue" in resp.lower()
+
+
+@pytest.mark.asyncio
+async def test_loop_unrecognized_mode_falls_back_to_cycle() -> None:
+    """A garbage/effect-flavored value must not crash — fall back to the
+    historical cycle behavior rather than raising."""
+    cog, player = _make_cog_and_real_queue()
+    assert player.queue.loop_mode is LoopMode.OFF
+
+    resp = await cog.handle_music_request(
+        "loop",
+        user_id=1,
+        guild_id=10,
+        tool_args={"action": "loop", "mode": "add"},
+    )
+
+    assert resp.startswith("[SILENT]")
+    assert player.queue.loop_mode is LoopMode.LOOP_ONE  # cycled OFF -> ONE
+
+
+def test_music_tool_schema_mode_supports_loop_targets() -> None:
+    from poob.brain.poob import MUSIC_TOOL
+
+    mode = MUSIC_TOOL["function"]["parameters"]["properties"]["mode"]
+    assert "one" in mode["enum"]
+    assert "queue" in mode["enum"]
+    assert "loop" in mode["description"].lower()
+
+
+# ---------------------------------------------------------------------------
+# play: pasted links — url-arg fallback + Spotify track/playlist resolution.
+# 2026-07-11 prod: a pasted Spotify track link routed to {play, url:...} and
+# died in "What do you want me to play?" ("Yeah. It didn't work.").
+# See docs/incidents/spotify-track-link-play-dead-end.md.
+# ---------------------------------------------------------------------------
+
+
+def _t_short(name: str) -> Track:
+    return Track(title=name, url=f"https://example.com/{name}", duration=timedelta(seconds=200))
+
+
+def _wire_same_vc(cog: MusicCog) -> None:
+    """Put the mock requester in the same VC as the bot.
+
+    The 'play' fall-through (unlike named control actions) enforces the
+    same-VC gate; two distinct MagicMocks compare unequal, so the requester
+    must share the exact channel object with the voice client."""
+    guild = cog.bot.get_guild.return_value
+    guild.voice_client.is_connected.return_value = True
+    guild.get_member.return_value.voice.channel = guild.voice_client.channel
+
+
+@pytest.mark.asyncio
+async def test_play_uses_url_arg_when_query_missing() -> None:
+    """A YouTube link the router put in 'url' plays as if it were the query."""
+    cog, player = _make_cog_and_player()
+    _wire_same_vc(cog)
+    player.play = AsyncMock()
+    cog._ytdl = MagicMock()
+    cog._ytdl.search = AsyncMock(return_value=_t_short("Linked Song"))
+
+    resp = await cog.handle_music_request(
+        "play this",
+        user_id=1,
+        guild_id=10,
+        tool_args={"action": "play", "url": "https://youtu.be/abc123"},
+    )
+
+    cog._ytdl.search.assert_awaited_once()
+    assert cog._ytdl.search.await_args.args[0] == "https://youtu.be/abc123"
+    assert "Linked Song" in resp
+
+
+@pytest.mark.asyncio
+async def test_play_spotify_track_link_resolves_metadata_then_searches() -> None:
+    """Spotify track link → title+artist via resolver → normal YT search."""
+    cog, player = _make_cog_and_player()
+    _wire_same_vc(cog)
+    player.play = AsyncMock()
+    cog._ytdl = MagicMock()
+    cog._ytdl.search = AsyncMock(return_value=_t_short("The Heavy - Short Change Hero"))
+    resolver = MagicMock()
+    resolver.is_configured.return_value = True
+    resolver.resolve_track = AsyncMock(
+        return_value={"title": "Short Change Hero", "artist": "The Heavy"}
+    )
+    cog._spotify_resolver = resolver
+
+    resp = await cog.handle_music_request(
+        "play this",
+        user_id=1,
+        guild_id=10,
+        tool_args={
+            "action": "play",
+            "query": "https://open.spotify.com/track/0gfkjiPutU79nqcPbcR1NR?si=x",
+        },
+    )
+
+    resolver.resolve_track.assert_awaited_once()
+    assert cog._ytdl.search.await_args.args[0] == "Short Change Hero The Heavy"
+    assert "Short Change Hero" in resp
+
+
+@pytest.mark.asyncio
+async def test_play_spotify_track_link_unconfigured_gives_honest_error() -> None:
+    cog, player = _make_cog_and_player()
+    _wire_same_vc(cog)
+    cog._ytdl = MagicMock()
+    cog._ytdl.search = AsyncMock()
+    cog._spotify_resolver = None
+
+    resp = await cog.handle_music_request(
+        "play this",
+        user_id=1,
+        guild_id=10,
+        tool_args={"action": "play", "query": "spotify:track:abc123"},
+    )
+
+    cog._ytdl.search.assert_not_called()
+    assert "spotify" in resp.lower()
+    assert "song name" in resp.lower()
+
+
+@pytest.mark.asyncio
+async def test_play_spotify_track_resolve_failure_gives_honest_error() -> None:
+    cog, player = _make_cog_and_player()
+    _wire_same_vc(cog)
+    cog._ytdl = MagicMock()
+    cog._ytdl.search = AsyncMock()
+    resolver = MagicMock()
+    resolver.is_configured.return_value = True
+    resolver.resolve_track = AsyncMock(return_value=None)
+    cog._spotify_resolver = resolver
+
+    resp = await cog.handle_music_request(
+        "play this",
+        user_id=1,
+        guild_id=10,
+        tool_args={"action": "play", "query": "spotify:track:abc123"},
+    )
+
+    cog._ytdl.search.assert_not_called()
+    assert "couldn't read" in resp.lower() or "song name" in resp.lower()
+
+
+@pytest.mark.asyncio
+async def test_play_spotify_playlist_link_routes_to_spotify_flow() -> None:
+    """A Spotify PLAYLIST link pasted with 'play' must go through the
+    Spotify resolver flow — NOT the YouTube playlist extractor (yt-dlp
+    can't read Spotify; the '/playlist' substring check would trap it)."""
+    cog, player = _make_cog_and_player()
+    _wire_same_vc(cog)
+    player.play = AsyncMock()
+    cog._ytdl = MagicMock()
+    cog._ytdl.get_playlist_tracks = AsyncMock()
+    cog._ytdl.search = AsyncMock(return_value=_t_short("Song A"))
+    resolver = MagicMock()
+    resolver.is_configured.return_value = True
+    resolver.resolve = AsyncMock(return_value=[{"title": "Song A", "artist": "Artist"}])
+    cog._spotify_resolver = resolver
+
+    resp = await cog.handle_music_request(
+        "play this playlist",
+        user_id=1,
+        guild_id=10,
+        tool_args={
+            "action": "play",
+            "query": "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M",
+        },
+    )
+
+    resolver.resolve.assert_awaited_once()
+    cog._ytdl.get_playlist_tracks.assert_not_called()
+    assert "Song A" in resp
+
+
+@pytest.mark.asyncio
+async def test_queue_spotify_playlist_action_still_works_via_shared_helper() -> None:
+    """The extracted helper serves the original action unchanged."""
+    cog, player = _make_cog_and_player()
+    player.play = AsyncMock()
+    player.is_playing = False
+    cog._ytdl = MagicMock()
+    cog._ytdl.search = AsyncMock(
+        side_effect=[_t_short("Song A"), _t_short("Song B")]
+    )
+    resolver = MagicMock()
+    resolver.is_configured.return_value = True
+    resolver.resolve = AsyncMock(
+        return_value=[
+            {"title": "Song A", "artist": "X"},
+            {"title": "Song B", "artist": "Y"},
+        ]
+    )
+    cog._spotify_resolver = resolver
+
+    resp = await cog.handle_music_request(
+        "queue my playlist",
+        user_id=1,
+        guild_id=10,
+        tool_args={
+            "action": "queue_spotify_playlist",
+            "url": "https://open.spotify.com/playlist/abc",
+        },
+    )
+
+    assert player.play.await_count == 2
+    assert "Song A" in resp
 
 
 # ---------------------------------------------------------------------------

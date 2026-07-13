@@ -3,10 +3,16 @@ type: decision
 status: active
 date: 2026-05-01
 tags: [music, ytdl, search, voice]
-related: [[music-player-architecture]] [[one-handler-music-contract]] [[voice-three-failure-modes-april27]]
+related: [[music-player-architecture]] [[one-handler-music-contract]] [[voice-three-failure-modes-april27]] [[music-search-candidate-rerank]]
 ---
 
 # Music search: two-pass fallback (ytsearch1 → ytsearch5) instead of "couldn't find"
+
+> **2026-07-11 tuning:** the "future tuning … only after the data shows it's
+> needed" clause below triggered — take-first queued a 31-minute pottery video
+> and a 2-hour drama compilation for song requests. The two-pass structure and
+> the best-guess-over-dead-end principle stand; the widened pass now RE-RANKS
+> candidates by song-plausibility. See [[music-search-candidate-rerank]].
 
 ## Context
 

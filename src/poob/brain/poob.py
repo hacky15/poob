@@ -19,8 +19,7 @@ import time
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Awaitable
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Awaitable, ClassVar
 
 import httpx
 
@@ -130,9 +129,9 @@ _MUSIC_ROUTING_RULES = (
     "music' → action=stop. 'skip' / 'next' → action=skip. 'pause' → "
     "action=pause. (For 'unpause'/'resume', see action=restore below — it "
     "already covers both cases.)\n"
-    "AUTOPLAY is a MODE TOGGLE, never an effect: 'autoplay on'→"
-    "action=autoplay, mode='on'. 'autoplay off'→mode='off'. 'autoplay "
-    "status'→mode='status'. Never apply_effect for this.\n"
+    "AUTOPLAY = mode toggle (NOT an effect, NOT loop): action=autoplay, "
+    "mode=on|off|status. LOOP = repeat: 'loop this'→action=loop, mode=one; "
+    "'loop the queue'→mode=queue; 'turn off loop'→mode=off.\n"
     "AUDIO EFFECTS ROUTING (effects STACK — layering is the default):\n"
     "- 'nightcore it' / 'make it nightcore' → action=apply_effect, effect='nightcore'\n"
     "- 'slow it down' / 'slowed' → action=apply_effect, effect='slowed'\n"
@@ -390,8 +389,12 @@ MUSIC_TOOL = {
                         "positions. 'save_playlist'/'load_playlist'/"
                         "'delete_playlist' use 'name'; 'list_playlists' has no "
                         "args. 'queue_spotify_playlist' uses 'url'. 'leave' "
-                        "disconnects. skip/pause/resume/stop/shuffle/loop/"
-                        "now_playing/queue/clear are self-explanatory."
+                        "disconnects. 'autoplay' streams NEW similar songs when "
+                        "the queue ends (set 'mode' on/off/status); 'loop' "
+                        "REPEATS the current song or whole queue (set 'mode' "
+                        "one/queue/off) — autoplay and loop are NOT the same. "
+                        "skip/pause/resume/stop/shuffle/now_playing/queue/clear "
+                        "are self-explanatory."
                     ),
                 },
                 "query": {
@@ -463,9 +466,23 @@ MUSIC_TOOL = {
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["on", "off", "status", "add", "replace", "remove", "more", "less"],
+                    "enum": [
+                        "on",
+                        "off",
+                        "status",
+                        "one",
+                        "queue",
+                        "add",
+                        "replace",
+                        "remove",
+                        "more",
+                        "less",
+                    ],
                     "description": (
-                        "For 'autoplay': on/off/status. For 'apply_effect': "
+                        "For 'autoplay': on/off/status (NEW similar songs after "
+                        "the queue ends). For 'loop': one (repeat the current "
+                        "song), queue (repeat the whole queue), off (stop "
+                        "looping) — loop is NOT autoplay. For 'apply_effect': "
                         "'add' (default — stack/layer), 'replace' ('only X' — "
                         "sole effect), 'remove' (drop one), 'more'/'less' "
                         "(crank an adjustable effect up/down: 'more reverb', "
@@ -489,7 +506,10 @@ MUSIC_TOOL = {
                         "action. Accepts both the web form "
                         "(https://open.spotify.com/playlist/<id>) and the URI "
                         "form (spotify:playlist:<id>). Query-string suffix "
-                        "(?si=...) is fine; resolver strips it."
+                        "(?si=...) is fine; resolver strips it. For a pasted "
+                        "single-track link with 'play' (Spotify track URL, "
+                        "YouTube URL), put the link in 'query' instead — "
+                        "'play' handles links."
                     ),
                 },
             },
@@ -569,6 +589,23 @@ def _strip_channel_context(content: str) -> str:
     """Remove the passive-crosstalk wrapper from a routing message (the crosstalk
     is generation-only — it colors the persona reply, not intent classification)."""
     return _CHANNEL_CTX_PREFIX_RE.sub("", content, count=1)
+
+
+def _looks_like_playable_link(text: str) -> bool:
+    """True for a URL/URI the music handler can resolve — mirrors
+    ``AsyncYTDL._looks_like_url`` (http/https/www, youtube.com, youtu.be) plus
+    Spotify's ``spotify:`` scheme. Used to promote a link the router placed in
+    ``tool_args['url']`` into the play query when ``query`` is empty, so the
+    promotion recognizes exactly what the resolver can play — no scheme-less
+    YouTube link dead-ends at "Play what?". See
+    docs/incidents/spotify-track-link-play-dead-end.md.
+    """
+    low = text.strip().lower()
+    return (
+        low.startswith(("http://", "https://", "www.", "spotify:"))
+        or "youtube.com" in low
+        or "youtu.be" in low
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -704,83 +741,258 @@ class PoobBrain:
         {"stop", "stop it", "stop the music", "stop the song", "stop playing"}
     )
 
-    # Bare, unambiguous autoplay-toggle phrases -- same failure class as
-    # _BARE_STOP_PHRASES above (2026-07-09 prod: gemini-2.5-flash-lite routed
-    # "autoplay turn ON" to {action: apply_effect, effect: faster, mode:
-    # more} after several consecutive apply_effect calls biased the passive
-    # context toward that action). Maps a normalized phrase straight to the
-    # mode, since unlike "stop" this command has three real outcomes.
-    # See docs/incidents/autoplay-misrouted-to-apply-effect.md.
-    _BARE_AUTOPLAY_PHRASES: MappingProxyType[str, str] = MappingProxyType(
+    # Deterministic autoplay/loop overrides — same rationale as bare-stop:
+    # the weak fallback rung confuses autoplay <-> loop (they had NO anchoring
+    # example in the routing prompt), and these EXACT phrases have no other
+    # plausible reading. Narrow by design (whole-message match only), so a
+    # longer sentence that merely contains "loop" keeps the LLM's routing.
+    # See docs/incidents/autoplay-request-enables-loop-one.md.
+    _AUTOPLAY_ON_PHRASES: frozenset[str] = frozenset(
         {
-            "autoplay on": "on",
-            "autoplay turn on": "on",
-            "turn on autoplay": "on",
-            "turn autoplay on": "on",
-            "enable autoplay": "on",
-            "autoplay enable": "on",
-            "autoplay off": "off",
-            "autoplay turn off": "off",
-            "turn off autoplay": "off",
-            "turn autoplay off": "off",
-            "disable autoplay": "off",
-            "autoplay disable": "off",
-            "autoplay status": "status",
-            "is autoplay on": "status",
+            "autoplay on",
+            "autoplay turn on",
+            "turn on autoplay",
+            "turn autoplay on",
+            "enable autoplay",
+            "autoplay enable",
+            "start autoplay",
+            "put autoplay on",
+            "put on autoplay",
         }
     )
+    _AUTOPLAY_OFF_PHRASES: frozenset[str] = frozenset(
+        {
+            "autoplay off",
+            "autoplay turn off",
+            "turn off autoplay",
+            "turn autoplay off",
+            "disable autoplay",
+            "autoplay disable",
+            "stop autoplay",
+            "stop autoplaying",
+            "put autoplay off",
+            "no more autoplay",
+        }
+    )
+    # Autoplay STATUS query (report current state, no mutation). Folded in from
+    # the 2026-07-09 bare-autoplay audit (64ac9e0) when its _BARE_AUTOPLAY_PHRASES
+    # was consolidated into this override table.
+    _AUTOPLAY_STATUS_PHRASES: frozenset[str] = frozenset(
+        {"autoplay status", "is autoplay on", "autoplay?"}
+    )
+    _LOOP_OFF_PHRASES: frozenset[str] = frozenset(
+        {
+            "loop off",
+            "turn off loop",
+            "turn loop off",
+            "turn off the loop",
+            "stop looping",
+            "stop the loop",
+            "stop repeating",
+            "no loop",
+            "no more loop",
+            "disable loop",
+        }
+    )
+    # Volume / skip control phrases — unambiguous single-command utterances a
+    # weak fallback rung also hallucinates on (2026-07-11 prod: "max volume"
+    # routed to {action: skip}). Same narrow whole-command discipline as the
+    # stop/autoplay/loop sets. See docs/incidents/control-command-misroute-by-weak-rung.
+    _MAX_VOLUME_PHRASES: frozenset[str] = frozenset(
+        {
+            "max volume",
+            "maximum volume",
+            "full volume",
+            "max the volume",
+            "max out the volume",
+            "volume to the max",
+            "volume max",
+            "loudest",
+        }
+    )
+    _MUTE_PHRASES: frozenset[str] = frozenset(
+        {"mute", "mute it", "mute the music", "mute the volume"}
+    )
+    _LOUDER_PHRASES: frozenset[str] = frozenset(
+        {
+            "louder",
+            "turn it up",
+            "turn up the volume",
+            "turn the volume up",
+            "volume up",
+            "make it louder",
+        }
+    )
+    _QUIETER_PHRASES: frozenset[str] = frozenset(
+        {
+            "quieter",
+            "turn it down",
+            "turn down the volume",
+            "turn the volume down",
+            "volume down",
+            "make it quieter",
+            "softer",
+        }
+    )
+    _SKIP_PHRASES: frozenset[str] = frozenset(
+        {
+            "skip",
+            "skip it",
+            "skip this",
+            "skip this song",
+            "skip the song",
+            "skip this one",
+            "next",
+            "next song",
+            "next track",
+        }
+    )
+
+    # Ordered (phrase-set -> forced tool_args) table, checked after the leading
+    # wake/address token is stripped. dict values are templates — callers copy
+    # before returning. ClassVar: a shared class constant, NOT a dataclass field.
+    _CONTROL_OVERRIDES: ClassVar[tuple[tuple[frozenset[str], dict[str, str | int]], ...]] = (
+        (_BARE_STOP_PHRASES, {"action": "stop"}),
+        (_SKIP_PHRASES, {"action": "skip"}),
+        (_MAX_VOLUME_PHRASES, {"action": "volume", "value": 200}),
+        (_MUTE_PHRASES, {"action": "volume", "value": 0}),
+        (_LOUDER_PHRASES, {"action": "volume_up"}),
+        (_QUIETER_PHRASES, {"action": "volume_down"}),
+        (_AUTOPLAY_ON_PHRASES, {"action": "autoplay", "mode": "on"}),
+        (_AUTOPLAY_OFF_PHRASES, {"action": "autoplay", "mode": "off"}),
+        (_AUTOPLAY_STATUS_PHRASES, {"action": "autoplay", "mode": "status"}),
+        (_LOOP_OFF_PHRASES, {"action": "loop", "mode": "off"}),
+    )
+
+    # Leading wake/address token the STT keeps in the transcript ("Hey, Poob.
+    # max volume"). Stripped ONLY for control-override matching so a voice
+    # command still matches its exact phrase — the message sent to the handler
+    # is untouched. Covers the documented poob phonetic mis-hears
+    # (poop/boop/pube/pood). See docs/incidents/wake-address-hey-dropout.md.
+    _WAKE_PREFIX_RE = re.compile(
+        r"^\s*(?:(?:hey|hi|ok|okay|yo)[\s,]+)?"
+        r"(?:poob|poobs|poop|boop|pube|pood|pooh)\b[\s,.!?:-]*",
+        re.IGNORECASE,
+    )
+
+    # Leading "SpeakerName: " attribution the voice session prepends when it
+    # has no passive transcript to wrap ("Ben: Hey, Poob. Max volume."). Only
+    # stripped for override matching, and only a SHORT colon-terminated head —
+    # the exact-phrase check after stripping is the real safety gate.
+    _SPEAKER_ATTRIBUTION_RE = re.compile(r"^\s*[^:\n]{1,40}:\s+")
+
+    def _head_stripped_variants(self, clean_message: str, voice: bool) -> list[str]:
+        """Return the message plus, ONLY on the voice path, an
+        attribution-stripped variant.
+
+        The "SpeakerName: " head is prepended solely on the voice-no-passive-
+        transcript path (session builds ``"{speaker}: {text}"``). On TEXT,
+        ``clean_message`` is the user's raw content, where a leading "word: "
+        ("note to self: skip this song", "fyi: next") is real content — NOT an
+        attribution head. Stripping it there would force a control action on
+        ordinary chat, so the attribution variant is voice-only. See
+        docs/incidents/control-command-misroute-by-weak-rung.md.
+        """
+        variants = [clean_message]
+        if voice:
+            variants.append(self._SPEAKER_ATTRIBUTION_RE.sub("", clean_message, count=1))
+        return variants
+
+    def _match_control_override(
+        self, clean_message: str, voice: bool
+    ) -> dict[str, str | int] | None:
+        """Return forced tool_args for an EXACT, unambiguous control command
+        (after stripping leading speaker-attribution / wake tokens), or ``None``.
+
+        Deterministic backstop for a weak fallback rung mis-routing terse
+        control verbs (stop / skip / volume / autoplay / loop). Wake-aware so
+        it also fires on the voice path, where the transcript keeps the "Hey
+        Poob" prefix (and, without a passive transcript, a "Name: " head — see
+        ``_head_stripped_variants`` for why that head is voice-only). Matches
+        the WHOLE remaining command only, so a longer sentence that merely
+        contains a control word keeps the LLM's routing.
+        """
+        for text in self._head_stripped_variants(clean_message, voice):
+            without_wake = self._WAKE_PREFIX_RE.sub("", text, count=1)
+            norm = without_wake.strip().lower().strip(" .,!?")
+            if not norm:
+                continue
+            for phrases, forced in self._CONTROL_OVERRIDES:
+                if norm in phrases:
+                    return dict(forced)
+        return None
+
+    def _is_content_free(self, clean_message: str, voice: bool) -> bool:
+        """True when an addressed message carries NO content beyond the
+        wake/address tokens — a bare "Hey, Poob." (STT often drops the
+        rest of a long utterance).
+
+        Such messages must never reach tool routing: with nothing to route,
+        the model back-fills an action from conversation history (2026-07-11
+        prod: bare "Hey, Poob." → {autoplay, on} echoing a request from 17
+        minutes earlier, acknowledged silently so the user heard nothing).
+        See docs/incidents/bare-wake-address-routes-hallucinated-tool.md.
+        """
+        # Content-free iff ANY head-stripped variant reduces to nothing.
+        for text in self._head_stripped_variants(clean_message, voice):
+            without_wake = self._WAKE_PREFIX_RE.sub("", text, count=1)
+            norm = without_wake.strip().lower().strip(" .,!?")
+            if len(norm) < 2:
+                return True
+        return False
 
     def _music_safety_net(
         self,
         clean_message: str,
         tool_name: str | None,
         tool_args: dict | None,
+        voice: bool = False,
     ) -> tuple[str | None, dict | None]:
         """Catch obvious music requests the LLM failed to route (or routed
         WRONG).
 
-        The LLM occasionally decides to *talk about* music instead of calling
-        music_assistant — the play-intent check below catches that. Separately,
-        a bare command with no other content has no example to anchor on in
-        the routing prompt, and a weak fallback rung — or heavy recent bias
-        toward one action in the passive context — can hallucinate a bizarre
-        action for it (2026-07-06: bare "stop." routed to autoplay; 2026-07-09:
-        "autoplay turn ON" routed to apply_effect after a run of apply_effect
-        calls). The bare-phrase checks below run FIRST and override regardless
-        of what was routed, since there's no other plausible reading of these
-        exact phrases. Neither check replaces the LLM as intent classifier —
-        they only catch the most unambiguous misses.
+        Two distinct jobs:
+
+        1. **Deterministic control override** (``_match_control_override``): for
+           an EXACT, unambiguous control command — stop / skip / volume / autoplay
+           (on/off/status) / loop — force the right tool call, overriding even a
+           present but MISROUTED tool. A weak fallback rung hallucinates on terse
+           control verbs (2026-07-06 "stop." -> autoplay/on; 2026-07-09 "autoplay
+           turn ON" -> apply_effect; 2026-07-11 "max volume" -> skip). This runs
+           on EVERY routing result (see the unconditional call sites) precisely
+           so it can correct a wrong tool, and it is wake-aware so it fires on
+           the voice path too. **But it only corrects a MISSING or already-music
+           route — never a routed ``deal_assistant``**: during an active deal Q&A
+           the router sends a terse answer ("stop"/"skip"/"next") to the deal
+           agent, and hijacking that into a music action would silently drop the
+           deal command. Consolidates the earlier bare-stop and bare-autoplay
+           overrides into one table. See
+           docs/incidents/control-command-misroute-by-weak-rung.md and
+           docs/incidents/autoplay-misrouted-to-apply-effect.md.
+        2. **Play-intent backfill**: when NO tool was routed but the message is a
+           clear "play X", extract the query. This only fills the gap — it never
+           overrides a present tool.
+
+        Neither replaces the LLM as intent classifier — they catch the most
+        unambiguous misses only.
 
         Returns:
             (tool_name, tool_args) — unchanged if no override, or
             ("music_assistant", {action: ...}) if overridden.
         """
-        stripped = clean_message.strip().lower().rstrip(".!?")
-        if stripped in self._BARE_STOP_PHRASES:
-            if tool_name != "music_assistant" or (tool_args or {}).get("action") != "stop":
+        forced = self._match_control_override(clean_message, voice)
+        if forced is not None and tool_name in (None, "music_assistant"):
+            routed_action = (tool_args or {}).get("action")
+            already_right = tool_name == "music_assistant" and routed_action == forced["action"]
+            if not already_right:
                 log.warning(
-                    "Safety net overrode misrouted stop command",
+                    "Safety net overrode misrouted control command",
                     original=clean_message[:60],
                     routed_tool=tool_name,
                     routed_args=tool_args,
+                    forced=forced,
                 )
-            return "music_assistant", {"action": "stop"}
-
-        if stripped in self._BARE_AUTOPLAY_PHRASES:
-            mode = self._BARE_AUTOPLAY_PHRASES[stripped]
-            correct_args = tool_args or {}
-            if (
-                tool_name != "music_assistant"
-                or correct_args.get("action") != "autoplay"
-                or correct_args.get("mode") != mode
-            ):
-                log.warning(
-                    "Safety net overrode misrouted autoplay command",
-                    original=clean_message[:60],
-                    routed_tool=tool_name,
-                    routed_args=tool_args,
-                )
-            return "music_assistant", {"action": "autoplay", "mode": mode}
+            return "music_assistant", dict(forced)
 
         if tool_name is not None:
             return tool_name, tool_args
@@ -1095,7 +1307,15 @@ class PoobBrain:
         )
         max_tok = self.max_tokens_voice if voice else self.max_tokens
 
-        if self.groq_api_key:
+        # A bare address ("Hey, Poob." — STT dropped the rest) has nothing to
+        # route; skipping tool detection prevents the router back-filling an
+        # action from history AND saves the routing call. Casual reply below.
+        # See docs/incidents/bare-wake-address-routes-hallucinated-tool.md.
+        skip_tools = self._is_content_free(clean_message, voice)
+        if skip_tools:
+            log.info("poob.content_free_skip_tools", message=clean_message[:50])
+
+        if self.groq_api_key and not skip_tools:
             try:
                 result = await self._groq_with_tools(self._trim_for_routing(messages), max_tok)
                 if result is not None:
@@ -1108,11 +1328,17 @@ class PoobBrain:
                             tool_name = "music_assistant"
                         text = re.sub(r"\s*<function=\w+>.*?</function>\s*", "", text).strip()
 
-                    if not tool_name and self._music_handler is not None:
+                    # Run on EVERY routing result (not just no-tool) so the
+                    # deterministic control override can correct a present but
+                    # MISROUTED control command; non-control messages pass
+                    # through unchanged. See
+                    # docs/incidents/control-command-misroute-by-weak-rung.
+                    if self._music_handler is not None:
                         tool_name, tool_args = self._music_safety_net(
                             clean_message,
                             tool_name,
                             tool_args,
+                            voice,
                         )
 
                     if tool_name == "deal_assistant":
@@ -1172,7 +1398,7 @@ class PoobBrain:
         # without the hallucinated-query problem); otherwise answer casually.
         # See docs/incidents/groq-429-fallback-routed-to-deals.md.
         if self._music_handler is not None:
-            mn_tool, mn_args = self._music_safety_net(clean_message, None, None)
+            mn_tool, mn_args = self._music_safety_net(clean_message, None, None, voice)
             if mn_tool == "music_assistant":
                 try:
                     log.info("poob.groq_down_music_safety_net", message=clean_message[:50])
@@ -1239,18 +1465,29 @@ class PoobBrain:
 
         tool_name = None
         tool_args = None
-        try:
-            result = await self._groq_with_tools(self._trim_for_routing(messages), max_tok)
-            if result is not None:
-                _, tool_name, tool_args = result
-        except Exception as exc:
-            log.warning("Voice tool detection failed", error=str(exc)[:80])
+        # Bare address with no content → no tool detection (the router would
+        # back-fill an action from history: 2026-07-11 prod, "Hey, Poob." →
+        # autoplay/on). Falls straight through to the casual reply, which is
+        # the right response to being called with nothing to say. See
+        # docs/incidents/bare-wake-address-routes-hallucinated-tool.md.
+        if self._is_content_free(clean_message, voice=True):
+            log.info("poob.content_free_skip_tools", message=clean_message[:50])
+        else:
+            try:
+                result = await self._groq_with_tools(self._trim_for_routing(messages), max_tok)
+                if result is not None:
+                    _, tool_name, tool_args = result
+            except Exception as exc:
+                log.warning("Voice tool detection failed", error=str(exc)[:80])
 
-        if not tool_name and self._music_handler is not None:
+        # Unconditional for the same reason as the text path: the control
+        # override must be able to correct a present but MISROUTED tool.
+        if self._music_handler is not None:
             tool_name, tool_args = self._music_safety_net(
                 clean_message,
                 tool_name,
                 tool_args,
+                voice=True,
             )
 
         # --- Step 2a: Music tool detected → Toob responds (rarely Boob) ---
@@ -1629,6 +1866,15 @@ class PoobBrain:
             # → action=play, query=""). Don't fan out to ytdl, don't
             # speak a confused "couldn't find it" recovery line —
             # ask once, cleanly.
+            # A pasted link often lands in 'url' instead of 'query' —
+            # promote it before concluding the request is empty. The
+            # handler resolves Spotify/YouTube links from the query. See
+            # docs/incidents/spotify-track-link-play-dead-end.md.
+            if len(query) < 2:
+                url_fallback = str(tool_args.get("url") or "").strip()
+                if _looks_like_playable_link(url_fallback):
+                    query = url_fallback
+                    tool_args = {**tool_args, "query": query}
             if len(query) < 2:
                 log.info(
                     "music.play empty query — prompting user",
@@ -1684,6 +1930,7 @@ class PoobBrain:
                         original_message,
                         None,
                         None,
+                        voice,
                     )
                     # Scrub the re-derived query through the same boundary
                     # sanitizer as the happy path — the safety net strips only
@@ -1767,9 +2014,13 @@ class PoobBrain:
             # do you have → 'you poor soul' (no list)" bug. The caller still
             # yields the persona voice sentinel, so it's spoken in-character but
             # with the real content. See decisions/music-effect-stacking.
+            # Text mode tags the reply with VOICE_TOOB so the agent handler
+            # speaks it in Toob's voice — parity with the streaming path,
+            # which yields the sentinel itself (never embed it for voice, or
+            # it leaks into TTS). See decisions/music-text-replies-are-toob.
             clean = music_response[7:].strip()
             self._save_response(guild_id, user_id, clean)
-            return clean
+            return clean if voice else VOICE_TOOB + clean
 
         if music_response.startswith("[SILENT]"):
             clean = music_response[8:].strip()
@@ -1791,90 +2042,19 @@ class PoobBrain:
             self._save_response(guild_id, user_id, music_response)
             return music_response
 
-        wrapped = await self._wrap_music_response_text(
+        # Text music replies are TOOB's — same dark one-liner wrap the voice
+        # path uses, tagged with the VOICE_TOOB sentinel so the agent handler
+        # strips it from the posted text and speaks the reply in Toob's voice
+        # when the requester shares the VC. History saves the CLEAN text (the
+        # sentinel is transport, not content). Supersedes the "text stays
+        # Poob" convention — see decisions/music-text-replies-are-toob.
+        wrapped = await self._wrap_music_response(
             original_message,
             music_response,
             max_tok,
         )
         self._save_response(guild_id, user_id, wrapped)
-        return wrapped
-
-    async def _wrap_music_response_text(
-        self,
-        user_message: str,
-        music_result: str,
-        max_tokens: int,
-    ) -> str:
-        """Wrap a music action result in Poob's personality for a TEXT reply.
-
-        Text-channel counterpart to ``_wrap_music_response`` (Toob's voice-only
-        reaction — the persona swap only matters for TTS pitch/timbre, so text
-        stays Poob). Previously this path reused ``_wrap_in_personality``,
-        which is built for DEAL responses: its label ("[My deal system
-        says: ...]") and instruction ("include items, prices, questions
-        asked, confirmations") don't apply to a bare "Playing X (3:42)". Since
-        a music result has none of those things, the model narrated their
-        ABSENCE instead of just relaying the song — e.g. "no items, no
-        prices, no questions, no confirmations... just the song's name,
-        length" for a plain play request. Fixed at the source with a
-        correctly-labeled, music-only instruction that never surfaces
-        deal-shaped categories to check off, plus a tight token cap so a
-        one-line status can't balloon into a paragraph. See
-        docs/incidents/music-text-wrap-inherited-deal-instructions.md.
-        """
-        # Text always stays at the neutral level (5) regardless of whatever
-        # horniness level the guild's voice session last rolled via
-        # roll_horniness() — matching _wrap_in_personality's
-        # `if voice else 5` convention. This method has exactly one caller
-        # and it is always text (see _handle_music's `if voice:` branch,
-        # which returns earlier via _wrap_music_response), so there's no
-        # `voice` param to gate on; pinned directly.
-        level = 5
-        wrap_messages = [
-            {
-                "role": "system",
-                "content": _build_system_prompt(level, voice=False),
-            },
-            {"role": "user", "content": user_message},
-            {
-                "role": "assistant",
-                "content": f"[Music system result: {music_result}]",
-            },
-            {
-                "role": "user",
-                "content": (
-                    "Relay that to me in your own style. ONE short sentence, "
-                    "10 words or fewer. It's just a song status — react to "
-                    "it, don't list or narrate anything else."
-                ),
-            },
-        ]
-
-        # Hard cap, matching Toob's voice-wrap tightness (min(max_tokens, 40))
-        # — this function's whole purpose is preventing a one-line status
-        # from ballooning, so it gets the same rigor, not Poob's chattier
-        # casual-conversation length latitude.
-        music_max_tokens = min(max_tokens, 40)
-
-        if self.groq_api_key:
-            try:
-                from groq import AsyncGroq
-
-                client = AsyncGroq(api_key=self.groq_api_key, max_retries=0, timeout=12.0)
-                resp = await client.chat.completions.create(
-                    model="llama-3.1-8b-instant",
-                    messages=wrap_messages,  # type: ignore[arg-type]
-                    max_tokens=music_max_tokens,
-                    temperature=0.8,
-                )
-                result = resp.choices[0].message.content
-                if result:
-                    return result
-            except Exception as exc:
-                log.warning("Music text personality wrap failed", error=str(exc)[:80])
-
-        # Fallback: return the raw music result as-is.
-        return music_result
+        return VOICE_TOOB + wrapped
 
     async def _wrap_music_response(
         self,
@@ -1886,8 +2066,11 @@ class PoobBrain:
 
         Toob is Poob's evil cousin — a dark spirit who despises the users
         and wishes suffering upon them. He ONLY appears for music commands.
-        Voice routing is handled by the VOICE_TOOB signal yielded from
-        respond_streaming — no text prefixes needed.
+        Serves BOTH modes: voice routing is handled by the VOICE_TOOB signal
+        yielded from respond_streaming (never embedded in this text); the
+        text path in _handle_music prefixes the sentinel itself so the agent
+        handler can strip it and speak the reply in Toob's voice. See
+        decisions/music-text-replies-are-toob.
         """
         wrap_messages = [
             {
@@ -2178,6 +2361,14 @@ class PoobBrain:
                     scrubbed=query[:80],
                 )
                 tool_args = {**tool_args, "query": query}
+            # Same url→query promotion as the text path — a pasted link
+            # in 'url' is a real play request, not an empty one. See
+            # docs/incidents/spotify-track-link-play-dead-end.md.
+            if len(query) < 2:
+                url_fallback = str(tool_args.get("url") or "").strip()
+                if _looks_like_playable_link(url_fallback):
+                    query = url_fallback
+                    tool_args = {**tool_args, "query": query}
             if len(query) < 2:
                 log.info(
                     "music.play empty query — prompting user",
@@ -2231,6 +2422,7 @@ class PoobBrain:
                         original_message,
                         None,
                         None,
+                        voice=True,
                     )
                     # Scrub the re-derived query through the same boundary
                     # sanitizer as the happy path — the safety net strips only

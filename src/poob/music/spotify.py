@@ -26,10 +26,21 @@ log = get_logger("music.spotify")
 
 # Two URL shapes Spotify ships:
 #   https://open.spotify.com/playlist/<id>[?si=...]
+#   https://open.spotify.com/intl-<lang>/playlist/<id>[?si=...]  (shared links
+#     since ~2023 carry a locale segment — e.g. intl-de, intl-pt-br)
 #   spotify:playlist:<id>
-# We accept both. Anything else returns None at parse time.
+# We accept all. Anything else returns None at parse time.
 _PLAYLIST_URL_RE = re.compile(
-    r"(?:https?://open\.spotify\.com/playlist/|spotify:playlist:)"
+    r"(?:https?://open\.spotify\.com/(?:intl-[a-z-]+/)?playlist/|spotify:playlist:)"
+    r"(?P<id>[A-Za-z0-9]+)",
+)
+
+# Single-track links — same shapes (incl. the intl- locale segment). Users
+# paste these in chat with "play this"; tracks can't be streamed (DRM) but
+# their metadata resolves to a title+artist we can YT-search. See
+# docs/incidents/spotify-track-link-play-dead-end.md.
+_TRACK_URL_RE = re.compile(
+    r"(?:https?://open\.spotify\.com/(?:intl-[a-z-]+/)?track/|spotify:track:)"
     r"(?P<id>[A-Za-z0-9]+)",
 )
 
@@ -42,6 +53,19 @@ def parse_playlist_id(url: str) -> str | None:
     if not url:
         return None
     match = _PLAYLIST_URL_RE.search(url)
+    if match is None:
+        return None
+    return match.group("id")
+
+
+def parse_track_id(url: str) -> str | None:
+    """Extract the track ID from a Spotify single-track URL.
+
+    Returns ``None`` if ``url`` isn't a recognized Spotify track URL.
+    """
+    if not url:
+        return None
+    match = _TRACK_URL_RE.search(url)
     if match is None:
         return None
     return match.group("id")
@@ -113,6 +137,39 @@ class SpotifyPlaylistResolver:
         except Exception as exc:
             log.warning("spotify.resolve failed", error=str(exc)[:120])
             return None
+
+    async def resolve_track(self, url: str) -> dict[str, str] | None:
+        """Resolve a Spotify single-track URL to ``{title, artist}``.
+
+        Returns ``None`` if the URL is unparseable, the credentials are
+        missing, or the Spotify API raises — same contract as ``resolve``.
+        """
+        if not self.is_configured():
+            log.warning("spotify.resolve_track called without credentials")
+            return None
+
+        track_id = parse_track_id(url)
+        if track_id is None:
+            return None
+
+        try:
+            return await asyncio.to_thread(self._fetch_track, track_id)
+        except Exception as exc:
+            log.warning("spotify.resolve_track failed", error=str(exc)[:120])
+            return None
+
+    def _fetch_track(self, track_id: str) -> dict[str, str] | None:
+        """Synchronous single-track fetcher — runs under ``asyncio.to_thread``."""
+        client = self._get_client()
+        track = client.track(track_id)
+        if not track:
+            return None
+        title = track.get("name")
+        if not title:
+            return None
+        artists = track.get("artists") or []
+        artist_name = artists[0].get("name") if artists else ""
+        return {"title": title, "artist": artist_name or ""}
 
     def _fetch_items(self, playlist_id: str) -> list[dict]:
         """Synchronous fetcher — runs under ``asyncio.to_thread``.
