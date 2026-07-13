@@ -479,6 +479,86 @@ async def test_message_with_content_still_routes_normally() -> None:
     assert out == "Playing tiki tiki."
 
 
+# --- _music_safety_net: bare-autoplay override (2026-07-09 prod regression) -
+# gemini-2.5-flash-lite routed "autoplay turn ON" to {action: apply_effect,
+# effect: faster, mode: more} after several consecutive apply_effect calls
+# biased the passive context. Same failure class and fix pattern as the
+# bare-stop override above. See
+# docs/incidents/autoplay-misrouted-to-apply-effect.md.
+
+
+def test_music_safety_net_overrides_misrouted_autoplay_command() -> None:
+    """The exact prod regression: 'autoplay turn ON' routed to apply_effect
+    must be corrected to action=autoplay, mode=on."""
+    b = _brain()
+    assert b._music_safety_net(
+        "autoplay turn ON",
+        "music_assistant",
+        {"action": "apply_effect", "effect": "faster", "mode": "more"},
+    ) == ("music_assistant", {"action": "autoplay", "mode": "on"})
+
+
+def test_music_safety_net_overrides_autoplay_when_no_tool_at_all() -> None:
+    b = _brain()
+    assert b._music_safety_net("autoplay on", None, None) == (
+        "music_assistant",
+        {"action": "autoplay", "mode": "on"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("phrase", "expected_mode"),
+    [
+        ("autoplay on", "on"),
+        ("Autoplay Turn On", "on"),
+        ("  TURN ON AUTOPLAY  ", "on"),
+        ("turn autoplay on", "on"),
+        ("enable autoplay", "on"),
+        ("autoplay enable", "on"),
+        ("autoplay off", "off"),
+        ("autoplay turn off", "off"),
+        ("turn off autoplay", "off"),
+        ("turn autoplay off", "off"),
+        ("disable autoplay", "off"),
+        ("autoplay disable", "off"),
+        ("autoplay status", "status"),
+        ("is autoplay on", "status"),
+        ("is autoplay on?", "status"),
+    ],
+)
+def test_music_safety_net_recognizes_bare_autoplay_variants(
+    phrase: str,
+    expected_mode: str,
+) -> None:
+    b = _brain()
+    assert b._music_safety_net(
+        phrase,
+        "music_assistant",
+        {"action": "apply_effect", "effect": "overload"},
+    ) == ("music_assistant", {"action": "autoplay", "mode": expected_mode})
+
+
+def test_music_safety_net_leaves_correct_autoplay_routing_alone() -> None:
+    b = _brain()
+    assert b._music_safety_net(
+        "autoplay on",
+        "music_assistant",
+        {"action": "autoplay", "mode": "on"},
+    ) == ("music_assistant", {"action": "autoplay", "mode": "on"})
+
+
+def test_music_safety_net_does_not_override_non_bare_autoplay_phrasing() -> None:
+    """Only the EXACT bare phrase overrides — a longer sentence mentioning
+    autoplay keeps the LLM's routing, since it may carry other real intent
+    the narrow phrase list must not swallow."""
+    b = _brain()
+    assert b._music_safety_net(
+        "turn off the autoplay filter thing please",
+        "music_assistant",
+        {"action": "apply_effect", "effect": "none"},
+    ) == ("music_assistant", {"action": "apply_effect", "effect": "none"})
+
+
 # --- _scrub_music_query: strip the user's intent verb, not the song ---------
 
 

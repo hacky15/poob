@@ -3,7 +3,7 @@ type: gotcha
 status: active
 date: 2026-04-22
 tags: [brain, llm, tool-calling, prompt-construction]
-related: [[music-tool-hallucination]] [[poobbrain-architecture]]
+related: [[music-tool-hallucination]] [[poobbrain-architecture]] [[voice-hallucination-drop-gets-a-line]]
 ---
 
 # LLM tool calls whose arguments come from passive context, not the current turn
@@ -31,7 +31,7 @@ Post-validate tool-call arguments against the current user transcript before dis
 1. Tokenize both the tool-call `query` and the current user message (lowercase, strip punctuation).
 2. Strip a small stopword list (`the`, `a`, `an`, `by`, `play`, `song`, `music`, `track`, and the small set of function words the LLM fills queries with when hallucinating).
 3. Require at least one non-stopword token from `query` to appear in the user message.
-4. If no overlap: **re-derive the query straight from the raw message before giving up.** Run `_music_safety_net(original_message, …)` — if the raw message carries play-intent ("play X", "put on X"), use that faithful query (`music.play re-extracted from raw after hallucination drop`) and proceed. Only if the raw message has *no* play-intent (genuine context-pull) do you log `music.play hallucinated from context — drop` and drop: voice returns empty string (no TTS), text returns a brief acknowledgement.
+4. If no overlap: **re-derive the query straight from the raw message before giving up.** Run `_music_safety_net(original_message, …)` — if the raw message carries play-intent ("play X", "put on X"), use that faithful query (`music.play re-extracted from raw after hallucination drop`) and proceed. Only if the raw message has *no* play-intent (genuine context-pull) do you log `music.play hallucinated from context — drop` and drop: text returns a brief acknowledgement, and voice (2026-07-09, see [[voice-hallucination-drop-gets-a-line]]) speaks a short in-character line rather than staying silent — the user already cleared the dual wake-gate to get here, so silence read as "the bot ignored me." The false-positive-wake concern this design originally guarded against is unaffected: the wake-gate check still runs upstream of this function entirely.
 
 The re-extract step (added 2026-06-01, see [[groq-429-fallback-routed-to-deals]]) matters because degraded routing (Groq 429) makes the model emit stale/hallucinated queries even for a crystal-clear "play tiki tiki" — the old drop-only guard turned those into "I didn't catch a music request there." The guard's job is to reject the LLM's *wrong query*, not to refuse the user's plainly-stated request. Both guards (`_handle_music` text + `_handle_music_voice_streaming`) do this.
 

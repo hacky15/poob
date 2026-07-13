@@ -11,11 +11,26 @@ services:
       # See docs/runbooks/scraper-kill-switch.md.
       PATROL_SCHEDULER_AUTO_START: "false"
     # CPU PRIORITY for the real-time voice path on this shared 4-core host.
-    # cpu_shares is a relative CFS weight enforced by the kernel *only under
-    # contention* — 4x the default (1024) so a co-located deploy build, an
-    # ollama fallback, or a co-tenant spike can't starve voice, with zero idle
-    # waste. Pairs with the in-process patrol-backoff (scanner yields to voice).
-    # poob is deliberately NOT cpu-capped — voice needs to burst.
+    # poob is DELIBERATELY left with NO cpuset restriction — it's free to
+    # burst across all 4 cores whenever nothing else needs them (poob rarely
+    # runs hard; capping it would trade away capacity it's almost never
+    # contending for). The guarantee instead comes from fencing the KNOWN
+    # heavy background contenders OUT of a reserved zone (see the `ollama`
+    # service's cpuset below) plus a high cpu_shares weight for whatever
+    # contention happens on the cores poob does share with them.
+    #
+    # 2026-07-07: a previously-unknown, uncapped local-LLM stack (unrelated
+    # to this repo) burst to 300%+ CPU and starved poob's Discord gateway
+    # heartbeat (WS 1006 / "stopped responding to the gateway", voice torn
+    # down) even with cpu_shares:4096 already in place — weight bounds the
+    # long-run CPU-time split, not worst-case scheduling latency, so a big
+    # enough burst from ANY contender can still stall a single real-time
+    # event-loop thread. An earlier version of this fix cpuset-capped poob
+    # itself to 2 cores to guarantee isolation — correctly flagged by the
+    # operator as trading away capacity poob almost never needs for a
+    # guarantee achievable without that cost: fence the NEIGHBORS out of a
+    # zone instead of fencing poob INTO one. Same worst-case protection,
+    # zero capacity lost in the (overwhelmingly common) uncontended case.
     # See docs/incidents/voice-cpu-starvation-on-shared-host.md.
     cpu_shares: 4096
     depends_on:
@@ -37,8 +52,14 @@ services:
       - ollama-data:/root/.ollama
     # Local LLM is CPU-only (50-120s/call) and last-resort only. Hard-cap to 2
     # of 4 cores + a low weight so a stray fallback call can never monopolize
-    # the box and starve the voice path during a VC.
+    # the box and starve the voice path during a VC. Fenced OUT of cores 0,1
+    # (cpuset "2,3") so poob always has at least those 2 cores completely
+    # clear of THIS contender specifically, no matter how hard it bursts —
+    # poob itself is left unrestricted (see the poob service above), so this
+    # is a one-way fence, not a shared partition: poob may still use 2,3 when
+    # they're free, this container simply can never touch 0,1.
     cpu_shares: 256
+    cpuset: "2,3"
     deploy:
       resources:
         limits:

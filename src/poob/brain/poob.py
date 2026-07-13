@@ -129,11 +129,9 @@ _MUSIC_ROUTING_RULES = (
     "music' → action=stop. 'skip' / 'next' → action=skip. 'pause' → "
     "action=pause. (For 'unpause'/'resume', see action=restore below — it "
     "already covers both cases.)\n"
-    "AUTOPLAY vs LOOP are DIFFERENT: autoplay = NEW similar songs after the "
-    "queue ends → action=autoplay, mode=on|off|status. loop = repeat what's "
-    "already there: 'loop this' → action=loop, mode=one; 'loop the queue' → "
-    "action=loop, mode=queue; 'turn off loop' / 'stop looping' → action=loop, "
-    "mode=off.\n"
+    "AUTOPLAY = mode toggle (NOT an effect, NOT loop): action=autoplay, "
+    "mode=on|off|status. LOOP = repeat: 'loop this'→action=loop, mode=one; "
+    "'loop the queue'→mode=queue; 'turn off loop'→mode=off.\n"
     "AUDIO EFFECTS ROUTING (effects STACK — layering is the default):\n"
     "- 'nightcore it' / 'make it nightcore' → action=apply_effect, effect='nightcore'\n"
     "- 'slow it down' / 'slowed' → action=apply_effect, effect='slowed'\n"
@@ -165,6 +163,9 @@ _MUSIC_ROUTING_RULES = (
     "(or volume_up / volume_down), NEVER apply_effect. Effects are NAMED "
     "audio filters (nightcore, slowed, reverb, bassboost); volume is just "
     "how loud it is.\n"
+    "'show queue'→action=queue (not 'queue up X'=play). 'remove track "
+    "3'→action=remove, position=3 (not 'remove effect'). 'seek to "
+    "1:30'→action=seek, time='1:30'.\n"
     "Be DILIGENT about catching real song requests (call the tool):\n"
     "- 'play some jazz' → action=play, query='jazz'\n"
     "- 'play something chill' → action=play, query='chill music'\n"
@@ -749,9 +750,11 @@ class PoobBrain:
     _AUTOPLAY_ON_PHRASES: frozenset[str] = frozenset(
         {
             "autoplay on",
+            "autoplay turn on",
             "turn on autoplay",
             "turn autoplay on",
             "enable autoplay",
+            "autoplay enable",
             "start autoplay",
             "put autoplay on",
             "put on autoplay",
@@ -760,14 +763,22 @@ class PoobBrain:
     _AUTOPLAY_OFF_PHRASES: frozenset[str] = frozenset(
         {
             "autoplay off",
+            "autoplay turn off",
             "turn off autoplay",
             "turn autoplay off",
             "disable autoplay",
+            "autoplay disable",
             "stop autoplay",
             "stop autoplaying",
             "put autoplay off",
             "no more autoplay",
         }
+    )
+    # Autoplay STATUS query (report current state, no mutation). Folded in from
+    # the 2026-07-09 bare-autoplay audit (64ac9e0) when its _BARE_AUTOPLAY_PHRASES
+    # was consolidated into this override table.
+    _AUTOPLAY_STATUS_PHRASES: frozenset[str] = frozenset(
+        {"autoplay status", "is autoplay on", "autoplay?"}
     )
     _LOOP_OFF_PHRASES: frozenset[str] = frozenset(
         {
@@ -849,6 +860,7 @@ class PoobBrain:
         (_QUIETER_PHRASES, {"action": "volume_down"}),
         (_AUTOPLAY_ON_PHRASES, {"action": "autoplay", "mode": "on"}),
         (_AUTOPLAY_OFF_PHRASES, {"action": "autoplay", "mode": "off"}),
+        (_AUTOPLAY_STATUS_PHRASES, {"action": "autoplay", "mode": "status"}),
         (_LOOP_OFF_PHRASES, {"action": "loop", "mode": "off"}),
     )
 
@@ -943,17 +955,20 @@ class PoobBrain:
 
         1. **Deterministic control override** (``_match_control_override``): for
            an EXACT, unambiguous control command — stop / skip / volume / autoplay
-           / loop — force the right tool call, overriding even a present but
-           MISROUTED tool. A weak fallback rung hallucinates on terse control
-           verbs (2026-07-06 "stop." -> autoplay/on; 2026-07-11 "max volume" ->
-           skip). This runs on EVERY routing result (see the unconditional call
-           sites) precisely so it can correct a wrong tool, and it is wake-aware
-           so it fires on the voice path too. **But it only corrects a MISSING
-           or already-music route — never a routed ``deal_assistant``**: during
-           an active deal Q&A the router sends a terse answer ("stop"/"skip"/
-           "next") to the deal agent, and hijacking that into a music action
-           would silently drop the deal command. See
-           docs/incidents/control-command-misroute-by-weak-rung.md.
+           (on/off/status) / loop — force the right tool call, overriding even a
+           present but MISROUTED tool. A weak fallback rung hallucinates on terse
+           control verbs (2026-07-06 "stop." -> autoplay/on; 2026-07-09 "autoplay
+           turn ON" -> apply_effect; 2026-07-11 "max volume" -> skip). This runs
+           on EVERY routing result (see the unconditional call sites) precisely
+           so it can correct a wrong tool, and it is wake-aware so it fires on
+           the voice path too. **But it only corrects a MISSING or already-music
+           route — never a routed ``deal_assistant``**: during an active deal Q&A
+           the router sends a terse answer ("stop"/"skip"/"next") to the deal
+           agent, and hijacking that into a music action would silently drop the
+           deal command. Consolidates the earlier bare-stop and bare-autoplay
+           overrides into one table. See
+           docs/incidents/control-command-misroute-by-weak-rung.md and
+           docs/incidents/autoplay-misrouted-to-apply-effect.md.
         2. **Play-intent backfill**: when NO tool was routed but the message is a
            clear "play X", extract the query. This only fills the gap — it never
            overrides a present tool.
@@ -2244,6 +2259,71 @@ class PoobBrain:
         async for sentence in _stream_sentences_from_chunks(_chunks()):
             yield sentence
 
+    async def _stream_toob_no_command_understood(
+        self,
+        user_message: str,
+        max_tokens: int,
+    ) -> AsyncIterator[str]:
+        """Toob's reaction when addressed but no real song request landed.
+
+        Used when the hallucination guard in _handle_music_voice_streaming
+        drops a fabricated play query (stale-context pull, no genuine
+        play-intent in the current turn) — see
+        docs/decisions/voice-hallucination-drop-gets-a-line.md. Distinct
+        from _stream_toob_wrap_from_query: that one reacts to a REAL
+        request ("mock them for wanting it"); this one reacts to there
+        being no request at all, so it must not fabricate one either.
+        """
+        if not self.groq_api_key:
+            return
+
+        wrap_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Toob — a dark, malevolent spirit cursed to DJ for mortals. "
+                    "Someone just said your name mid-conversation but didn't actually "
+                    "ask you to play anything. Menacing, absurdly dramatic, like a demon "
+                    "working retail.\n"
+                    "RULES:\n"
+                    "- NEVER introduce yourself or say your name. Your voice IS your identity.\n"
+                    "- ONE sentence. 6-10 words MAX. Tight, venomous.\n"
+                    "- React to being summoned for NOTHING — don't invent a song or "
+                    "request that wasn't made.\n"
+                    "- No caps, no markdown, no emojis. Spoken aloud through TTS."
+                ),
+            },
+            {"role": "user", "content": user_message},
+            {
+                "role": "user",
+                "content": (
+                    "React as Toob in ONE sentence (6-10 words). Menacing. "
+                    "They said your name but didn't ask for anything."
+                ),
+            },
+        ]
+
+        toob_max_tokens = min(max_tokens, 40)
+
+        from groq import AsyncGroq
+
+        client = AsyncGroq(api_key=self.groq_api_key, max_retries=0, timeout=12.0)
+        stream = await client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=wrap_messages,  # type: ignore[arg-type]
+            max_tokens=toob_max_tokens,
+            temperature=0.9,
+            stream=True,
+        )
+
+        async def _chunks() -> AsyncIterator[str]:
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+
+        async for sentence in _stream_sentences_from_chunks(_chunks()):
+            yield sentence
+
     async def _handle_music_voice_streaming(
         self,
         original_message: str,
@@ -2368,6 +2448,16 @@ class PoobBrain:
                             hallucinated_query=query[:80],
                             user=user_id,
                         )
+                        # Dead air here reads as "Poob ignored me" — the user
+                        # WAS validly addressing Poob (dual wake-gate already
+                        # passed upstream), it just wasn't a real song request.
+                        # Speak an in-character line instead of staying silent.
+                        # See docs/decisions/voice-hallucination-drop-gets-a-line.md.
+                        async for sentence in self._stream_toob_no_command_understood(
+                            original_message,
+                            max_tok,
+                        ):
+                            yield sentence
                         return
 
             if self._is_duplicate_play(guild_id, user_id, query):
