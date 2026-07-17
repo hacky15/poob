@@ -137,12 +137,20 @@ class AgentMessageHandler(commands.Cog):
         track_before = _current_track(music_cog, guild_id)
 
         log.info("agent.calling_brain", user=user_id, content=content[:80])
+        # Typing indicator is DECORATION, never a dependency: wrapping the
+        # brain call inside `async with channel.typing()` let a Discord-side
+        # 500 on the /typing endpoint (4 retries, ~25s) kill the request
+        # before the brain ever ran (2026-07-17 01:09, "play apt apt apt").
+        # Fire it best-effort and run the brain unguarded by it.
         try:
-            async with message.channel.typing():
-                response = await self._brain.respond(
-                    brain_input, user_id, channel_id, voice=False,
-                    guild_id=guild_id,
-                )
+            await message.channel.trigger_typing()
+        except Exception as exc:
+            log.warning("agent.typing_indicator_failed", error=str(exc)[:100])
+        try:
+            response = await self._brain.respond(
+                brain_input, user_id, channel_id, voice=False,
+                guild_id=guild_id,
+            )
             log.info("agent.brain_done", user=user_id, response_length=len(response))
         except Exception:
             log.exception("agent.run_error", user=user_id)

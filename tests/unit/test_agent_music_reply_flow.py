@@ -61,10 +61,7 @@ def _flow_fixture():
     message.guild.id = 10
     message.reply = AsyncMock()
 
-    typing_cm = MagicMock()
-    typing_cm.__aenter__ = AsyncMock()
-    typing_cm.__aexit__ = AsyncMock(return_value=False)
-    message.channel.typing.return_value = typing_cm
+    message.channel.trigger_typing = AsyncMock()
 
     return handler, message, brain, music_cog, voice_cog, player
 

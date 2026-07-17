@@ -219,6 +219,7 @@ class VoiceSession:
                     on_passive_utterance=self._on_dual_passive,
                     bot_audio_active=self._bot_audio_active,
                     deepgram_model=dg_model,
+                    salvage_transcriber=self._transcribe_16k,
                 )
                 self._dual_pipeline.set_loop(self._loop)
                 log.info(
@@ -441,7 +442,11 @@ class VoiceSession:
         log.info(
             "Dual: wake word addressed",
             user=user_name,
-            text=transcript[:100],
+            # Full transcript, not a 100-char cut: the 2026-07-17 census could
+            # not attribute a sung-lyric-tail hallucination because the tail
+            # was truncated out of the log. Addressed utterances are rare and
+            # short enough that the audit value beats the log bytes.
+            text=transcript[:500],
         )
 
         # Add to passive context
@@ -907,7 +912,7 @@ class VoiceSession:
             log.info(
                 "Addressed by user",
                 user=speaker_name,
-                text=text[:100],
+                text=text[:500],  # full utterance for auditability (see dual path)
                 stt_ms=int((t_stt - t0) * 1000),
                 score=f"{score:.2f}",
                 signals=active_signals,
@@ -1057,6 +1062,27 @@ class VoiceSession:
             except Exception as exc:
                 log.warning(
                     "STT provider failed, trying next",
+                    provider=provider.name,
+                    error=str(exc)[:80],
+                )
+        return ""
+
+    async def _transcribe_16k(self, pcm_audio: bytes) -> str:
+        """One-shot STT cascade over 16kHz mono PCM.
+
+        Used as the dual pipeline's salvage transcriber: the salvage ring
+        holds downsampled 16k mono frames, so the cascade must be told the
+        real sample rate (providers default to 48kHz). See
+        docs/incidents/wake-utterances-lost-to-deepgram-miss-salvage.md.
+        """
+        for provider in self.stt_providers:
+            try:
+                text = await provider.transcribe(pcm_audio, sample_rate=16000)
+                if text:
+                    return text
+            except Exception as exc:
+                log.warning(
+                    "Salvage STT provider failed, trying next",
                     provider=provider.name,
                     error=str(exc)[:80],
                 )

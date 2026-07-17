@@ -226,3 +226,76 @@ def test_implausible_gate_boundaries() -> None:
     )
     # Unknown duration → leave alone.
     assert not ytdl._is_implausible_hit("song name", _track("x", None))
+
+
+# ---------------------------------------------------------------------------
+# Junk-title guard — 2026-07-16/17 census: all three junk results were UNDER
+# the 900s duration gate (Funko unboxing 11:55, ICE press conference 10:15,
+# app-store tutorial 7:33). A junk marker now triggers the widened re-rank
+# regardless of duration and penalizes the candidate in scoring; it never
+# hard-rejects (best-guess-over-dead-end preserved).
+# ---------------------------------------------------------------------------
+
+
+def test_junk_marker_triggers_rerank_under_duration_gate() -> None:
+    """The 'Bitty Funk' -> Funko unboxing case: 715s slips the duration gate,
+    the 'opening every' marker must catch it."""
+    ytdl = AsyncYTDL()
+    funko = _track("Opening Every Set Of Funko Bitty Pops!", 715)
+    assert ytdl._is_implausible_hit("bitty funk", funko) is True
+    presser = _track("ICE/USCIS STEM OPT Press Conference", 615)
+    assert ytdl._is_implausible_hit("opt", presser) is True
+    tutorial = _track("5 Tricks To Get Your App Into the Top Charts (Apple App Store)", 453)
+    assert ytdl._is_implausible_hit("app at top", tutorial) is True
+
+
+def test_junk_marker_penalty_lets_music_win_the_rerank() -> None:
+    """Even at full token overlap, a junk-marked candidate loses to a real
+    song with partial overlap."""
+    q = "bitty funk"
+    junk = AsyncYTDL._relevance_score(q, _track("Opening Every Set Of Funko Bitty Pops!", 715))
+    song = AsyncYTDL._relevance_score(q, _track("Bitty Funk (Official Audio)", 200))
+    assert song > junk
+
+
+def test_junk_markers_do_not_hit_real_song_titles() -> None:
+    """The marker list must never penalize actual songs — the traps that
+    forced the multi-word marker design."""
+    for title in (
+        "The Fray - How to Save a Life (Official Video)",
+        "Diana Ross - Chain Reaction",
+        "Trailer Park Boys Theme (cover)",
+        "AJR - BANG! (Official Video)",
+        "dumb dumb - mazie//Slowed and Reverb",
+    ):
+        assert AsyncYTDL._looks_like_junk_title(title) is False, title
+
+
+@pytest.mark.asyncio
+async def test_junk_pass1_widens_and_picks_real_song() -> None:
+    """End-to-end: junk pass-1 hit under the duration gate -> widen -> the
+    actual song wins."""
+    junk = _entry("Opening Every Set Of Funko Bitty Pops!", 715, vid="junk")
+    song = _entry("Bitty Funk (Official Audio)", 200, vid="song")
+    ytdl = _ytdl_with_passes(
+        _search_info(junk),
+        _search_info(junk, song),
+    )
+
+    track = await ytdl.search("bitty funk")
+
+    assert track is not None
+    assert track.identifier == "song"
+
+
+@pytest.mark.asyncio
+async def test_junk_pass1_survives_when_widening_finds_nothing_better() -> None:
+    """Additive guarantee holds for the junk trigger too: if the widened pool
+    has nothing, the junk hit still plays rather than dead-ending."""
+    junk = _entry("Opening Every Set Of Funko Bitty Pops!", 715, vid="junk")
+    ytdl = _ytdl_with_passes(_search_info(junk), None)
+
+    track = await ytdl.search("bitty funk")
+
+    assert track is not None
+    assert track.identifier == "junk"
