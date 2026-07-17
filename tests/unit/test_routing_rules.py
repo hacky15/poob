@@ -711,3 +711,142 @@ def test_deal_tool_advertises_all_trigger_tokens() -> None:
         "verbatim",
     ):
         assert token in desc, f"DEAL_TOOL.description lost trigger token: {token!r}"
+
+
+# --- _trim_trailing_crosstalk: safety-net play-query hygiene ------------------
+# 2026-07-17 census: the take-everything-after-the-verb extraction shipped
+# trailing crosstalk to YouTube search ("the song. Fuck.", "thirsty thirsty
+# Thursday. Oh yeah. I I used to get those all the time...").
+
+
+def test_trim_crosstalk_cuts_at_first_sentence_boundary() -> None:
+    from poob.brain.poob import _trim_trailing_crosstalk
+
+    assert _trim_trailing_crosstalk("the song. Fuck.") == "the song"
+    assert (
+        _trim_trailing_crosstalk("thirsty thirsty Thursday. Oh yeah. I I used to get those")
+        == "thirsty thirsty Thursday"
+    )
+
+
+def test_trim_crosstalk_preserves_title_abbreviations() -> None:
+    from poob.brain.poob import _trim_trailing_crosstalk
+
+    assert _trim_trailing_crosstalk("mr. brightside") == "mr. brightside"
+    # Abbreviation inside the title, real crosstalk after it — cut at the
+    # boundary AFTER the title, not inside it.
+    assert _trim_trailing_crosstalk("mr. brightside. yeah man") == "mr. brightside"
+
+
+def test_trim_crosstalk_strips_trailing_punctuation_only_when_clean() -> None:
+    from poob.brain.poob import _trim_trailing_crosstalk
+
+    assert _trim_trailing_crosstalk("home or let the barts out.") == "home or let the barts out"
+    assert _trim_trailing_crosstalk("Bitty Funk.") == "Bitty Funk"
+    assert _trim_trailing_crosstalk("APT.") == "APT"
+    assert _trim_trailing_crosstalk("gobble glitch") == "gobble glitch"
+
+
+def test_safety_net_blank_content_span_defers_to_play_what() -> None:
+    """'Play the song. Fuck.' trims to 'the song' — pure filler with no
+    song identity. Better contract (2026-07-17 census): blank the query so
+    the downstream empty-query gate asks 'Play what?' instead of literal-
+    searching filler (which queued a novelty track titled 'FUCK!! Song!')."""
+    b = _brain()
+    tool, args = b._music_safety_net(
+        "Hey, Poob. Play the song. Fuck.", None, None, voice=True
+    )
+    assert tool == "music_assistant"
+    assert args["query"] == ""
+
+
+def test_safety_net_real_span_still_extracted_with_trim() -> None:
+    b = _brain()
+    tool, args = b._music_safety_net(
+        "Hey, Poob. Play thirsty thirsty Thursday. Oh yeah. I used to get those",
+        None,
+        None,
+        voice=True,
+    )
+    assert tool == "music_assistant"
+    assert args["query"] == "thirsty thirsty Thursday"
+
+
+# --- misrouted-play override (2026-07-16 02:15:49 stale-echo regression) ----
+# gemini-2.5-flash-lite re-emitted its previous turn's apply_effect/slowed
+# args for "Play Betty Davis eyes. Jojo Siwa." — the wrong action ran
+# SILENTLY ([SILENT] control acks are unspoken) and the song never played.
+
+
+def test_misrouted_play_override_rescues_explicit_play() -> None:
+    b = _brain()
+    tool, args = b._music_safety_net(
+        "Play Betty Davis eyes. Jojo Siwa.",
+        "music_assistant",
+        {"action": "apply_effect", "effect": "slowed", "mode": "add"},
+    )
+    assert tool == "music_assistant"
+    assert args["action"] == "play"
+    assert args["query"] == "Betty Davis eyes"
+
+
+def test_misrouted_play_override_never_clobbers_control_phrased_plays() -> None:
+    """'play it slower' / 'play that again' are effect/restore requests
+    phrased with 'play' — their correct routes must survive."""
+    b = _brain()
+    for msg, routed in (
+        ("play it slower", {"action": "apply_effect", "effect": "slowed", "mode": "add"}),
+        ("play it louder", {"action": "volume_up"}),
+        ("play that again", {"action": "restore"}),
+        ("play the next song", {"action": "skip"}),
+    ):
+        assert b._music_safety_net(msg, "music_assistant", dict(routed)) == (
+            "music_assistant",
+            routed,
+        ), msg
+
+
+def test_misrouted_play_override_leaves_play_and_deal_routes_alone() -> None:
+    b = _brain()
+    # Already a play — untouched.
+    assert b._music_safety_net(
+        "play despacito", "music_assistant", {"action": "play", "query": "despacito"}
+    ) == ("music_assistant", {"action": "play", "query": "despacito"})
+    # queue_many is play-family — untouched.
+    assert b._music_safety_net(
+        "play A and B", "music_assistant", {"action": "queue_many", "tracks": ["A", "B"]}
+    ) == ("music_assistant", {"action": "queue_many", "tracks": ["A", "B"]})
+    # Deal routes are never touched by any music override.
+    assert b._music_safety_net(
+        "play despacito", "deal_assistant", {"request": "x"}
+    ) == ("deal_assistant", {"request": "x"})
+
+
+# --- _prefer_full_play_span: router-truncation guard -------------------------
+# 2026-07-16 02:06:33: "play home or let the barts out" routed query='home' →
+# Edward Sharpe's "Home" played instead of the Homer meme track. The same
+# utterance routed correctly 80 minutes earlier — nondeterministic truncation.
+
+
+def test_prefer_full_span_extends_truncated_query() -> None:
+    from poob.brain.poob import _prefer_full_play_span
+
+    assert (
+        _prefer_full_play_span("Hey Poob, play home or let the Barts out.", "home")
+        == "home or let the Barts out"
+    )
+
+
+def test_prefer_full_span_leaves_normalized_and_exact_queries_alone() -> None:
+    from poob.brain.poob import _prefer_full_play_span
+
+    # Router normalized (not a substring) — untouched.
+    assert (
+        _prefer_full_play_span("play bang bang bang a j r", "AJR BANG") == "AJR BANG"
+    )
+    # Exact match — untouched.
+    assert (
+        _prefer_full_play_span("play gobble glitch", "gobble glitch") == "gobble glitch"
+    )
+    # No play verb in the message (query came from context legitimately).
+    assert _prefer_full_play_span("that song from earlier", "despacito") == "despacito"

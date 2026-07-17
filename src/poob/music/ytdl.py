@@ -330,6 +330,48 @@ class AsyncYTDL:
     # system already treats >15 min as "not a normal song" for downloads.
     LONGFORM_HIT_THRESHOLD_SEC = 900
 
+    # Title markers that scream "not a song" regardless of duration. All
+    # three junk results in the 2026-07-16/17 sessions were UNDER the 900s
+    # duration gate ("Opening Every Set Of Funko Bitty Pops!" 11:55, an
+    # "ICE/USCIS ... Press Conference" 10:15, a "5 Tricks ... Top Charts"
+    # tutorial 7:33), so duration alone can't catch them. A marker hit
+    # triggers the widened re-rank and penalizes the candidate — it never
+    # hard-rejects (best-guess-over-dead-end preserved). Multi-word phrases,
+    # matched as substrings of the lowercased title, chosen to be virtually
+    # impossible in real song/remix titles.
+    # NOTE: markers must be phrases that cannot appear in real song titles —
+    # bare "how to"/"reaction"/"trailer" would hit "How to Save a Life",
+    # "Chain Reaction", "Trailer Park …". Prefer multi-word or suffixed forms.
+    _JUNK_TITLE_MARKERS = (
+        "press conference",
+        "unboxing",
+        "opening every",
+        "tutorial",
+        "walkthrough",
+        "full gameplay",
+        "full interview",
+        "interview with",
+        "documentary",
+        "keynote",
+        "official trailer",
+        "teaser trailer",
+        "reacts to",
+        "reaction to",
+        "first reaction",
+        "tricks to",
+        "tips to",
+        "briefing",
+        "full episode",
+        "audiobook",
+        "sermon",
+    )
+
+    @classmethod
+    def _looks_like_junk_title(cls, title: str) -> bool:
+        """True when a candidate's title carries a non-music content marker."""
+        low = title.lower()
+        return any(marker in low for marker in cls._JUNK_TITLE_MARKERS)
+
     @classmethod
     def _query_tokens(cls, text: str) -> set[str]:
         """Lowercased content tokens with stopwords removed."""
@@ -356,6 +398,12 @@ class AsyncYTDL:
         overlap = len(qtokens & ttokens) / len(qtokens) if qtokens else 0.0
         score = overlap
 
+        # Non-music content marker — heavy penalty in every mode, so any
+        # actual-music candidate in the widened pool wins over a press
+        # conference / unboxing / tutorial even at full token overlap.
+        if cls._looks_like_junk_title(track.title):
+            score -= 0.6
+
         if cls._has_longform_intent(query):
             return score
 
@@ -375,12 +423,16 @@ class AsyncYTDL:
     def _is_implausible_hit(self, query: str, track: Track) -> bool:
         """True when a pass-1 hit warrants the widened re-rank pass.
 
-        Narrow by design: only fires on long-form results (>15 min) for
-        queries that did not ask for long-form content, and never for
-        direct URLs (the user picked that video themselves).
+        Two triggers, both narrow by design; never for direct URLs (the
+        user picked that video themselves):
+        - long-form result (>15 min) for a query without long-form intent;
+        - a junk-title marker (press conference / unboxing / tutorial …) —
+          the 2026-07-16/17 junk results were all UNDER the duration gate.
         """
         if self._looks_like_url(query):
             return False
+        if self._looks_like_junk_title(track.title):
+            return True
         if track.duration is None:
             return False
         if track.duration.total_seconds() <= self.LONGFORM_HIT_THRESHOLD_SEC:

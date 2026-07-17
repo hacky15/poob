@@ -86,3 +86,23 @@ gate boundary units.
 
 Log signals: `ytdl.search widening to ytsearch5 reason=implausible_top_hit`
 and `ytdl.search picked via rerank`.
+
+## 2026-07-17 addendum — junk-title markers (the sub-900s gap)
+
+The full-log census caught three junk results that all slipped UNDER the
+900 s duration gate on the first post-deploy sessions:
+
+- "Bitty Funk" → **"Opening Every Set Of Funko Bitty Pops!" [11:55]** (715 s)
+- "opt" (STT-cut) → **"ICE/USCIS STEM OPT Press Conference" [10:15]** (615 s)
+- "app at top" (= APT.) → **"5 Tricks To Get Your App Into the Top
+  Charts" [7:33]** (453 s)
+
+Duration alone can't catch these — but their titles scream non-music. Added
+`_JUNK_TITLE_MARKERS`: multi-word phrases ("press conference", "unboxing",
+"opening every", "tutorial", "reacts to", "tricks to", "briefing", …) that
+cannot plausibly appear in song titles — bare words were rejected as traps
+("how to" hits *How to Save a Life*, "reaction" hits *Chain Reaction*,
+"trailer" hits *Trailer Park…*; test-pinned). A marker hit (a) triggers the
+widened re-rank regardless of duration and (b) applies a −0.6 scoring
+penalty so any actual-music candidate wins. Still never hard-rejects — the
+additive guarantee is test-pinned for the junk trigger too.

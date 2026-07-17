@@ -425,3 +425,134 @@ def test_seal_first_utterance_is_never_sealed() -> None:
     mgr.begin_utterance(7)
     _feed(stream, "hey poob play first song")
     assert mgr.get_transcript(7)[0] == "hey poob play first song"
+
+
+# ---------------------------------------------------------------------------
+# Utterance salvage — a wake-fired utterance whose Deepgram transcript never
+# arrives is transcribed from the salvage PCM ring via the one-shot STT
+# cascade and served instead of silently dropped (~19 requests eaten in the
+# 2026-07-17 session alone). Salvage must re-impose the TEXT wake gate — the
+# acoustic wake false-fires on music/loopback, and with Deepgram mute the
+# primary gate never ran. See
+# docs/incidents/wake-utterances-lost-to-deepgram-miss-salvage.md.
+# ---------------------------------------------------------------------------
+
+
+def _make_salvage_proc(uid: int = 1, transcriber=None) -> DualPipelineProcessor:
+    proc = _make_proc_with_real_deepgram(uid)
+    proc._salvage_transcriber = transcriber
+    proc._salvage_buffers = {}
+    return proc
+
+
+def _fill_salvage_ring(
+    proc: DualPipelineProcessor, uid: int, *, frames: int = 40, age_s: float = 0.0
+) -> None:
+    """Put `frames` 640-byte frames (20ms each @16k mono) into the ring,
+    timestamped `age_s` seconds in the past."""
+    import collections as _c
+
+    buf = proc._salvage_buffers.setdefault(
+        uid, _c.deque(maxlen=DualPipelineProcessor._SALVAGE_MAX_FRAMES)
+    )
+    ts = time.monotonic() - age_s
+    for _ in range(frames):
+        buf.append((ts, b"\x01" * 640))
+
+
+@pytest.mark.asyncio
+async def test_salvage_rescues_lost_wake_utterance() -> None:
+    """The headline case: Deepgram delivers nothing, salvage STT returns the
+    real command -> emitted as addressed. The zombie-miss counter still counts
+    the miss (salvage is the ambulance, not the cure)."""
+    transcriber = AsyncMock(return_value="hey poob play tiki tiki")
+    proc = _make_salvage_proc(1, transcriber)
+    _fill_salvage_ring(proc, 1)
+    expected_seq = proc._deepgram.current_utterance_seq(1)
+
+    from unittest.mock import patch
+
+    with patch("poob.voice.dual_pipeline.asyncio.sleep", new=AsyncMock()):
+        await proc._deferred_emit(1, "tester", time.monotonic() - 1.0, expected_seq)
+
+    proc._on_addressed.assert_called_once()
+    assert "tiki tiki" in proc._on_addressed.call_args.args[2]
+    assert proc._deepgram._consecutive_lost.get(1, 0) == 1  # miss still counted
+
+
+@pytest.mark.asyncio
+async def test_salvage_rejects_transcript_without_wake_token() -> None:
+    """Acoustic wake fired but the salvaged words carry no address — the
+    openwakeword-false-fire-on-music case. Must NOT execute as a command."""
+    transcriber = AsyncMock(return_value="just some song lyrics in the room")
+    proc = _make_salvage_proc(1, transcriber)
+    _fill_salvage_ring(proc, 1)
+
+    ok = await proc._attempt_salvage(1, "tester", time.monotonic() - 1.0)
+
+    assert ok is False
+    proc._on_addressed.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_salvage_disabled_without_transcriber() -> None:
+    proc = _make_salvage_proc(1, transcriber=None)
+    _fill_salvage_ring(proc, 1)
+    ok = await proc._attempt_salvage(1, "tester", time.monotonic() - 1.0)
+    assert ok is False
+    proc._on_addressed.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_salvage_skipped_on_too_little_audio() -> None:
+    """Below the minimum-audio floor the STT call is never made (nothing to
+    transcribe — e.g. a spurious wake blip)."""
+    transcriber = AsyncMock(return_value="hey poob play x")
+    proc = _make_salvage_proc(1, transcriber)
+    _fill_salvage_ring(proc, 1, frames=5)  # 5 * 640B = 3200B < 12800B floor
+
+    ok = await proc._attempt_salvage(1, "tester", time.monotonic() - 1.0)
+
+    assert ok is False
+    transcriber.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_salvage_stt_failure_is_swallowed() -> None:
+    transcriber = AsyncMock(side_effect=RuntimeError("groq down"))
+    proc = _make_salvage_proc(1, transcriber)
+    _fill_salvage_ring(proc, 1)
+
+    ok = await proc._attempt_salvage(1, "tester", time.monotonic() - 1.0)
+
+    assert ok is False
+    proc._on_addressed.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_salvage_slices_only_frames_since_speech_start() -> None:
+    """Stale ring audio from long before the utterance must not be sent to
+    STT — only frames from (speech_start - lead) onward."""
+    transcriber = AsyncMock(return_value="hey poob play tiki")
+    proc = _make_salvage_proc(1, transcriber)
+    _fill_salvage_ring(proc, 1, frames=50, age_s=120.0)  # stale: 2 minutes old
+    _fill_salvage_ring(proc, 1, frames=30, age_s=0.2)  # fresh utterance audio
+
+    speech_start = time.monotonic() - 1.0
+    ok = await proc._attempt_salvage(1, "tester", speech_start)
+
+    assert ok is True
+    sent_pcm = transcriber.await_args.args[0]
+    assert len(sent_pcm) == 30 * 640  # only the fresh frames
+
+
+@pytest.mark.asyncio
+async def test_salvage_empty_transcript_is_a_no_op() -> None:
+    transcriber = AsyncMock(return_value="   ")
+    proc = _make_salvage_proc(1, transcriber)
+    _fill_salvage_ring(proc, 1)
+
+    ok = await proc._attempt_salvage(1, "tester", time.monotonic() - 1.0)
+
+    assert ok is False
+    proc._on_addressed.assert_not_called()

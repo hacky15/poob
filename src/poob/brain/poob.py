@@ -591,6 +591,125 @@ def _strip_channel_context(content: str) -> str:
     return _CHANNEL_CTX_PREFIX_RE.sub("", content, count=1)
 
 
+# Title-safe abbreviations — a sentence terminator after one of these is part
+# of the name ("Mr. Brightside", "ft. Rihanna"), not a crosstalk boundary.
+_QUERY_ABBREVS = frozenset({"mr", "mrs", "ms", "dr", "st", "ft", "feat", "vs"})
+
+# Play-verb prefixes recognized by the deterministic play machinery (backfill
+# extraction, misrouted-play override, truncated-query extension). Longest
+# first so "play me some " wins over "play ".
+_PLAY_VERB_PREFIXES = (
+    "can you play ",
+    "play me some ",
+    "play us some ",
+    "play some ",
+    "play me ",
+    "play us ",
+    "play ",
+    "put on some ",
+    "put on ",
+    "throw on ",
+    "queue up ",
+    "queue ",
+)
+
+# Generic filler that carries no song identity — a play span made ONLY of
+# these has nothing to search for. (Mirrors the hallucination guard's local
+# stopword list; kept separate because this one gates overrides.)
+_PLAY_SPAN_STOPWORDS = frozenset(
+    {
+        "the", "a", "an", "by", "of", "and", "some", "any", "song", "songs",
+        "music", "track", "play", "put", "on", "it", "that", "this",
+        "please", "can", "you", "me", "us", "up",
+    }
+)  # fmt: skip
+
+# Control/effect vocabulary — a play span dominated by these is really a
+# control or effect request phrased with 'play' ("play it slower", "play it
+# louder", "play that again") and must NOT trigger the misrouted-play
+# override, or it would clobber a CORRECT apply_effect/volume/restore route.
+_PLAY_SPAN_CONTROL_VOCAB = frozenset(
+    {
+        "slower", "faster", "slow", "fast", "speed", "louder", "quieter",
+        "volume", "bass", "reverb", "nightcore", "effect", "effects",
+        "filter", "filters", "8d", "tremolo", "vibrato", "vader", "overload",
+        "earrape", "loop", "autoplay", "skip", "pause", "resume", "mute",
+        "stop", "next", "previous", "again", "back", "over", "down", "low",
+        "high", "max",
+    }
+)  # fmt: skip
+
+
+def _extract_play_query_span(clean_message: str) -> str | None:
+    """Extract the song-name span following an explicit play verb, or None.
+
+    The shared extraction primitive behind the play backfill, the
+    misrouted-play override, and the truncated-query extension: finds the
+    first play-verb prefix, takes what follows, and trims trailing
+    crosstalk. Returns None when the message carries no play verb.
+    """
+    lower = clean_message.lower()
+    for prefix in _PLAY_VERB_PREFIXES:
+        # Word boundary before the verb — a bare find() would match inside
+        # "autoPLAY filter" and hijack effect-clear requests into plays.
+        m = re.search(r"(?:^|[^a-z0-9'])" + re.escape(prefix), lower)
+        if m:
+            span = clean_message[m.end() :].strip()
+            span = _trim_trailing_crosstalk(span)
+            return span or None
+    return None
+
+
+def _play_span_content_tokens(span: str) -> set[str]:
+    """Tokens of a play span that actually identify a song — everything
+    minus filler and control/effect vocabulary."""
+    tokens = set(re.findall(r"[a-z0-9']+", span.lower()))
+    return tokens - _PLAY_SPAN_STOPWORDS - _PLAY_SPAN_CONTROL_VOCAB
+
+
+def _prefer_full_play_span(original_message: str, query: str) -> str:
+    """Router-truncation guard: prefer the user's full play span when the
+    routed query is a literal fragment of it.
+
+    2026-07-16 02:06:33: "play home or let the barts out" was routed with
+    query='home' and Edward Sharpe's "Home" played instead of the Homer meme
+    track — the SAME utterance had routed correctly 80 minutes earlier
+    (nondeterministic extraction by the primary rung). Only fires when the
+    routed query is a strict substring of the span, so a router that
+    legitimately normalized the query ("bang bang bang a j r" → "AJR BANG")
+    is never touched.
+    """
+    span = _extract_play_query_span(original_message)
+    if not span:
+        return query
+    q = query.strip().lower()
+    if q and q != span.lower() and q in span.lower() and len(span) > len(query) + 2:
+        return span
+    return query
+
+
+def _trim_trailing_crosstalk(query: str) -> str:
+    """Keep only the first sentence-ish segment of a safety-net play query.
+
+    Voice requests routinely carry trailing crosstalk after the song name —
+    "play thirsty thirsty Thursday. Oh yeah. I used to…", "play the song.
+    Fuck." — and the naive take-everything-after-the-verb extraction shipped
+    all of it to YouTube search. Cuts at the first sentence terminator that is
+    followed by more words, unless the segment ends in a title abbreviation
+    ("Mr. Brightside" must survive). Trailing punctuation is stripped either
+    way. See docs/incidents/control-command-misroute-by-weak-rung.md (the
+    extraction path) and the 2026-07-17 census.
+    """
+    for m in re.finditer(r"[.!?](?=\s+\S)", query):
+        head = query[: m.start()]
+        words = head.split()
+        last = words[-1].lower().rstrip(".") if words else ""
+        if last not in _QUERY_ABBREVS:
+            query = head
+            break
+    return query.strip().strip(".!?,").strip()
+
+
 def _looks_like_playable_link(text: str) -> bool:
     """True for a URL/URI the music handler can resolve — mirrors
     ``AsyncYTDL._looks_like_url`` (http/https/www, youtube.com, youtu.be) plus
@@ -994,6 +1113,30 @@ class PoobBrain:
                 )
             return "music_assistant", dict(forced)
 
+        # Misrouted-play override: an explicit "play X" routed to a NON-play
+        # music action is the weak-rung stale-echo shape (2026-07-16 02:15:49:
+        # "Play Betty Davis eyes. Jojo Siwa." → gemini re-emitted its previous
+        # apply_effect/slowed args and the song never played — SILENTLY,
+        # because [SILENT] control acks are unspoken). Same narrow discipline
+        # as the control override: music routes only, never deal; and the
+        # extracted span must carry real song-identifying content so control
+        # requests phrased with 'play' ("play it slower", "play that again")
+        # keep their correct effect/restore route. See the 2026-07-17 census.
+        if tool_name == "music_assistant" and (tool_args or {}).get("action") not in (
+            None,
+            "play",
+            "queue_many",
+        ):
+            span = _extract_play_query_span(clean_message)
+            if span and _play_span_content_tokens(span):
+                log.warning(
+                    "Safety net overrode misrouted play request",
+                    original=clean_message[:60],
+                    routed_args=tool_args,
+                    query=span[:60],
+                )
+                return "music_assistant", {"action": "play", "query": span}
+
         if tool_name is not None:
             return tool_name, tool_args
 
@@ -1011,26 +1154,19 @@ class PoobBrain:
         if not any(lower.startswith(s) or f" {s}" in lower for s in play_signals):
             return tool_name, tool_args
 
-        # Extract best-effort query from raw text
-        query = clean_message
-        for prefix in [
-            "can you play ",
-            "play me some ",
-            "play us some ",
-            "play some ",
-            "play me ",
-            "play us ",
-            "play ",
-            "put on some ",
-            "put on ",
-            "throw on ",
-            "queue up ",
-            "queue ",
-        ]:
-            idx = lower.find(prefix)
-            if idx != -1:
-                query = clean_message[idx + len(prefix) :].strip()
-                break
+        # Extract best-effort query from raw text (shared span extractor:
+        # play-verb prefix + trailing-crosstalk trim).
+        query = _extract_play_query_span(clean_message) or ""
+        # A span made only of filler ("the song") has nothing to search for —
+        # blank it so the downstream empty-query gate asks "Play what?" instead
+        # of literal-searching filler (2026-07-17: "Play the song. Fuck." →
+        # queued a novelty track titled with the expletive).
+        if query and not _play_span_content_tokens(query):
+            log.info(
+                "Safety net play span carries no content — deferring to 'Play what?'",
+                span=query[:60],
+            )
+            query = ""
         log.warning(
             "Safety net caught missed music intent",
             original=clean_message[:60],
@@ -1861,6 +1997,20 @@ class PoobBrain:
                     scrubbed=query[:80],
                 )
                 tool_args = {**tool_args, "query": query}
+            # Router-truncation guard: when the routed query is a literal
+            # fragment of what the user said after the play verb, prefer the
+            # full span (2026-07-16 02:06:33: "play home or let the barts out"
+            # routed query='home' → wrong song). Deterministic; only fires on
+            # a strict substring, so router-normalized queries are untouched.
+            extended = _prefer_full_play_span(original_message, query)
+            if extended != query:
+                log.info(
+                    "music.play query extended from raw span",
+                    routed=query[:60],
+                    extended=extended[:60],
+                )
+                query = extended
+                tool_args = {**tool_args, "query": query}
             # Empty / one-token queries can't possibly be a real song
             # request (STT cut off mid-sentence: "Hey, Poob. Play"
             # → action=play, query=""). Don't fan out to ytdl, don't
@@ -2360,6 +2510,20 @@ class PoobBrain:
                     raw=raw_query[:80],
                     scrubbed=query[:80],
                 )
+                tool_args = {**tool_args, "query": query}
+            # Router-truncation guard: when the routed query is a literal
+            # fragment of what the user said after the play verb, prefer the
+            # full span (2026-07-16 02:06:33: "play home or let the barts out"
+            # routed query='home' → wrong song). Deterministic; only fires on
+            # a strict substring, so router-normalized queries are untouched.
+            extended = _prefer_full_play_span(original_message, query)
+            if extended != query:
+                log.info(
+                    "music.play query extended from raw span",
+                    routed=query[:60],
+                    extended=extended[:60],
+                )
+                query = extended
                 tool_args = {**tool_args, "query": query}
             # Same url→query promotion as the text path — a pasted link
             # in 'url' is a real play request, not an empty one. See

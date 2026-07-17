@@ -27,7 +27,10 @@ import threading
 import time
 import wave
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 import numpy as np
 
@@ -733,6 +736,17 @@ class DualPipelineProcessor:
     fires the callback with the user ID and transcript.
     """
 
+    # ---- Utterance salvage (fallback STT when Deepgram delivers nothing) ----
+    # A wake-fired utterance whose transcript never arrives used to be DROPPED
+    # (zombie recovery only heals the stream for the NEXT attempt). The salvage
+    # ring keeps the recent 16k mono PCM per user so the lost utterance can be
+    # transcribed via the one-shot STT cascade and still served ~1-2s late.
+    # See docs/incidents/wake-utterances-lost-to-deepgram-miss-salvage.md.
+    _SALVAGE_MAX_FRAMES = 1000  # 1000 × 20ms = 20s; utterances force-emit at 15s
+    _SALVAGE_LEAD_S = 0.75  # capture a little audio before detected speech start
+    _SALVAGE_MIN_BYTES = 12800  # 0.4s @ 16kHz mono s16 — below this, nothing to say
+    _SALVAGE_STT_TIMEOUT_S = 4.0
+
     def __init__(
         self,
         wake_word_model_path: str | None,
@@ -741,6 +755,7 @@ class DualPipelineProcessor:
         on_passive_utterance: Callable[[int, str, str], None] | None = None,
         bot_audio_active: Callable[[], bool] | None = None,
         deepgram_model: str = "nova-3",
+        salvage_transcriber: Callable[[bytes], Awaitable[str]] | None = None,
     ) -> None:
         """Initialize the dual pipeline.
 
@@ -766,6 +781,11 @@ class DualPipelineProcessor:
             deepgram_model: Deepgram streaming model. Default "nova-3".
                 Set to "flux-general-en" via DEEPGRAM_MODEL env var to try
                 Deepgram Flux (Oct 2025, ~450ms P50 faster per benchmarks).
+            salvage_transcriber: Async one-shot STT over 16kHz mono PCM, used
+                to rescue a wake-fired utterance when Deepgram never delivers
+                its transcript (zombie/latency miss). ``None`` disables salvage
+                (the miss is dropped, pre-salvage behavior). The session passes
+                its STT cascade bound to 16kHz.
         """
         self._wake_detector = WakeWordDetector(
             model_path=wake_word_model_path or None,  # None = use pre-trained hey_jarvis
@@ -804,6 +824,12 @@ class DualPipelineProcessor:
         self._on_addressed = on_addressed_utterance
         self._on_passive = on_passive_utterance
         self._bot_audio_active = bot_audio_active or (lambda: False)
+        # Always-on per-user salvage ring: (monotonic_ts, 16k-mono frame).
+        # Bounded at _SALVAGE_MAX_FRAMES (~640KB/user); lives for the session
+        # like _wake_fp_buffers. Appended from the voice thread; snapshot-read
+        # on the event loop (GIL makes deque append/iterate safe enough here).
+        self._salvage_transcriber = salvage_transcriber
+        self._salvage_buffers: dict[int, collections.deque[tuple[float, bytes]]] = {}
         self._user_pipelines: dict[int, UserPipeline] = {}
         self._silence_counters: dict[int, int] = {}
         # Serializes _emit_utterance across the two caller threads (recording
@@ -971,6 +997,16 @@ class DualPipelineProcessor:
                 buf = collections.deque(maxlen=100)
                 self._wake_fp_buffers[user_id] = buf
             buf.append(pcm_16k)
+
+        # Always-on salvage ring — the raw material for rescuing a wake-fired
+        # utterance when Deepgram never delivers its transcript. Timestamped
+        # so _attempt_salvage can slice from just before speech start.
+        if getattr(self, "_salvage_transcriber", None) is not None:
+            sbuf = self._salvage_buffers.get(user_id)
+            if sbuf is None:
+                sbuf = collections.deque(maxlen=self._SALVAGE_MAX_FRAMES)
+                self._salvage_buffers[user_id] = sbuf
+            sbuf.append((pipeline.last_audio_time, pcm_16k))
 
         # Check energy (simple VAD)
         samples = np.frombuffer(pcm_16k, dtype=np.int16)
@@ -1249,11 +1285,86 @@ class DualPipelineProcessor:
         # Track the miss; force-reconnect after enough consecutive ones so the
         # user isn't silently deaf to Poob for the rest of the session.
         recovered = await self._deepgram.report_lost_transcript(user_id)
+        # Then try to SALVAGE the utterance itself: recovery only heals the
+        # stream for the next attempt; the request the user just made would
+        # otherwise be silently eaten (~19 lost requests in the 2026-07-17
+        # session alone). Salvage transcribes the ring-buffered PCM via the
+        # one-shot STT cascade and serves the request ~1-2s late.
+        salvaged = await self._attempt_salvage(user_id, user_name, speech_start_time)
         log.warning(
             "Wake word fired but Deepgram never delivered transcript",
             user=user_name or user_id,
             zombie_recovery=recovered,
+            salvaged=salvaged,
         )
+
+    async def _attempt_salvage(
+        self, user_id: int, user_name: str, speech_start_time: float
+    ) -> bool:
+        """Rescue a wake-fired utterance whose Deepgram transcript never came.
+
+        Slices the salvage ring from just before speech start, transcribes it
+        through the session's one-shot STT cascade, and — ONLY if the fallback
+        transcript itself carries the text wake token — emits it as the
+        addressed utterance. The text-gate requirement is load-bearing: the
+        acoustic wake can false-fire on music/loopback (documented), and
+        Deepgram delivering nothing is exactly the case where the transcript
+        gate never ran, so salvage must re-impose it or loopback audio could
+        be executed as a command. Never raises; False = utterance stays lost
+        (pre-salvage behavior).
+
+        The zombie-miss counter is deliberately NOT reset on salvage success —
+        salvage is the ambulance, not the cure; the Deepgram stream is still
+        sick and recovery should still fire on the next miss.
+        """
+        transcriber = getattr(self, "_salvage_transcriber", None)
+        if transcriber is None:
+            return False
+        buf = getattr(self, "_salvage_buffers", {}).get(user_id)
+        if not buf:
+            return False
+        cutoff = speech_start_time - self._SALVAGE_LEAD_S
+        pcm = b"".join(frame for ts, frame in list(buf) if ts >= cutoff)
+        if len(pcm) < self._SALVAGE_MIN_BYTES:
+            log.info(
+                "Salvage skipped — not enough buffered audio",
+                user=user_name or user_id,
+                bytes=len(pcm),
+            )
+            return False
+        try:
+            transcript = await asyncio.wait_for(
+                transcriber(pcm),
+                timeout=self._SALVAGE_STT_TIMEOUT_S,
+            )
+        except Exception as exc:
+            log.warning(
+                "Salvage STT failed",
+                user=user_name or user_id,
+                error=str(exc)[:100],
+            )
+            return False
+        transcript = (transcript or "").strip()
+        if not transcript:
+            return False
+        if not self._text_wake_word_match(transcript):
+            # Wake fired acoustically but the salvaged words carry no address —
+            # consistent with an openwakeword false-fire (music/noise). Reject,
+            # same as the primary gate would have.
+            log.info(
+                "Salvaged transcript rejected (no text wake match)",
+                user=user_name or user_id,
+                transcript=transcript[:80],
+            )
+            return False
+        log.info(
+            "Wake utterance salvaged via fallback STT",
+            user=user_name or user_id,
+            transcript=transcript[:80],
+            audio_bytes=len(pcm),
+        )
+        self._do_emit(user_id, user_name, speech_start_time, True, transcript)
+        return True
 
     def _do_emit(
         self,
@@ -1394,4 +1505,5 @@ class DualPipelineProcessor:
     async def cleanup(self) -> None:
         """Release all resources."""
         self._wake_detector.cleanup()
+        self._salvage_buffers.clear()
         await self._deepgram.cleanup()
