@@ -596,8 +596,10 @@ def _strip_channel_context(content: str) -> str:
 _QUERY_ABBREVS = frozenset({"mr", "mrs", "ms", "dr", "st", "ft", "feat", "vs"})
 
 # Play-verb prefixes recognized by the deterministic play machinery (backfill
-# extraction, misrouted-play override, truncated-query extension). Longest
-# first so "play me some " wins over "play ".
+# extraction, misrouted-play override, truncated-query extension).
+# _find_play_verb_match matches the LEFTMOST occurrence of any of these in
+# the message, tie-breaking on length when several match at the same
+# position — so list order here no longer affects correctness.
 _PLAY_VERB_PREFIXES = (
     "can you play ",
     "play me some ",
@@ -639,6 +641,143 @@ _PLAY_SPAN_CONTROL_VOCAB = frozenset(
     }
 )  # fmt: skip
 
+# Modifiers that can precede a game-reference noun without changing the fact
+# that the request is "let's play a game", not a song — kept separate from
+# _PLAY_SPAN_STOPWORDS so they don't also swallow real song-title content
+# elsewhere ("play some fun music" must keep "fun" as content there).
+_GAME_REFERENCE_MODIFIERS = frozenset({"fun", "quick", "another", "more", "one", "short"})
+
+
+# --- Not-a-music-command detection (v3 — see the incident note) -----------
+#
+# Two adversarial reviews, both pre-ship, found the same CLASS of bug twice:
+# v1 enumerated whole verb PHRASES and matched them unanchored across the
+# whole message; v2 replaced that with scoped, content-based checks but left
+# several of them unscoped in the same way (whole-message idiom search, an
+# unbounded lead-in, and priority- rather than position-ordered verb
+# matching). v3 fixes all of that by bounding every check to the CLAUSE
+# containing the matched play verb (_clause_bounds) instead of the whole
+# message or an arbitrary prefix, and by matching the play verb at its
+# LEFTMOST position in the message rather than by prefix-list priority.
+#
+# Full v1 -> v2 -> v3 rationale, every review finding, and the residual
+# accepted gaps (specific game titles; opinion questions with no recognized
+# lead-in anchor; a comma-separated opinion anchor in a different clause
+# than the play verb; "round"/"match" dropped as game-reference words) live
+# in docs/incidents/play-question-misrouted-to-play-command.md — read that
+# before changing any of the checks below.
+
+# Opinion-eliciting phrases with near-zero risk of appearing in a real play
+# command — checked ONLY against the lead-in text before the play verb.
+_NOT_MUSIC_LEADIN_RE = re.compile(
+    r"\b(?:"
+    r"do you think|what do you think|what do you reckon|"
+    r"what'?s your take|your take on|your thoughts on"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Idioms whose content is the extracted span itself ("play it cool" -> span
+# "it cool"). Checked as a PREFIX of the (stripped) span, tolerating one
+# interposed word ("it REAL cool") the same way "should we REALLY play X"
+# defeated rigid phrase matching elsewhere in this incident.
+_NOT_MUSIC_SPAN_PREFIX_RE = re.compile(r"^it\s+(?:\w+\s+)?(?:cool|safe)\b", re.IGNORECASE)
+
+# Short praise / figure-of-speech idioms — low collision risk, checked
+# unconditionally against the whole message (see rationale above).
+_NOT_MUSIC_IDIOM_RE = re.compile(
+    r"\b(?:good|nice|great|solid) play\b|"
+    r"\bplaying with (?:me|you|us)\b|"
+    r"\bstop playing\b",
+    re.IGNORECASE,
+)
+
+# Generic game-reference nouns — a play span whose only real content is one
+# of these is "let's play a game", not a song request. Deliberately NOT
+# specific game titles (see the design note above), and deliberately NOT
+# "round"/"match" — both are real song-title words ("Round and Round" by
+# Ratt / Selena Gomez ft. Flo Rida) that a second adversarial review caught
+# this set wrongly swallowing.
+_GAME_REFERENCE_WORDS = frozenset({"game", "games"})
+
+# Clause boundary for scoping the not-music checks — see _clause_bounds.
+_CLAUSE_BOUNDARY_RE = re.compile(r"[.!?,]")
+
+
+def _find_play_verb_match(clean_message: str) -> re.Match[str] | None:
+    """Locate the LEFTMOST play-verb prefix occurrence, word-boundary safe;
+    ties at the same position go to the longest (most specific) prefix.
+    Shared by extraction and the not-music guard so both agree on exactly
+    where the play verb sits.
+
+    Matching by leftmost POSITION (not _PLAY_VERB_PREFIXES priority order)
+    matters for compound messages: a second adversarial review found that
+    priority-first matching could pick a later, higher-priority-listed verb
+    ("play some") over an earlier, lower-priority one ("play"/"put on")
+    purely because of list order — silently discarding a genuine leading
+    command in favor of trailing crosstalk. See the incident note.
+    """
+    lower = clean_message.lower()
+    best: re.Match[str] | None = None
+    for prefix in _PLAY_VERB_PREFIXES:
+        # Word boundary before the verb — a bare search() would match inside
+        # "autoPLAY filter" and hijack effect-clear requests into plays.
+        m = re.search(r"(?:^|[^a-z0-9'])" + re.escape(prefix), lower)
+        if m is None:
+            continue
+        is_leftmost = best is None or m.start() < best.start()
+        is_more_specific_tie = (
+            best is not None and m.start() == best.start() and len(m.group()) > len(best.group())
+        )
+        if is_leftmost or is_more_specific_tie:
+            best = m
+    return best
+
+
+def _clause_bounds(clean_message: str, start: int, end: int) -> tuple[int, int]:
+    """The [start, end) span of the clause containing message[start:end],
+    delimited by the nearest sentence/comma boundary on each side.
+
+    Keeps the not-music checks from reaching across an unrelated clause:
+    "What's your take on the new Kanye album, PLAY Flashing Lights" must not
+    let the album commentary's "your take" suppress the unrelated, real
+    trailing command; "Play Bohemian Rhapsody, let's play some games" must
+    not let the trailing game reference erase the real leading song. See the
+    incident note's v3 section.
+    """
+    clause_start = 0
+    for m in _CLAUSE_BOUNDARY_RE.finditer(clean_message, 0, start):
+        clause_start = m.end()
+    boundary_after = _CLAUSE_BOUNDARY_RE.search(clean_message, end)
+    clause_end = boundary_after.start() if boundary_after else len(clean_message)
+    return clause_start, clause_end
+
+
+def _looks_like_non_music_play_usage(clean_message: str) -> bool:
+    """True when this message's 'play' usage is not a music command.
+
+    See the design note above _NOT_MUSIC_LEADIN_RE for the rationale and
+    the incident note for the full false-positive/false-negative trade-offs.
+    """
+    m = _find_play_verb_match(clean_message)
+    if m is None:
+        # No extractable play verb — nothing to protect downstream, so the
+        # idiom check is safe to run against the whole message.
+        return bool(_NOT_MUSIC_IDIOM_RE.search(clean_message))
+
+    clause_start, clause_end = _clause_bounds(clean_message, m.start(), m.end())
+    clause = clean_message[clause_start:clause_end]
+    if _NOT_MUSIC_IDIOM_RE.search(clause):
+        return True
+    lead = clean_message[clause_start : m.start()]
+    if _NOT_MUSIC_LEADIN_RE.search(lead):
+        return True
+    span = _trim_trailing_crosstalk(clean_message[m.end() : clause_end].strip())
+    if _NOT_MUSIC_SPAN_PREFIX_RE.match(span):
+        return True
+    content = _play_span_content_tokens(span) - _GAME_REFERENCE_MODIFIERS
+    return bool(content) and content <= _GAME_REFERENCE_WORDS
+
 
 def _extract_play_query_span(clean_message: str) -> str | None:
     """Extract the song-name span following an explicit play verb, or None.
@@ -648,16 +787,12 @@ def _extract_play_query_span(clean_message: str) -> str | None:
     first play-verb prefix, takes what follows, and trims trailing
     crosstalk. Returns None when the message carries no play verb.
     """
-    lower = clean_message.lower()
-    for prefix in _PLAY_VERB_PREFIXES:
-        # Word boundary before the verb — a bare find() would match inside
-        # "autoPLAY filter" and hijack effect-clear requests into plays.
-        m = re.search(r"(?:^|[^a-z0-9'])" + re.escape(prefix), lower)
-        if m:
-            span = clean_message[m.end() :].strip()
-            span = _trim_trailing_crosstalk(span)
-            return span or None
-    return None
+    m = _find_play_verb_match(clean_message)
+    if m is None:
+        return None
+    span = clean_message[m.end() :].strip()
+    span = _trim_trailing_crosstalk(span)
+    return span or None
 
 
 def _play_span_content_tokens(span: str) -> set[str]:
@@ -1112,6 +1247,16 @@ class PoobBrain:
                     forced=forced,
                 )
             return "music_assistant", dict(forced)
+
+        # Neither play-related override below may fire when 'play' isn't
+        # actually a music command in THIS message (opinion question, game
+        # reference, figure of speech) — both overrides exist to correct a
+        # MISSING or WRONG router decision, and the router already gets these
+        # right (this guard's docstring has the production regression that
+        # proved it). Firing anyway would REVERSE a correct decision instead
+        # of correcting a wrong one.
+        if _looks_like_non_music_play_usage(clean_message):
+            return tool_name, tool_args
 
         # Misrouted-play override: an explicit "play X" routed to a NON-play
         # music action is the weak-rung stale-echo shape (2026-07-16 02:15:49:

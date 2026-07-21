@@ -205,9 +205,10 @@ def test_music_safety_net_loop_off_overrides_misrouted_cycle() -> None:
     """'turn off loop' forces mode=off even if the LLM routed a bare
     {loop} (which the handler would otherwise cycle)."""
     b = _brain()
-    assert b._music_safety_net(
-        "turn off loop", "music_assistant", {"action": "loop"}
-    ) == ("music_assistant", {"action": "loop", "mode": "off"})
+    assert b._music_safety_net("turn off loop", "music_assistant", {"action": "loop"}) == (
+        "music_assistant",
+        {"action": "loop", "mode": "off"},
+    )
 
 
 def test_music_safety_net_autoplay_loop_no_false_positives() -> None:
@@ -240,9 +241,10 @@ def test_music_safety_net_autoplay_loop_no_false_positives() -> None:
 def test_control_override_corrects_max_volume_misrouted_to_skip() -> None:
     """The exact prod failure, wake prefix and all."""
     b = _brain()
-    assert b._music_safety_net(
-        "Hey, Poob. Max volume.", "music_assistant", {"action": "skip"}
-    ) == ("music_assistant", {"action": "volume", "value": 200})
+    assert b._music_safety_net("Hey, Poob. Max volume.", "music_assistant", {"action": "skip"}) == (
+        "music_assistant",
+        {"action": "volume", "value": 200},
+    )
 
 
 def test_control_override_volume_phrases() -> None:
@@ -275,9 +277,10 @@ def test_control_override_sees_past_speaker_attribution_on_voice() -> None:
     """Voice without a passive transcript prepends 'Name: ' — the override
     must still see the command underneath (voice=True)."""
     b = _brain()
-    assert b._music_safety_net(
-        "Ben: Hey, Poob. Max volume.", None, None, voice=True
-    ) == ("music_assistant", {"action": "volume", "value": 200})
+    assert b._music_safety_net("Ben: Hey, Poob. Max volume.", None, None, voice=True) == (
+        "music_assistant",
+        {"action": "volume", "value": 200},
+    )
 
 
 def test_control_override_does_NOT_strip_attribution_on_text() -> None:
@@ -316,9 +319,10 @@ def test_control_override_never_clobbers_a_routed_deal() -> None:
         ), phrase
     # But it STILL corrects a missing route and a music<->music misroute.
     assert b._music_safety_net("skip", None, None) == ("music_assistant", {"action": "skip"})
-    assert b._music_safety_net(
-        "max volume", "music_assistant", {"action": "skip"}
-    ) == ("music_assistant", {"action": "volume", "value": 200})
+    assert b._music_safety_net("max volume", "music_assistant", {"action": "skip"}) == (
+        "music_assistant",
+        {"action": "volume", "value": 200},
+    )
 
 
 def test_control_override_stop_now_fires_on_voice_wake_prefix() -> None:
@@ -353,9 +357,10 @@ def test_control_override_leaves_longer_sentences_alone() -> None:
         "the volume knob on my amp broke",
         "2:30",
     ):
-        assert b._music_safety_net(
-            msg, "music_assistant", {"action": "play", "query": "x"}
-        ) == ("music_assistant", {"action": "play", "query": "x"}), msg
+        assert b._music_safety_net(msg, "music_assistant", {"action": "play", "query": "x"}) == (
+            "music_assistant",
+            {"action": "play", "query": "x"},
+        ), msg
 
 
 def test_control_override_no_log_when_routing_was_already_right() -> None:
@@ -442,11 +447,11 @@ async def test_content_free_address_skips_tool_routing_entirely() -> None:
         patch.object(
             b,
             "_groq_with_tools",
-            new=AsyncMock(return_value=("", "music_assistant", {"action": "autoplay", "mode": "on"})),
+            new=AsyncMock(
+                return_value=("", "music_assistant", {"action": "autoplay", "mode": "on"})
+            ),
         ) as router,
-        patch.object(
-            b, "_casual_text_fallback", new=AsyncMock(return_value="what's up")
-        ),
+        patch.object(b, "_casual_text_fallback", new=AsyncMock(return_value="what's up")),
         patch.object(b, "_handle_music", new=AsyncMock()) as handle_music,
     ):
         out = await b.respond("Hey, Poob.", user_id="u1", guild_id=10)
@@ -466,7 +471,9 @@ async def test_message_with_content_still_routes_normally() -> None:
         patch.object(
             b,
             "_groq_with_tools",
-            new=AsyncMock(return_value=("", "music_assistant", {"action": "play", "query": "tiki tiki"})),
+            new=AsyncMock(
+                return_value=("", "music_assistant", {"action": "play", "query": "tiki tiki"})
+            ),
         ) as router,
         patch.object(
             b, "_handle_music", new=AsyncMock(return_value="Playing tiki tiki.")
@@ -753,9 +760,7 @@ def test_safety_net_blank_content_span_defers_to_play_what() -> None:
     the downstream empty-query gate asks 'Play what?' instead of literal-
     searching filler (which queued a novelty track titled 'FUCK!! Song!')."""
     b = _brain()
-    tool, args = b._music_safety_net(
-        "Hey, Poob. Play the song. Fuck.", None, None, voice=True
-    )
+    tool, args = b._music_safety_net("Hey, Poob. Play the song. Fuck.", None, None, voice=True)
     assert tool == "music_assistant"
     assert args["query"] == ""
 
@@ -817,9 +822,396 @@ def test_misrouted_play_override_leaves_play_and_deal_routes_alone() -> None:
         "play A and B", "music_assistant", {"action": "queue_many", "tracks": ["A", "B"]}
     ) == ("music_assistant", {"action": "queue_many", "tracks": ["A", "B"]})
     # Deal routes are never touched by any music override.
+    assert b._music_safety_net("play despacito", "deal_assistant", {"request": "x"}) == (
+        "deal_assistant",
+        {"request": "x"},
+    )
+
+
+# --- _looks_like_non_music_play_usage: opinion-question / game-reference /---
+# --- figure-of-speech guard (2026-07-21 prod regression) --------------------
+# "Hey, Poob. Do you think we should play hard or standard?" (asking Poob's
+# OPINION on a BTD6 game-difficulty choice) — the ENTIRE cascade correctly
+# returned no tool (no poob.tool_route line at all), then the play-intent
+# backfill REVERSED that correct decision purely because " play " appeared
+# in the sentence, and queued a random "Dark Path HARD STANDARD Guide" BTD6
+# video. Neither play-related override may fire when 'play' isn't actually a
+# music command in THIS message. See
+# docs/incidents/play-question-misrouted-to-play-command.md and
+# docs/decisions/music-routing-prompt-thoughtfulness.md (which flagged this
+# exact risk class — "let's play a game" — when the backstop was kept).
+#
+# v2 (same-day rewrite): an adversarial review of the first version proved
+# whole-phrase verb enumeration ("let's play"/"wanna play"/"should we play")
+# both over-matches real requests ("I want to play some jazz") AND
+# under-matches paraphrases of the actual incident ("what do you reckon,
+# play X", one interposed word defeating "should we play"), and that
+# unanchored whole-message matching let a trailing unrelated clause suppress
+# a genuine LEADING play command.
+#
+# v3 (second adversarial review, before ship): v2's fixes were themselves
+# unscoped in new ways — a whole-message idiom search, an unbounded lead-in,
+# and priority- rather than position-ordered verb matching all reproduced
+# the same "unrelated clause suppresses a real command" bug class in a new
+# shape. See the incident note's "v3" section and the design comment above
+# _NOT_MUSIC_LEADIN_RE in poob.py for the full rationale of what changed.
+
+
+def test_opinion_question_play_usage_is_not_music() -> None:
+    """Only multi-word opinion-eliciting phrases with near-zero collision
+    risk against real commands are recognized — 'do you think'/'what do you
+    reckon'/etc, checked against the LEAD-IN before the play verb, scoped to
+    the CLAUSE containing the verb (v3: see
+    test_comma_separated_opinion_anchor_is_a_documented_accepted_gap for why
+    these are all punctuation-free between the anchor and the verb)."""
+    from poob.brain.poob import _looks_like_non_music_play_usage
+
+    for msg in (
+        "Hey, Poob. Do you think we should play hard or standard?",
+        "do you think we should play easy mode",
+        "What do you think should we play defense?",
+        "What do you reckon should we play attack or defense?",
+        "What's your take should we play hard or standard?",
+        "your thoughts on should we play offense",
+    ):
+        assert _looks_like_non_music_play_usage(msg) is True, msg
+
+
+def test_comma_separated_opinion_anchor_is_a_documented_accepted_gap() -> None:
+    """Deliberate v3 trade-off: the opinion lead-in check is scoped to the
+    CLAUSE containing the play verb (_clause_bounds) so an unrelated clause
+    can never suppress a real trailing command — the v3 fix for the second
+    review's highest-severity false-positive ("What's your take on the new
+    Kanye album, play Flashing Lights" must not be suppressed). The cost is
+    that a genuinely comma-separated opinion question — anchor phrase and
+    play verb in DIFFERENT clauses — is no longer caught by this guard. The
+    real production incident had NO comma at all ("Do you think we should
+    play hard or standard?"), so the primary case stays fixed; this variant
+    falls through to the LLM router, which the incident's own log evidence
+    shows handles thoughtful questions correctly already. Pinned here so a
+    future change to this trade-off is deliberate, not accidental."""
+    from poob.brain.poob import _looks_like_non_music_play_usage
+
+    assert _looks_like_non_music_play_usage("What do you reckon, play attack or defense?") is False
+    assert _looks_like_non_music_play_usage("your thoughts on, should we play offense") is False
+
+
+def test_idiom_play_usage_is_not_music_regardless_of_framing() -> None:
+    """Closed-set idioms ('play it cool'/'play it safe'/praise/'playing
+    with') are recognized by their own content, independent of whatever
+    opinion-question framing (or lack of it) wraps them — 'play it safe'
+    catches 'I think we should play it safe' even though bare 'I think'
+    isn't itself a recognized opinion lead-in."""
+    from poob.brain.poob import _looks_like_non_music_play_usage
+
+    for msg in (
+        "play it cool",
+        "play it safe",
+        "play it real cool",
+        "play it pretty safe",
+        "I think we should play it safe",
+        "you think we should play it safe",
+        "good play",
+        "nice play man",
+        "great play right there",
+        "solid play",
+        "stop playing with me",
+        "stop playing",
+    ):
+        assert _looks_like_non_music_play_usage(msg) is True, msg
+
+
+def test_game_reference_span_is_not_music() -> None:
+    """A play span whose only real content is a generic game-reference noun
+    ('game'/'games') is not music — checked on the SPAN content, not the
+    verb phrase, so it works regardless of which verb ('play'/'let's play'/
+    'wanna play') introduces it, and tolerates a common adjective/quantifier
+    modifier ('a FUN game', 'one MORE game') that a second adversarial
+    review found defeating the exact-subset check."""
+    from poob.brain.poob import _looks_like_non_music_play_usage
+
+    for msg in (
+        "let's play a game",
+        "lets play a game",
+        "play a game",
+        "wanna play a game",
+        "want to play some games",
+        "let's play a fun game",
+        "wanna play one more game",
+        "let's play a quick game",
+        "should we play another game",
+    ):
+        assert _looks_like_non_music_play_usage(msg) is True, msg
+
+
+def test_round_and_match_game_words_are_a_documented_accepted_gap() -> None:
+    """Deliberate v3 narrowing: 'round'/'match' were dropped from
+    _GAME_REFERENCE_WORDS because a second adversarial review found them
+    colliding with real song-title content ('Round and Round' — Ratt 1984 /
+    Selena Gomez ft. Flo Rida). 'should we play a round' is no longer
+    recognized as a game reference by this guard; deferred to the LLM/
+    prompt layer, same reasoning as specific game titles. Pinned here so a
+    future change to this trade-off is deliberate, not accidental."""
+    from poob.brain.poob import _looks_like_non_music_play_usage
+
+    assert _looks_like_non_music_play_usage("should we play a round") is False
+
+
+def test_game_reference_word_no_longer_misclassifies_a_real_song() -> None:
+    """The v3 fix for the second review's game-word/song-title collision
+    finding: 'Round and Round' is a real song whose only surviving content
+    token, after stopword stripping, used to be the bare word 'round' —
+    which the old (v2) _GAME_REFERENCE_WORDS set then misclassified as
+    'let's play a round [of a game]'."""
+    from poob.brain.poob import _looks_like_non_music_play_usage
+
+    assert _looks_like_non_music_play_usage("play round and round") is False
+
+
+def test_specific_game_titles_are_a_documented_accepted_gap() -> None:
+    """Deliberate trade-off (see the poob.py design note above
+    _NOT_MUSIC_LEADIN_RE): the code-level backstop does NOT enumerate
+    specific game titles ('Among Us') — a real 'Fortnite'/'Minecraft' SONG
+    request would collide with that enumeration. This is left to the LLM/
+    prompt layer, which the incident's own log evidence shows handles it
+    correctly. Pinned here so a future change to this trade-off is
+    deliberate, not accidental."""
+    from poob.brain.poob import _looks_like_non_music_play_usage
+
+    assert _looks_like_non_music_play_usage("wanna play Among Us") is False
+    assert _looks_like_non_music_play_usage("want to play some Among Us") is False
+
+
+def test_real_play_commands_are_not_flagged() -> None:
+    """The guard must never suppress genuine play requests — including the
+    documented vault catches, mid-sentence commands, and the exact phrasings
+    the v1 regex incorrectly flagged (verb-only 'want to play'/'let's play'/
+    'should we play' followed by REAL music content, not a game/idiom)."""
+    from poob.brain.poob import _looks_like_non_music_play_usage
+
+    for msg in (
+        "play some jazz",
+        "can you play despacito",
+        "queue up phonk",
+        "play tiki tiki",
+        "hey poob play cheeky cheeky",
+        "put on some music",
+        "play body dee dum",
+        "yeah that's cool, play some tiki tiki",
+        "play starships",
+        # v1 false positives (verb-phrase-only matching wrongly caught these)
+        "I want to play some jazz",
+        "let's play some tunes",
+        "wanna play some Beyonce",
+        "want to play my playlist",
+        "should I play the new Drake album",
+        "should we play some Metallica right now",
+    ):
+        assert _looks_like_non_music_play_usage(msg) is False, msg
+
+
+def test_leading_play_command_survives_a_trailing_unrelated_clause() -> None:
+    """Architectural regression guard (v1's most serious finding): the guard
+    must be scoped to the play verb it's evaluating, not the whole message —
+    a trailing 'wanna play something after' clause must NOT suppress a
+    genuine LEADING play command earlier in the same (compound,
+    STT-crosstalk-laden) message."""
+    from poob.brain.poob import _looks_like_non_music_play_usage
+
+    assert (
+        _looks_like_non_music_play_usage(
+            "Play Betty Davis eyes. Jojo Siwa. Wanna play something after"
+        )
+        is False
+    )
+
+
+def test_unrelated_leading_clause_does_not_suppress_a_real_trailing_command() -> None:
+    """v3 fix (second review's highest-severity finding): the mirror image
+    of the trailing-clause regression above, now on the LEADING side. The
+    opinion lead-in check used to scan the ENTIRE prefix before the play
+    verb, so an unrelated leading clause containing one of the anchor
+    phrases ('your take on...') could suppress a real, unrelated trailing
+    play command."""
+    from poob.brain.poob import _looks_like_non_music_play_usage
+
+    assert (
+        _looks_like_non_music_play_usage(
+            "What's your take on the new Kanye album, play Flashing Lights"
+        )
+        is False
+    )
+    assert (
+        _looks_like_non_music_play_usage(
+            "Your thoughts on the new Kanye album, play Flashing Lights"
+        )
+        is False
+    )
+
+
+def test_idiom_in_an_unrelated_clause_does_not_suppress_a_real_trailing_command() -> None:
+    """v3 fix: _NOT_MUSIC_IDIOM_RE used to be checked unconditionally
+    against the WHOLE message, so a 'stop playing X' clause could suppress a
+    genuinely unrelated, real trailing play request in the same compound
+    message — an ordinary control+request pattern for a voice music
+    assistant, not a contrived edge case."""
+    from poob.brain.poob import _looks_like_non_music_play_usage
+
+    assert _looks_like_non_music_play_usage("Stop playing this, play some jazz instead") is False
+
+
+def test_leftmost_play_verb_wins_over_a_higher_priority_trailing_one() -> None:
+    """v3 fix: _find_play_verb_match used to pick a match by
+    _PLAY_VERB_PREFIXES priority order searched across the WHOLE message,
+    not by leftmost occurrence — so a later, higher-priority-listed verb
+    ('play some') could beat an earlier, lower-priority one ('play'/'put
+    on'), discarding the real leading command's content entirely."""
+    from poob.brain.poob import _extract_play_query_span, _looks_like_non_music_play_usage
+
+    # The real leading song survives (may still carry trailing crosstalk —
+    # the comma-crosstalk trim gap is a separate, already-documented
+    # follow-up — but it must no longer be DISCARDED for "games").
+    span = _extract_play_query_span("Play Bohemian Rhapsody, let's play some games.")
+    assert span is not None and span.lower().startswith("bohemian rhapsody")
+    assert _extract_play_query_span("put on some jazz. wanna play something after") == "jazz"
+    assert (
+        _looks_like_non_music_play_usage("Play Bohemian Rhapsody, let's play some games.") is False
+    )
+
+
+def test_documented_v1_bug_reports_are_fixed() -> None:
+    """Every CONFIRMED finding from the first pre-ship adversarial review,
+    pinned individually so a future regex change can't silently reopen any
+    of them."""
+    from poob.brain.poob import _looks_like_non_music_play_usage
+
+    f = _looks_like_non_music_play_usage
+    # False positives (v1 wrongly suppressed real requests) -> must be False now.
+    assert f("I want to play some jazz") is False
+    assert f("let's play some tunes") is False
+    assert f("wanna play some Beyonce") is False
+    assert f("should I play the new Drake album") is False
+    assert f("should we play some Metallica right now") is False
+    assert f("you think you can play that song") is False
+    # False negatives (v1 still missed paraphrases of the incident) -> now True.
+    # (comma dropped vs. the original v1/v2 phrasing: v3 scopes the opinion
+    # lead-in check to the clause containing the verb — see
+    # test_comma_separated_opinion_anchor_is_a_documented_accepted_gap.)
+    assert f("What do you reckon should we play attack or defense?") is True
+    assert f("What's your take should we play hard or standard?") is True
+    assert f("I think we should play it safe") is True
+    # Regression (v1's unanchored whole-message match) -> leading command survives.
+    assert f("Play Betty Davis eyes. Jojo Siwa. Wanna play something after") is False
+
+
+def test_documented_v2_bug_reports_are_fixed() -> None:
+    """Every CONFIRMED finding from the SECOND pre-ship adversarial review
+    (run against v2), pinned individually so a future change can't silently
+    reopen any of them. See docs/incidents/play-question-misrouted-to-play-command.md
+    v3 section for the full findings."""
+    from poob.brain.poob import _extract_play_query_span, _looks_like_non_music_play_usage
+
+    f = _looks_like_non_music_play_usage
+    # Finding: unrelated LEADING clause containing an opinion anchor
+    # suppressed a real trailing command.
+    assert f("What's your take on the new Kanye album, play Flashing Lights") is False
+    # Finding: whole-message idiom search suppressed a real trailing command.
+    assert f("Stop playing this, play some jazz instead") is False
+    # Finding: adjective/quantifier defeated the game-reference span check.
+    assert f("let's play a fun game") is True
+    assert f("wanna play one more game") is True
+    # Finding: priority- (not position-) ordered verb matching discarded a
+    # real leading command's content.
+    span = _extract_play_query_span("Play Bohemian Rhapsody, let's play some games.")
+    assert span is not None and span.lower().startswith("bohemian rhapsody")
+    # Finding: "round"/"match" in _GAME_REFERENCE_WORDS collided with real
+    # song titles ("Round and Round").
+    assert f("play round and round") is False
+    # Finding: the "it cool"/"it safe" idiom prefix was defeated by one
+    # interposed word.
+    assert f("play it real cool") is True
+
+
+def test_opinion_question_bypasses_play_backfill_entirely() -> None:
+    """The exact prod regression, end to end: no tool routed, message
+    contains ' play ' as a substring, but the message is an opinion
+    question — must return (None, None) unchanged, NOT force a play."""
+    b = _brain()
     assert b._music_safety_net(
-        "play despacito", "deal_assistant", {"request": "x"}
-    ) == ("deal_assistant", {"request": "x"})
+        "Hey, Poob. Do you think we should play hard or standard?", None, None
+    ) == (None, None)
+
+
+def test_opinion_question_bypasses_misrouted_play_override_too() -> None:
+    """Defense in depth: even if a weak rung mis-routes an opinion question
+    to some OTHER music action, the misrouted-play override must not
+    'correct' it into a play — the message was never a play request."""
+    b = _brain()
+    assert b._music_safety_net(
+        "Do you think we should play hard or standard?",
+        "music_assistant",
+        {"action": "apply_effect", "effect": "slowed"},
+    ) == ("music_assistant", {"action": "apply_effect", "effect": "slowed"})
+
+
+def test_game_reference_play_still_falls_through_to_casual() -> None:
+    """'let's play a game' with no tool routed must stay a no-op — the
+    router (or casual fallback) handles it as conversation, not a command."""
+    b = _brain()
+    assert b._music_safety_net("let's play a game", None, None) == (None, None)
+    assert b._music_safety_net("good play", "music_assistant", {"action": "skip"}) == (
+        "music_assistant",
+        {"action": "skip"},
+    )
+
+
+def test_misrouted_play_override_also_respects_game_reference_span() -> None:
+    """The shared not-music guard call in _music_safety_net gates BOTH the
+    play backfill and the misrouted-play override — pin the override branch
+    specifically through the game-reference (span-content-token) check, a
+    structurally different code path than the whole-message idiom regex or
+    opinion lead-in already covered by
+    test_opinion_question_bypasses_misrouted_play_override_too."""
+    b = _brain()
+    assert b._music_safety_net(
+        "let's play a game", "music_assistant", {"action": "apply_effect", "effect": "slowed"}
+    ) == ("music_assistant", {"action": "apply_effect", "effect": "slowed"})
+
+
+def test_idiom_in_unrelated_clause_survives_end_to_end() -> None:
+    """v3 fix, end to end: an idiom in an earlier clause must not swallow a
+    real trailing play request when no tool was routed at all."""
+    b = _brain()
+    tool_name, tool_args = b._music_safety_net(
+        "Stop playing this, play some jazz instead", None, None
+    )
+    assert tool_name == "music_assistant"
+    assert tool_args["action"] == "play"
+    assert "jazz" in tool_args["query"].lower()
+
+
+def test_unrelated_leading_clause_survives_end_to_end() -> None:
+    """v3 fix, end to end: an opinion-anchor phrase in an earlier, unrelated
+    clause must not swallow a real trailing play request when no tool was
+    routed at all."""
+    b = _brain()
+    tool_name, tool_args = b._music_safety_net(
+        "What's your take on the new Kanye album, play Flashing Lights", None, None
+    )
+    assert tool_name == "music_assistant"
+    assert tool_args["action"] == "play"
+    assert "flashing lights" in tool_args["query"].lower()
+
+
+def test_control_override_still_wins_over_the_not_music_guard() -> None:
+    """The guard sits AFTER the control override in _music_safety_net —
+    an exact bare-stop phrase like 'stop playing' still forces action=stop
+    even though it also matches the not-music-play pattern."""
+    b = _brain()
+    assert b._music_safety_net("stop playing", None, None) == (
+        "music_assistant",
+        {"action": "stop"},
+    )
 
 
 # --- _prefer_full_play_span: router-truncation guard -------------------------
@@ -841,12 +1233,8 @@ def test_prefer_full_span_leaves_normalized_and_exact_queries_alone() -> None:
     from poob.brain.poob import _prefer_full_play_span
 
     # Router normalized (not a substring) — untouched.
-    assert (
-        _prefer_full_play_span("play bang bang bang a j r", "AJR BANG") == "AJR BANG"
-    )
+    assert _prefer_full_play_span("play bang bang bang a j r", "AJR BANG") == "AJR BANG"
     # Exact match — untouched.
-    assert (
-        _prefer_full_play_span("play gobble glitch", "gobble glitch") == "gobble glitch"
-    )
+    assert _prefer_full_play_span("play gobble glitch", "gobble glitch") == "gobble glitch"
     # No play verb in the message (query came from context legitimately).
     assert _prefer_full_play_span("that song from earlier", "despacito") == "despacito"
