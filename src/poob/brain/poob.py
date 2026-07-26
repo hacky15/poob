@@ -615,14 +615,52 @@ _PLAY_VERB_PREFIXES = (
     "queue ",
 )
 
-# Generic filler that carries no song identity — a play span made ONLY of
-# these has nothing to search for. (Mirrors the hallucination guard's local
-# stopword list; kept separate because this one gates overrides.)
+# Words that carry no song identity — a play span made ONLY of these names
+# nothing searchable, so the query is blanked and the user gets "Play what?"
+# instead of a literal-text YouTube match.
+#
+# THE SINGLE SOURCE OF TRUTH for this question. It previously existed as
+# three divergent copies (this set plus two inline duplicates in the music
+# handlers), so evidence that improved one never reached the others — the
+# structural reason referential/dangling spans kept slipping through.
+#
+# Two tiers, both closed classes:
+#   1. Generic music/command filler — "play the song", "some music".
+#   2. Function words (pronouns, auxiliaries, prepositions, conjunctions,
+#      wh-words, speech-act verbs). These are what a REFERENCE to a song is
+#      made of ("the music that we told you to play") as opposed to a NAME.
+#
+# Why enumeration is legitimate here when it failed three times in
+# play-question-misrouted-to-play-command: function words are a genuine
+# closed class — finite, stable, and impossible to paraphrase into
+# existence — whereas verb/opinion PHRASES are an open set. The gate also
+# fails OPEN (unknown tokens count as content), so nonsense titles like
+# "tiki tiki" and transliterated non-English titles survive untouched; the
+# query text sent to search is never word-stripped, only kept whole or
+# blanked. That last point is what keeps
+# ytdl-search-best-guess-fallback's "don't bake English grammar into a
+# global music search" objection from applying.
+#
+# Deliberately EXCLUDED: "one" and "something" — both are real titles
+# ("One" — U2/Metallica) and excluding them costs only "play the one from
+# before". See docs/incidents/referential-play-query-searched-literally.md.
 _PLAY_SPAN_STOPWORDS = frozenset(
     {
-        "the", "a", "an", "by", "of", "and", "some", "any", "song", "songs",
-        "music", "track", "play", "put", "on", "it", "that", "this",
-        "please", "can", "you", "me", "us", "up",
+        # generic music / command filler
+        "the", "a", "an", "by", "of", "and", "or", "some", "any", "song",
+        "songs", "music", "track", "play", "put", "on", "it", "that", "this",
+        "please", "up", "actually", "just",
+        # pronouns
+        "you", "me", "us", "we", "i", "he", "she", "they", "them", "him",
+        "her", "my", "your", "our", "their", "his",
+        # auxiliaries / modals
+        "is", "are", "was", "were", "be", "been", "am", "do", "does", "did",
+        "can", "could", "will", "would", "should", "have", "has", "had",
+        # prepositions / conjunctions
+        "to", "for", "from", "with", "about", "at", "in",
+        # wh-words and speech-act verbs (how a request REFERS to a song)
+        "what", "which", "who", "told", "tell", "said", "say", "asked",
+        "ask", "want", "wanna", "gonna",
     }
 )  # fmt: skip
 
@@ -2178,41 +2216,11 @@ class PoobBrain:
                 )
                 return "" if voice else "Play what?"
             if query:
-                _STOPWORDS = {
-                    "the",
-                    "a",
-                    "an",
-                    "by",
-                    "and",
-                    "or",
-                    "of",
-                    "to",
-                    "for",
-                    "some",
-                    "any",
-                    "song",
-                    "songs",
-                    "music",
-                    "track",
-                    "play",
-                    "put",
-                    "on",
-                    "it",
-                    "that",
-                    "this",
-                    "please",
-                    "can",
-                    "you",
-                    "me",
-                    "us",
-                    "up",
-                }
-                import re as _re
-
-                msg_tokens = {t for t in _re.findall(r"[a-z0-9']+", original_message.lower())}
-                query_tokens = {
-                    t for t in _re.findall(r"[a-z0-9']+", query.lower()) if t not in _STOPWORDS
-                }
+                # Shared lexicon + tokenizer — one source of truth for "does this
+                # text identify a song?" (was an inline duplicate of
+                # _PLAY_SPAN_STOPWORDS that drifted out of sync).
+                msg_tokens = _play_span_content_tokens(original_message)
+                query_tokens = _play_span_content_tokens(query)
                 if query_tokens and not (query_tokens & msg_tokens):
                     # The LLM pulled a song from stale context, not this turn
                     # (common under degraded/429 routing). Don't play the wrong
@@ -2687,39 +2695,11 @@ class PoobBrain:
                 yield "play what?"
                 return
             if query:
-                _STOPWORDS = {
-                    "the",
-                    "a",
-                    "an",
-                    "by",
-                    "and",
-                    "or",
-                    "of",
-                    "to",
-                    "for",
-                    "some",
-                    "any",
-                    "song",
-                    "songs",
-                    "music",
-                    "track",
-                    "play",
-                    "put",
-                    "on",
-                    "it",
-                    "that",
-                    "this",
-                    "please",
-                    "can",
-                    "you",
-                    "me",
-                    "us",
-                    "up",
-                }
-                msg_tokens = {t for t in re.findall(r"[a-z0-9']+", original_message.lower())}
-                query_tokens = {
-                    t for t in re.findall(r"[a-z0-9']+", query.lower()) if t not in _STOPWORDS
-                }
+                # Shared lexicon + tokenizer — one source of truth for "does this
+                # text identify a song?" (was an inline duplicate of
+                # _PLAY_SPAN_STOPWORDS that drifted out of sync).
+                msg_tokens = _play_span_content_tokens(original_message)
+                query_tokens = _play_span_content_tokens(query)
                 if query_tokens and not (query_tokens & msg_tokens):
                     # Stale-context hallucination: re-derive the query straight
                     # from THIS message before giving up, so a clear "play X"
