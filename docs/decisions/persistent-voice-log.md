@@ -3,8 +3,26 @@ type: decision
 status: active
 date: 2026-06-01
 tags: [voice, logging, observability, deploy, infra]
-related: [[voice-4014-reconnect-event-loop-wedge]] [[voice-architecture]] [[production-log-access]]
+related: [[voice-4014-reconnect-event-loop-wedge]] [[voice-architecture]] [[production-log-access]] [[per-subsystem-component-logging]] [[subsystem-log-queries]]
 ---
+
+> [!update] 2026-06-15 — scope expanded, see [[per-subsystem-component-logging]]
+> The decision below still holds (a marketplace-free voice log on the data
+> volume capturing both the structlog and stdlib paths). Two things changed:
+> 1. **`voice.log` now includes `music.*`** (voice + brain + music). The old
+>    allow-list `("voice", "brain", "poob.voice")` excluded music, so VC audits
+>    missed every queue/skip/autoplay event — that gap is closed. Additive and
+>    non-breaking: same file, same format, more lines.
+> 2. **`<log_dir>/poob.jsonl` is now the canonical machine-parseable log** — a
+>    rotating firehose of *every* event tagged with a top-level `component`
+>    field, a lossless superset of `voice.log` (incl. the stdlib DAVE/4014
+>    path). Filter any subsystem with `jq`; see [[subsystem-log-queries]].
+>
+> The tee mechanism described below is generalized into a `{stream: components}`
+> registry, and ANSI is now gated on `sys.stdout.isatty()` (clean `docker logs`).
+> Internal API renamed: `setup_voice_log`/`_VOICE_LOGGER_PREFIXES`/
+> `_is_voice_logger`/`_voice_tee_processor` → `setup_file_logs` +
+> `_add_component` + `_curated_tee_processor` + `_jsonl_sink_processor`.
 
 # Dedicated persistent voice/chat log on the data volume
 

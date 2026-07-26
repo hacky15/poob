@@ -81,6 +81,19 @@ Every fix must be **robust, modular, and integrated**. Never stuff edge-case pat
 - **If a value flows through 5 stages and gets lost**, trace the data flow end-to-end and fix where it drops — don't add fallbacks at every stage
 - **Every fix must be documented** in the vault with root cause and rationale — as an `incidents/` note if it was a bug, plus a `gotchas/` note if the hazard will recur.
 
+## CRITICAL: Permission Prompts Are Off — You Are the ONLY Safety Net
+
+This repo runs in **`bypassPermissions` mode** (`.claude/settings.local.json`). **Every** tool call — including destructive, irreversible, and outward-facing ones — runs **without a prompt and without any harness gate**. There is no second opinion behind you: the judgment a human used to provide at the prompt is now **entirely yours**, up front. This is exactly why the verification below is non-negotiable.
+
+**Before ANY destructive or irreversible call, verify two things first — the repercussion and the intention:**
+
+1. **Repercussion** — what does this actually do, and can it be undone? Inspect the target before acting. If the thing you're about to delete/overwrite/kill isn't what you assumed it was — or you didn't create it — **stop and surface that**, don't proceed.
+2. **Intention** — did the user actually ask for *this*, or did you infer it? A one-time approval does not extend to the next context. If intent is ambiguous, **ask before acting**, not after.
+
+Destructive/irreversible includes (non-exhaustive): `rm` / `Remove-Item`, `git reset --hard`, `git push --force`, `git checkout -- <file>`, deleting/renaming branches, `DROP`/`DELETE`/`ALTER` against `data/*.db`, truncating or rewriting `data/`, `taskkill` / `Stop-Process`, overwriting a file you have not read, deleting vault notes, and anything outward-facing (force-push, sending real Discord/email, posting to external services — these publish and may be cached/indexed even if later deleted).
+
+When in doubt, prefer the reversible path (move-aside over delete, new commit over amend/reset, dry-run over apply) and **name what you're about to do before you do it.** Speed is not the goal here — not breaking something irreversibly is.
+
 ## CRITICAL: Shell Environment — Read Before Running ANY Command
 
 The user runs **Windows PowerShell 5.1** (prompt: `(venv) PS C:\Users\19203\Downloads\AgenticWebScraper>`). Bash syntax does not translate cleanly. Common lethal mistakes:

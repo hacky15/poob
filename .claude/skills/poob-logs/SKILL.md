@@ -61,6 +61,24 @@ scripts/logs.sh poob --since 1h | grep "Bot is ready"
 scripts/logs.sh poob --since 1h | grep -B 2 -A 10 "Traceback"      # tracebacks with context
 ```
 
+## Isolating one subsystem (component-filtered JSONL)
+
+`docker logs` is the interleaved console stream. For a clean, lossless pull of a **single subsystem** (voice, music, scanner, brain, …) with no ANSI and no cross-contamination, read the on-volume JSONL firehose instead and filter by `component` (first segment of the logger name):
+
+```bash
+# All music events, nothing else
+ssh homelab "docker exec poob cat /app/data/logs/poob.jsonl" | jq -c 'select(.component=="music")'
+
+# Full interactive surface (voice + brain + music) in one pull
+ssh homelab "docker exec poob cat /app/data/logs/poob.jsonl" \
+  | jq -c 'select(.component=="voice" or .component=="brain" or .component=="music")'
+
+# Human-readable interactive stream, no jq (voice + brain + music)
+ssh homelab "docker exec poob tail -200 /app/data/logs/voice.log"
+```
+
+`poob.jsonl` and `voice.log` live on the `poob-data` volume, so they survive redeploys (unlike `docker logs`). The stdlib voice events (voice_compat DAVE, discord WS 4014) are tagged `component=voice`. Full recipe set — time windows, errors, rotated files, verification — in the [`subsystem-log-queries`](../../../docs/runbooks/subsystem-log-queries.md) runbook. Architecture: [`per-subsystem-component-logging`](../../../docs/decisions/per-subsystem-component-logging.md).
+
 ## Time conversion (UTC → local)
 
 Docker logs are **UTC** (Z suffix). User is in **CDT (UTC−5)** April–November, **CST (UTC−6)** otherwise.
