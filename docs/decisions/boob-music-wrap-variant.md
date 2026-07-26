@@ -8,20 +8,22 @@ related: [[toob-voice-filter-chain]] [[speculative-music-wrap]] [[voice-architec
 
 # Boob — rare friendly music-wrap variant ("Toob's side piece")
 
+> **2026-06-03 retune:** rarity dropped from 1 in 20 (`0.05`) to **1 in 75** (`1 / 75 ≈ 0.0133`) at the user's request — the variant was surfacing too often to feel special. Only `BOOB_PROBABILITY` and the test range guard changed; the architecture below is otherwise unchanged. Probability figures in this note reflect the current 1-in-75 target.
+
 ## Context
 
-Toob ([[toob-voice-filter-chain]]) is the only voice that wraps music plays — a dark, menacing, single-sentence mock of every request. Funny on first hit, but with one persona on every play the bit becomes predictable. User asked for a rare ("~1 in 20") opposite-vibe variant: same Toob lineage, but sweet, complimentary, three-sentence delivery, and the variant must self-introduce as "Toob's side piece" so the relationship lands every time.
+Toob ([[toob-voice-filter-chain]]) is the only voice that wraps music plays — a dark, menacing, single-sentence mock of every request. Funny on first hit, but with one persona on every play the bit becomes predictable. User asked for a rare opposite-vibe variant: same Toob lineage, but sweet, complimentary, three-sentence delivery, and the variant must self-introduce as "Toob's side piece" so the relationship lands every time. Original target was "~1 in 20"; retuned to "~1 in 75" on 2026-06-03 (see note above).
 
 ## Decision
 
-Add **Boob** as a second music-wrap persona, gated by a 5% random roll inside the existing voice + `action=play` branch. Mirrors Toob's architecture end-to-end — different filter chain, different TTS voice, different prompt — so the choice between Toob and Boob is a one-bit dispatch and nothing else regresses.
+Add **Boob** as a second music-wrap persona, gated by a ~1.3% (`1 / 75`) random roll inside the existing voice + `action=play` branch. Mirrors Toob's architecture end-to-end — different filter chain, different TTS voice, different prompt — so the choice between Toob and Boob is a one-bit dispatch and nothing else regresses.
 
 ### Trigger
 
 `brain/poob.py:respond_streaming` for the music-play branch:
 
 ```python
-is_boob = random.random() < BOOB_PROBABILITY  # 0.05
+is_boob = random.random() < BOOB_PROBABILITY  # 1/75 ≈ 0.0133
 yield VOICE_BOOB if is_boob else VOICE_TOOB
 async for sentence in self._handle_music_voice_streaming(
     ..., persona="boob" if is_boob else "toob",
@@ -29,8 +31,8 @@ async for sentence in self._handle_music_voice_streaming(
     yield sentence
 ```
 
-`BOOB_PROBABILITY = 0.05` lives next to `VOICE_BOOB`. Range guard test in
-`tests/unit/test_brain_boob_variant.py` keeps it in (0.03, 0.07] — too high
+`BOOB_PROBABILITY = 1 / 75` lives next to `VOICE_BOOB`. Range guard test in
+`tests/unit/test_brain_boob_variant.py` keeps it in [0.01, 0.02] — too high
 burns the rarity, too low means nobody ever hears it.
 
 ### Voice signal
@@ -91,25 +93,27 @@ shape (no atempo, no aecho, no bass), so its filter-graph init path is a
 separate cold-start. Without prewarming, the first ~1-in-20 hit would
 pay ~700ms of cold-start latency the one time someone actually triggers
 it. Prewarm cost is amortized into container-boot time nobody waits on.
+(Cold-start avoidance matters more now that a Boob hit is ~1 in 75 — the
+prewarmed graph is the only thing keeping that rare hit from also being slow.)
 
 ## Alternatives considered
 
 - **Persona as a `bool` (`is_boob`) instead of a string.** Only works for two personas. The third persona Poob (regular casual voice) was already implicit in the `else` branch; making the dispatch table explicit makes the contract obvious and prevents the next persona swap from silently breaking the routing.
 - **Single shared `_stream_persona_wrap_from_query` with a persona arg.** Smaller diff, but the prompts differ enough (Toob's one-sentence venom vs Boob's three-sentence intro+compliment+send-off) that the shared function would be 80% conditionals. Two methods is cleaner.
 - **Reuse `_synthesize_toob` with a filter-chain override.** Same critique — the persona-specific TTS voice (Leda vs Enceladus) and `speaking_rate` differ, so the override would touch most of the function anyway. Two methods, prewarm both, ship.
-- **Higher / lower probability.** 5% is the user's specified target ("~1 in 20"). Lower (1%) and the variant becomes invisible; higher (10%+) and it stops feeling rare.
+- **Higher / lower probability.** Originally 5% ("~1 in 20"); retuned to ~1.3% ("~1 in 75") on 2026-06-03 because 1-in-20 surfaced often enough to lose its surprise. Going much lower (≪1%) would make the variant effectively invisible; higher (10%+) and it stops feeling rare.
 
 ## Consequences
 
-- **Music-play voice path now has two outcomes.** Toob (95%) is unchanged. Boob (5%) is the new branch. Skip / pause / stop / volume are unaffected — those are silent and never trigger either persona.
+- **Music-play voice path now has two outcomes.** Toob (~98.7%) is unchanged. Boob (~1.3%, 1 in 75) is the new branch. Skip / pause / stop / volume are unaffected — those are silent and never trigger either persona.
 - **Routing, music handler, deal agent, casual chat — all unchanged.** Boob lives entirely inside the existing `_handle_music_voice_streaming` + session-synth surface. No new handler types, no new tool definitions, no LLM model swaps.
-- **Slightly larger TTS surface area on the homelab.** Two new FFmpeg invocations per ~20 plays (Boob synth) and one new voice in Google's Chirp catalog. Negligible.
+- **Slightly larger TTS surface area on the homelab.** Two new FFmpeg invocations per ~75 plays (Boob synth) and one new voice in Google's Chirp catalog. Negligible.
 - **Failure mode**: if Boob's TTS or FFmpeg fails, raw audio falls back the same way Toob does. If the wrap LLM call fails, the speculative-wrap path's existing `Speculative wrap failed` log line fires (now with `persona=boob` tag) and music still plays — just without the wrap. Acceptable.
 
 ## Validation
 
 - 8 new unit tests in `tests/unit/test_brain_boob_variant.py`:
-  - `BOOB_PROBABILITY` in (0, 0.10] range
+  - `BOOB_PROBABILITY` in (0, 0.10] range, banded to [0.01, 0.02] around the 1-in-75 target
   - VOICE_BOOB sentinel emitted when `random.random() < BOOB_PROBABILITY`
   - VOICE_TOOB emitted otherwise
   - Wrap call uses ≥100 max_tokens (3-sentence budget)
@@ -120,7 +124,7 @@ it. Prewarm cost is amortized into container-boot time nobody waits on.
 - All 32 brain tests pass (8 Boob + 9 casual-fallback + 15 multi-guild).
 - Full unit suite: TBD until completion.
 
-Subjective in-prod check: ask Poob to play music ~30 times. Boob should surface 1-2 times. Each Boob hit should:
+Subjective in-prod check: at 1 in 75, Boob is now genuinely rare — expect ~1 surfacing per ~75 plays, so this is a long-tail observation rather than a quick repeat test. Each Boob hit should:
 - Open with the side-piece intro
 - Continue for three sentences of compliment/send-off
 - Audibly be a brighter, slightly faster voice than Toob

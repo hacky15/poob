@@ -1,6 +1,6 @@
 """Tests for the Boob music-wrap variant.
 
-Boob is Toob's side piece: a rare (~1 in 20) friendly variant of the
+Boob is Toob's side piece: a rare (~1 in 75) friendly variant of the
 music-play voice wrap. Higher pitched, faster, three sentences, must
 self-introduce as Toob's side piece, compliments the user's music taste
 instead of mocking it.
@@ -39,10 +39,11 @@ def _make_brain() -> PoobBrain:
 # ---------------------------------------------------------------------------
 
 def test_boob_probability_in_expected_range() -> None:
-    """Documented as ~1 in 20. Constant must be in (0, 0.10] — too high
+    """Documented as ~1 in 75. Constant must be in (0, 0.10] — too high
     burns the rarity, zero disables the feature entirely."""
     assert 0 < BOOB_PROBABILITY <= 0.10
-    assert 0.03 <= BOOB_PROBABILITY <= 0.07
+    # ~1 in 75 ≈ 0.0133; keep the band tight around the target.
+    assert 0.01 <= BOOB_PROBABILITY <= 0.02
 
 
 @pytest.mark.asyncio

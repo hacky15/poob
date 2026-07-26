@@ -373,7 +373,16 @@ class GuildMusicPlayer:
         self._mixer: MixingAudioSource | None = None
         self._player_task: asyncio.Task | None = None
         self._next_event = asyncio.Event()
-        self._loop = asyncio.get_event_loop()
+        # In production this is always constructed inside the bot's running
+        # loop, so get_running_loop() is exactly what get_event_loop() used
+        # to return. The fallback covers synchronous construction in unit
+        # tests: bare get_event_loop() only *warned* on 3.11 but RAISES on
+        # 3.12+, which made these tests un-runnable off the container's
+        # Python and hid them from the new CI gate.
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = asyncio.new_event_loop()
         self._destroyed = False
         self._paused = False
         self._skip_requested = False
