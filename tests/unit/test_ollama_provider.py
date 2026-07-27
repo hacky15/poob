@@ -122,6 +122,7 @@ class TestProviderFactory:
         from poob.llm.provider import create_llm_provider
 
         config = AppConfig(
+            _env_file=None,
             discord_bot_token="test",
             discord_deals_channel_id=1,
             llm_provider="ollama",
@@ -135,6 +136,7 @@ class TestProviderFactory:
         from poob.llm.provider import create_llm_provider
 
         config = AppConfig(
+            _env_file=None,
             discord_bot_token="test",
             discord_deals_channel_id=1,
             llm_provider="unknown",
@@ -148,6 +150,7 @@ class TestProviderFactory:
         from poob.llm.provider import create_cloud_provider
 
         config = AppConfig(
+            _env_file=None,
             discord_bot_token="test",
             discord_deals_channel_id=1,
             google_api_key="",
@@ -162,6 +165,7 @@ class TestProviderFactory:
         from poob.llm.provider import create_cloud_provider
 
         config = AppConfig(
+            _env_file=None,
             discord_bot_token="test",
             discord_deals_channel_id=1,
             google_api_key="test-api-key",

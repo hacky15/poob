@@ -51,5 +51,12 @@ jobs:
 
       # The gate that actually blocks. Unit tests only: integration/e2e need
       # live browsers, Discord, and provider credentials.
+      #
+      # maxfail is 20, not 5: on a suite that has never had a gate, the first
+      # runs surface whole CLASSES of environment coupling at once (the
+      # initial run hit .env-dependent config and a missing tzdata). Cutting
+      # off at 5 hides the extent and costs a round-trip per batch. The full
+      # suite is ~6 min, so letting it run is cheap; 20 still stops a
+      # catastrophic break from grinding through all 1,900.
       - name: Unit tests
-        run: pytest tests/unit -q --maxfail=5
+        run: pytest tests/unit -q --maxfail=20

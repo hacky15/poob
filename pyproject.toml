@@ -77,8 +77,12 @@ dependencies = [
     # Structured constraint parsing from watchlist notes
     "rapidfuzz>=3.6.0",
 
-    # Timezone data (required on Windows where system tzdata is absent)
-    "tzdata>=2024.1; sys_platform == 'win32'",
+    # Timezone data. Unconditional, not win32-only: the code calls
+    # ZoneInfo("America/Chicago") (formatter, patrol_scheduler), and any host
+    # without a system tzdata raises ZoneInfoNotFoundError. The container has
+    # one, so this went unnoticed until CI ran on a bare Linux runner. Vendor
+    # the data rather than depend on the host having it.
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]
