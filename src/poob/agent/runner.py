@@ -7,7 +7,6 @@ import re
 import time
 from typing import Any
 
-import structlog
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
@@ -23,8 +22,9 @@ from poob.skills.llm_call import _model_id
 from poob.storage.repositories.conversation_repo import ConversationRepository
 from poob.storage.repositories.preferences_repo import UserPreferencesRepository
 from poob.storage.repositories.watchlist_repo import WatchlistRepository
+from poob.utils.logging import get_logger
 
-log = structlog.get_logger()
+log = get_logger("agent.runner")
 
 # Intent-to-tool mapping for unambiguous action requests.
 # When the user's message clearly matches one of these intents, we force

@@ -37,8 +37,14 @@ def _make_cog_and_player() -> tuple[MusicCog, MagicMock]:
     from poob.config import AppConfig
 
     bot = MagicMock()
+    # Hermetic: _env_file=None keeps this off the developer's on-disk .env.
+    # Without it, `discord_token` (not a real field — the field is
+    # `discord_bot_token`) passed locally ONLY because .env silently supplied
+    # the required values, and the test failed the moment it ran in CI.
     config = AppConfig(
-        discord_token="x",
+        _env_file=None,
+        discord_bot_token="x",
+        discord_deals_channel_id=1,
         groq_api_key="x",
     )
     cog = MusicCog(bot=bot, config=config, poob_brain=None)

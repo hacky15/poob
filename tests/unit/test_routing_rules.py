@@ -1238,3 +1238,141 @@ def test_prefer_full_span_leaves_normalized_and_exact_queries_alone() -> None:
     assert _prefer_full_play_span("play gobble glitch", "gobble glitch") == "gobble glitch"
     # No play verb in the message (query came from context legitimately).
     assert _prefer_full_play_span("that song from earlier", "despacito") == "despacito"
+
+
+# --- Referential / dangling play spans (2026-07-22 prod regression) ---------
+# 01:20:14  "Poob, do you wanna actually play the music that we"  (STT cut off)
+#           -> span "the music that we" -> content tokens {"we"} -> NON-empty,
+#           so the content-free blanking guard did NOT fire, and YouTube
+#           happily matched the literal phrase: "Gorillaz - Its the music that
+#           we choose". The user retried 24s later; the router's escalated rung
+#           emitted query="the music that we told you to play" -> content
+#           {"we","told","to"} -> junk again ("Shannon - Let The Music Play").
+#
+# Root cause: _PLAY_SPAN_STOPWORDS enumerated only the pronouns that appear
+# when ADDRESSING poob ("can you play me...") and never the ones that appear
+# when REFERRING BACK ("the music that WE asked for"). A span whose only
+# survivors are function words names nothing searchable.
+#
+# Function words are a genuine CLOSED class — unlike the verb-phrase
+# enumeration that failed three times in
+# play-question-misrouted-to-play-command, this set cannot be paraphrased into
+# existence. See docs/incidents/referential-play-query-searched-literally.md.
+
+
+def test_referential_play_spans_carry_no_searchable_content() -> None:
+    """Both production junk queues, plus close paraphrases, must reduce to
+    empty content (-> 'Play what?').
+
+    Scope is deliberately the CLOSED function-word class. A referential
+    phrase that leans on an open-class verb ("what we were LISTENING to")
+    still survives — extending into open-class verbs is exactly the
+    unbounded enumeration that failed three times in
+    play-question-misrouted-to-play-command. Not observed in production;
+    extend only with evidence."""
+    from poob.brain.poob import _play_span_content_tokens
+
+    for span in (
+        "the music that we",  # prod 01:20:14
+        "the music that we told you to play",  # prod 01:20:39
+        "the song that we asked for",
+        "the songs that they asked for",
+    ):
+        assert _play_span_content_tokens(span) == set(), span
+
+
+def test_real_song_queries_keep_their_content_tokens() -> None:
+    """The closed-class extension must not swallow real requests — every
+    one of these must keep at least one identifying token."""
+    from poob.brain.poob import _play_span_content_tokens
+
+    for span in (
+        "jazz",
+        "tiki tiki",
+        "cheeky cheeky",
+        "some Beyonce",
+        "despacito",
+        "phonk",
+        "starships",
+        "body dee dum",
+        "John Coltrane",
+        "Betty Davis eyes",
+        "Bohemian Rhapsody",
+        "red hot chili peppers",
+        "some Metallica right now",
+        "the new Drake album",
+        "copper and clay by Noah Sorely",
+        "Ambatakam to Marwani",
+        "home or let the barts out",
+        "we are young",
+        "she loves you",
+        "i told you so",
+        "return to sender",
+    ):
+        assert _play_span_content_tokens(span), span
+
+
+def test_referential_span_blanks_end_to_end_instead_of_queueing_junk() -> None:
+    """The exact prod utterance, through the safety net: the query must be
+    blanked so the empty-query gate asks 'Play what?' rather than shipping a
+    dangling clause to YouTube search."""
+    b = _brain()
+    tool, args = b._music_safety_net(
+        "Poob, do you wanna actually play the music that we", None, None
+    )
+    assert tool == "music_assistant"
+    assert args["query"] == ""
+
+
+def test_one_and_something_stay_searchable_documented_tradeoff() -> None:
+    """Deliberate exclusion: 'one' and 'something' are NOT treated as
+    content-free. 'One' is a real title (U2/Metallica) and poob.py already
+    keeps 'one' out of the span stopwords for this reason. The cost is that
+    'play the one from before' still searches literally — accepted, pinned
+    here so a future change is deliberate."""
+    from poob.brain.poob import _play_span_content_tokens
+
+    assert _play_span_content_tokens("one")
+    assert _play_span_content_tokens("something")
+
+
+def test_the_song_still_blanks_preserving_the_census_fix() -> None:
+    """Regression guard for census fix #6 ('Play the song. Fuck.' 2026-07-17)
+    — generic filler must keep blanking."""
+    from poob.brain.poob import _play_span_content_tokens
+
+    assert _play_span_content_tokens("the song") == set()
+    assert _play_span_content_tokens("some music") == set()
+
+
+def test_one_shared_lexicon_gates_every_query_path() -> None:
+    """The concept 'words that do not identify a song' must exist ONCE.
+    It previously existed as three divergent copies (module-level 24 words +
+    two inline 27-word duplicates), so evidence that improved one never
+    reached the others — the structural reason this class of bug recurred.
+    """
+    import re as _re
+    from pathlib import Path
+
+    src = Path("src/poob/brain/poob.py").read_text(encoding="utf-8")
+    assert "_STOPWORDS = {" not in src, (
+        "an inline stopword set reappeared in poob.py — use the shared "
+        "_PLAY_SPAN_STOPWORDS / _play_span_content_tokens primitives instead"
+    )
+    # The duplicated blocks each carried their own tokenizer; the shared
+    # primitive is now the only thing that tokenizes a play span here.
+    assert src.count("_play_span_content_tokens(") >= 4
+    del _re
+
+
+def test_all_pronoun_titles_blank_documented_tradeoff() -> None:
+    """Accepted trade-off, pre-existing and unchanged in kind: a title made
+    ENTIRELY of function words ("Him & I", "You and Me") reduces to empty and
+    gets 'Play what?' rather than a play. "you and me"/"us"/"you" already
+    behaved this way before the closed-class extension — the class is not new,
+    it just now also covers subject pronouns. Pinned so a future change here
+    is deliberate."""
+    from poob.brain.poob import _play_span_content_tokens
+
+    for span in ("you and me", "him and i", "us"):
+        assert _play_span_content_tokens(span) == set(), span

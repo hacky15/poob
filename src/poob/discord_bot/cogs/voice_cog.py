@@ -46,6 +46,13 @@ class VoiceCog(commands.Cog, name="Voice"):
     with DAVE E2EE handled by voice_compat patches.
     """
 
+    # How often to re-check that persisted VC membership still matches
+    # reality. Tunable as a class constant (same discipline as the ytdl
+    # search tunables) — 2 min is well under the "nobody noticed for 73
+    # hours" failure it exists to prevent, and far above py-cord's own
+    # reconnect retry window so the two never race.
+    VOICE_RECONCILE_INTERVAL_SEC = 120
+
     def __init__(
         self,
         bot: commands.Bot,
@@ -58,6 +65,7 @@ class VoiceCog(commands.Cog, name="Voice"):
         # after a restart without a fresh /join). See
         # docs/decisions/voice-auto-rejoin-on-restart.md.
         from poob.voice.voice_state_store import VoiceStateStore
+
         _data_dir = getattr(getattr(bot, "config", None), "database_path", None)
         _state_path = (
             _data_dir.parent / "voice_state.json"
@@ -66,18 +74,30 @@ class VoiceCog(commands.Cog, name="Voice"):
         )
         self._state_store = VoiceStateStore(_state_path)
         self._restored = False  # restore_sessions runs once per process
+        # guild_id → consecutive failed reconcile attempts (for log volume).
+        self._reconcile_attempts: dict[int, int] = {}
 
     def _stop_tasks(self) -> None:
         """Stop background tasks."""
-        pass
+        task = getattr(self, "_reconcile_voice_presence", None)
+        if task is not None:
+            task.cancel()
 
-    async def _force_disconnect(self, guild: discord.Guild) -> None:
-        """Force-disconnect any existing voice client for this guild."""
+    async def _force_disconnect(self, guild: discord.Guild, forget: bool = True) -> None:
+        """Force-disconnect any existing voice client for this guild.
+
+        ``forget=False`` clears the connection WITHOUT dropping persisted
+        membership — used by the reconciler, which must tear down a zombie
+        client before reconnecting but still intends to be in that channel.
+        Forgetting there would turn a recoverable outage into a permanent
+        one.
+        """
         guild_id = guild.id
         # Drop persisted membership so we don't auto-rejoin a channel we
         # deliberately left. (Re-recorded by setup_session_for_vc if we
         # immediately reconnect, e.g. /join's pre-connect cleanup.)
-        self._state_store.forget(guild_id)
+        if forget:
+            self._state_store.forget(guild_id)
 
         if guild_id in self._sessions:
             session = self._sessions.pop(guild_id)
@@ -123,24 +143,23 @@ class VoiceCog(commands.Cog, name="Voice"):
         for guild_id, channel_id in pairs:
             try:
                 channel = self.bot.get_channel(channel_id)
-                if not isinstance(
-                    channel, (discord.VoiceChannel, discord.StageChannel)
-                ):
+                if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
                     log.warning(
                         "Auto-rejoin: channel gone, forgetting",
-                        guild=guild_id, channel=channel_id,
+                        guild=guild_id,
+                        channel=channel_id,
                     )
                     self._state_store.forget(guild_id)
                     continue
                 guild = channel.guild
                 if guild_id in self._sessions or (
-                    guild.voice_client is not None
-                    and guild.voice_client.is_connected()
+                    guild.voice_client is not None and guild.voice_client.is_connected()
                 ):
                     continue  # already connected
                 vc = await channel.connect(timeout=15.0)
                 session = await self.setup_session_for_vc(
-                    vc, channel,
+                    vc,
+                    channel,
                     is_stage=self._is_stage_channel(channel),
                     play_entrance=False,
                 )
@@ -156,13 +175,123 @@ class VoiceCog(commands.Cog, name="Voice"):
                 else:
                     log.info(
                         "Auto-rejoin: restored",
-                        guild=guild_id, channel=channel.name,
+                        guild=guild_id,
+                        channel=channel.name,
                     )
             except Exception as exc:
                 log.warning(
                     "Auto-rejoin failed (kept for retry)",
-                    guild=guild_id, channel=channel_id, error=str(exc)[:120],
+                    guild=guild_id,
+                    channel=channel_id,
+                    error=str(exc)[:120],
                 )
+        self._start_presence_reconciler()
+
+    def _start_presence_reconciler(self) -> None:
+        """Begin periodic voice-presence reconciliation (idempotent)."""
+        try:
+            if not self._reconcile_voice_presence.is_running():
+                self._reconcile_voice_presence.start()
+        except Exception as exc:  # never let this break boot
+            log.warning("Voice presence reconciler failed to start", error=str(exc)[:120])
+
+    @tasks.loop(seconds=VOICE_RECONCILE_INTERVAL_SEC)
+    async def _reconcile_voice_presence(self) -> None:
+        """Periodically re-establish VC membership that died mid-flight.
+
+        ``restore_sessions`` only runs at boot, so when py-cord's own
+        reconnect loop exhausts (voice WS 1006 → handshake timeout → normal
+        1000 close) Poob goes deaf in that guild until the next redeploy —
+        silently, since nothing compares persisted intent against reality.
+        Observed 2026-07-21: 73+ hours absent from a guild it believed it
+        was in. See docs/incidents/voice-session-never-reestablished-mid-flight.md.
+        """
+        await self._reconcile_voice_presence_once()
+
+    @_reconcile_voice_presence.before_loop
+    async def _before_reconcile(self) -> None:
+        await self.bot.wait_until_ready()
+
+    async def _reconcile_voice_presence_once(self) -> None:
+        """One reconciliation pass. Best-effort; never raises."""
+        try:
+            pairs = self._state_store.load()
+        except Exception:
+            return
+        for guild_id, channel_id in pairs or []:
+            try:
+                await self._reconcile_one(guild_id, channel_id)
+            except Exception as exc:
+                n = self._reconcile_attempts.get(guild_id, 0) + 1
+                self._reconcile_attempts[guild_id] = n
+                log.warning(
+                    "Voice presence reconcile failed (kept for retry)",
+                    guild=guild_id,
+                    channel=channel_id,
+                    attempt=n,
+                    error=str(exc)[:120],
+                )
+
+    async def _reconcile_one(self, guild_id: int, channel_id: int) -> None:
+        """Bring one persisted (guild, channel) back in line with reality."""
+        if self._get_session(guild_id) is not None:
+            self._reconcile_attempts.pop(guild_id, None)
+            return  # healthy — never disturb a live session
+
+        channel = self.bot.get_channel(channel_id)
+        if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+            log.warning(
+                "Voice presence reconcile: channel gone, forgetting",
+                guild=guild_id,
+                channel=channel_id,
+            )
+            self._state_store.forget(guild_id)
+            self._reconcile_attempts.pop(guild_id, None)
+            return
+
+        guild = channel.guild
+        n = self._reconcile_attempts.get(guild_id, 0) + 1
+        self._reconcile_attempts[guild_id] = n
+        log.warning(
+            "Voice presence diverged from persisted state — re-establishing",
+            guild=guild_id,
+            channel=getattr(channel, "name", channel_id),
+            attempt=n,
+        )
+
+        # A half-dead voice_client makes channel.connect() raise "Already
+        # connected" (docs/incidents/zombie-voice-connection-blocks-autojoin.md).
+        # Clear it, but KEEP the persisted membership — we still intend to be here.
+        if guild.voice_client is not None:
+            await self._force_disconnect(guild, forget=False)
+
+        vc = await channel.connect(timeout=15.0)
+        session = await self.setup_session_for_vc(
+            vc,
+            channel,
+            is_stage=self._is_stage_channel(channel),
+            play_entrance=False,
+        )
+        if session is None:
+            # Connected but not listening is worse than absent: it looks
+            # joined while being deaf. Drop it and retry next cycle.
+            try:
+                await vc.disconnect(force=True)
+            except Exception:
+                pass
+            log.warning(
+                "Voice presence reconcile: setup failed (kept for retry)",
+                guild=guild_id,
+                attempt=n,
+            )
+            return
+        self._reconcile_attempts.pop(guild_id, None)
+        log.info(
+            "Voice presence restored",
+            guild=guild_id,
+            channel=getattr(channel, "name", channel_id),
+            after_attempts=n,
+        )
 
     async def _promote_to_speaker(self, guild: discord.Guild) -> None:
         """Promote the bot to Speaker in a stage channel."""
@@ -258,7 +387,8 @@ class VoiceCog(commands.Cog, name="Voice"):
                         "DAVE not ready within window — starting "
                         "recording anyway; decoder catches up once "
                         "keys arrive.",
-                        timeout_s=DAVE_TIMEOUT_S, dave_version=dave_version,
+                        timeout_s=DAVE_TIMEOUT_S,
+                        dave_version=dave_version,
                     )
             else:
                 log.info("No DAVE negotiated (version=0)")
@@ -313,12 +443,15 @@ class VoiceCog(commands.Cog, name="Voice"):
         except Exception as exc:
             log.error(
                 "Failed to set up voice session for VC",
-                guild=guild_id, error=str(exc)[:120],
+                guild=guild_id,
+                error=str(exc)[:120],
             )
             self._sessions.pop(guild_id, None)
             return None
 
-    @discord.slash_command(name="join", description="Join your voice channel so Poob can listen and speak.")
+    @discord.slash_command(
+        name="join", description="Join your voice channel so Poob can listen and speak."
+    )
     async def join_voice(self, ctx: discord.ApplicationContext) -> None:
         """Join the caller's voice channel.
 
@@ -328,7 +461,8 @@ class VoiceCog(commands.Cog, name="Voice"):
         """
         if not ctx.author.voice or not ctx.author.voice.channel:
             await ctx.respond(
-                "you gotta be in a voice channel first.", ephemeral=True,
+                "you gotta be in a voice channel first.",
+                ephemeral=True,
             )
             return
 
@@ -362,13 +496,14 @@ class VoiceCog(commands.Cog, name="Voice"):
                 await self._promote_member(ctx.author)  # type: ignore[arg-type]
 
             session = await self.setup_session_for_vc(
-                vc, channel, is_stage=is_stage, play_entrance=False,
+                vc,
+                channel,
+                is_stage=is_stage,
+                play_entrance=False,
             )
             if session is None:
                 await self._force_disconnect(guild)
-                await ctx.followup.send(
-                    "Failed to set up voice session — try again."
-                )
+                await ctx.followup.send("Failed to set up voice session — try again.")
                 return
 
             await ctx.followup.send(
@@ -497,11 +632,7 @@ class VoiceCog(commands.Cog, name="Voice"):
             return
 
         # Auto-promote users joining a stage channel
-        if (
-            getattr(session, "is_stage", False)
-            and after.channel == vc_channel
-            and not member.bot
-        ):
+        if getattr(session, "is_stage", False) and after.channel == vc_channel and not member.bot:
             await self._promote_member(member)
 
         # Auto-leave if bot is alone
@@ -512,6 +643,7 @@ class VoiceCog(commands.Cog, name="Voice"):
 
     async def cog_unload(self) -> None:
         """Clean up all sessions when cog is unloaded."""
+        self._stop_tasks()
         for guild_id, session in list(self._sessions.items()):
             await session.cleanup()
             if session.voice_client.is_connected():

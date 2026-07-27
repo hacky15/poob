@@ -23,8 +23,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum, auto
 
-import structlog
-
 from poob.storage.models import Listing
 from poob.utils.geo import (
     has_valid_coordinates,
@@ -32,8 +30,9 @@ from poob.utils.geo import (
     parse_state_from_location,
     state_centroid_distance,
 )
+from poob.utils.logging import get_logger
 
-log = structlog.get_logger()
+log = get_logger("scanner.listing_filter")
 
 
 # ---------------------------------------------------------------------------

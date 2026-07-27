@@ -26,10 +26,27 @@ def _tok(obj: object) -> int:
 
 
 def test_music_tool_stays_under_budget() -> None:
-    """Was 1846; trimmed to ~1165. The 1350 budget leaves headroom for a new
-    action or two but trips if the verbose phrasing-maps creep back."""
+    """Was 1846; trimmed to ~1165, budget 1350.
+
+    **2026-07-26 re-baseline to 1400.** This assertion was RED on main from
+    b7d78cf (1216 -> 1352) until the 07-26 audit found it — nothing caught it
+    because CI ran no tests (see .github/workflows/test.yml, added in the same
+    change). The +136 tokens are load-bearing routing guidance, not the
+    verbose phrasing-maps this guard was built to keep out:
+    autoplay-vs-loop disambiguation ([[autoplay-request-enables-loop-one]])
+    and single-track-URL handling ([[spotify-track-link-play-dead-end]]).
+    Stripping them to satisfy the old number would re-open two fixed
+    incidents, so the floor moved instead — deliberately, once, with the
+    reason recorded.
+
+    The ceiling still binds: 1400 leaves ~48 tokens of headroom, so the next
+    addition has to be argued for rather than slipped in. Known follow-up:
+    the autoplay/loop guidance is stated in both the top-level description
+    and the per-parameter descriptions; de-duplicating it is the cheap way
+    back under 1350 if headroom is ever needed.
+    """
     n = _tok(MUSIC_TOOL)
-    assert n < 1350, f"MUSIC_TOOL re-bloated to {n} tokens (trim target was ~1165)"
+    assert n < 1400, f"MUSIC_TOOL re-bloated to {n} tokens (budget 1400)"
 
 
 def test_deal_tool_stays_lean() -> None:
