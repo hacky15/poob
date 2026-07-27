@@ -44,14 +44,23 @@ async def test_remove_effect_routes_to_music_assistant() -> None:
     brain._music_handler = AsyncMock(return_value="[SILENT]Effect cleared.")
 
     with patch.object(
-        brain, "_groq_with_tools",
-        new=AsyncMock(return_value=("", "music_assistant", {
-            "action": "apply_effect",
-            "effect": "none",
-        })),
+        brain,
+        "_groq_with_tools",
+        new=AsyncMock(
+            return_value=(
+                "",
+                "music_assistant",
+                {
+                    "action": "apply_effect",
+                    "effect": "none",
+                },
+            )
+        ),
     ):
         out = await brain.respond(
-            "remove nightcore", user_id="123", guild_id=10,
+            "remove nightcore",
+            user_id="123",
+            guild_id=10,
         )
 
     brain._music_handler.assert_called_once()
@@ -68,14 +77,23 @@ async def test_turn_off_effect_routes_to_apply_effect() -> None:
     brain._music_handler = AsyncMock(return_value="[SILENT]Audio effect cleared.")
 
     with patch.object(
-        brain, "_groq_with_tools",
-        new=AsyncMock(return_value=("", "music_assistant", {
-            "action": "apply_effect",
-            "effect": "none",
-        })),
+        brain,
+        "_groq_with_tools",
+        new=AsyncMock(
+            return_value=(
+                "",
+                "music_assistant",
+                {
+                    "action": "apply_effect",
+                    "effect": "none",
+                },
+            )
+        ),
     ):
         out = await brain.respond(
-            "turn off the effect", user_id="123", guild_id=10,
+            "turn off the effect",
+            user_id="123",
+            guild_id=10,
         )
 
     brain._music_handler.assert_called_once()
@@ -90,14 +108,23 @@ async def test_stop_slowing_routes_to_apply_effect_none() -> None:
     brain._music_handler = AsyncMock(return_value="[SILENT]Slowed effect cleared.")
 
     with patch.object(
-        brain, "_groq_with_tools",
-        new=AsyncMock(return_value=("", "music_assistant", {
-            "action": "apply_effect",
-            "effect": "none",
-        })),
+        brain,
+        "_groq_with_tools",
+        new=AsyncMock(
+            return_value=(
+                "",
+                "music_assistant",
+                {
+                    "action": "apply_effect",
+                    "effect": "none",
+                },
+            )
+        ),
     ):
         out = await brain.respond(
-            "stop slowing it", user_id="123", guild_id=10,
+            "stop slowing it",
+            user_id="123",
+            guild_id=10,
         )
 
     brain._music_handler.assert_called_once()
@@ -112,14 +139,23 @@ async def test_normal_playback_routes_to_apply_effect_none() -> None:
     brain._music_handler = AsyncMock(return_value="[SILENT]Removed effect.")
 
     with patch.object(
-        brain, "_groq_with_tools",
-        new=AsyncMock(return_value=("", "music_assistant", {
-            "action": "apply_effect",
-            "effect": "none",
-        })),
+        brain,
+        "_groq_with_tools",
+        new=AsyncMock(
+            return_value=(
+                "",
+                "music_assistant",
+                {
+                    "action": "apply_effect",
+                    "effect": "none",
+                },
+            )
+        ),
     ):
         out = await brain.respond(
-            "normal playback", user_id="123", guild_id=10,
+            "normal playback",
+            user_id="123",
+            guild_id=10,
         )
 
     brain._music_handler.assert_called_once()
@@ -134,14 +170,23 @@ async def test_no_effect_routes_to_apply_effect_none() -> None:
     brain._music_handler = AsyncMock(return_value="[SILENT]Effect disabled.")
 
     with patch.object(
-        brain, "_groq_with_tools",
-        new=AsyncMock(return_value=("", "music_assistant", {
-            "action": "apply_effect",
-            "effect": "none",
-        })),
+        brain,
+        "_groq_with_tools",
+        new=AsyncMock(
+            return_value=(
+                "",
+                "music_assistant",
+                {
+                    "action": "apply_effect",
+                    "effect": "none",
+                },
+            )
+        ),
     ):
         out = await brain.respond(
-            "no effect", user_id="123", guild_id=10,
+            "no effect",
+            user_id="123",
+            guild_id=10,
         )
 
     brain._music_handler.assert_called_once()
@@ -156,14 +201,23 @@ async def test_clear_effect_routes_to_apply_effect_none() -> None:
     brain._music_handler = AsyncMock(return_value="[SILENT]Effect cleared.")
 
     with patch.object(
-        brain, "_groq_with_tools",
-        new=AsyncMock(return_value=("", "music_assistant", {
-            "action": "apply_effect",
-            "effect": "none",
-        })),
+        brain,
+        "_groq_with_tools",
+        new=AsyncMock(
+            return_value=(
+                "",
+                "music_assistant",
+                {
+                    "action": "apply_effect",
+                    "effect": "none",
+                },
+            )
+        ),
     ):
         out = await brain.respond(
-            "clear the effect", user_id="123", guild_id=10,
+            "clear the effect",
+            user_id="123",
+            guild_id=10,
         )
 
     brain._music_handler.assert_called_once()
@@ -183,14 +237,23 @@ async def test_apply_effect_on_still_routes() -> None:
     brain._music_handler = AsyncMock(return_value="[SILENT]Applied nightcore.")
 
     with patch.object(
-        brain, "_groq_with_tools",
-        new=AsyncMock(return_value=("", "music_assistant", {
-            "action": "apply_effect",
-            "effect": "nightcore",
-        })),
+        brain,
+        "_groq_with_tools",
+        new=AsyncMock(
+            return_value=(
+                "",
+                "music_assistant",
+                {
+                    "action": "apply_effect",
+                    "effect": "nightcore",
+                },
+            )
+        ),
     ):
         out = await brain.respond(
-            "make it nightcore", user_id="123", guild_id=10,
+            "make it nightcore",
+            user_id="123",
+            guild_id=10,
         )
 
     brain._music_handler.assert_called_once()
@@ -205,14 +268,23 @@ async def test_slow_it_down_routes_apply_effect_slowed() -> None:
     brain._music_handler = AsyncMock(return_value="[SILENT]Applied slowed.")
 
     with patch.object(
-        brain, "_groq_with_tools",
-        new=AsyncMock(return_value=("", "music_assistant", {
-            "action": "apply_effect",
-            "effect": "slowed",
-        })),
+        brain,
+        "_groq_with_tools",
+        new=AsyncMock(
+            return_value=(
+                "",
+                "music_assistant",
+                {
+                    "action": "apply_effect",
+                    "effect": "slowed",
+                },
+            )
+        ),
     ):
         out = await brain.respond(
-            "slow it down", user_id="123", guild_id=10,
+            "slow it down",
+            user_id="123",
+            guild_id=10,
         )
 
     brain._music_handler.assert_called_once()
@@ -227,36 +299,54 @@ async def test_slow_it_down_routes_apply_effect_slowed() -> None:
 
 @pytest.mark.asyncio
 async def test_casual_path_cannot_claim_effect_applied() -> None:
-    """If the routing model returns no tool (falls to casual), but the casual
-    model tries to claim 'I applied X effect', that's a lie — casual path has
-    no music_handler. The brain must detect this and prevent the falsehood.
+    """The casual path must never claim an effect it did not apply.
 
-    Blocked at the routing level: the prompt MUST route effect-removal
-    to music_assistant; a no-tool response is invalid for effect queries.
+    **2026-07-27: this test now pins the FIX rather than the bug.** It used to
+    simulate the router returning no tool for "remove the nightcore" and
+    assert ``_music_handler.assert_not_called()`` — i.e. it characterised the
+    defect its own docstring described ("casual path returns something
+    plausible but false"), and merely hoped the routing prompt would prevent
+    it.
+
+    The deterministic effect-clear override
+    (docs/incidents/effect-clear-suppressed-by-normal-guard.md) closes that
+    hole at the layer that can actually guarantee it: even with the router
+    returning nothing, "remove the nightcore" is forced to
+    apply_effect/effect=none, the music handler really runs, and the casual
+    fallback is never reached — so there is nothing left to lie with.
     """
     brain = _make_brain(deal_agent=AsyncMock())
     brain._music_handler = AsyncMock(return_value="[SILENT]Applied.")
 
-    # Simulate routing model returning no tool for an effect query.
-    # This should NOT happen with proper routing prompt, but if it does,
-    # casual fallback must NOT claim success.
-    with patch.object(
-        brain, "_groq_with_tools",
-        new=AsyncMock(return_value=("Effect applied!", None, None)),
-    ), patch.object(
-        brain, "_casual_text_fallback",
-        new=AsyncMock(return_value="Effect is now removed."),
-    ) as casual_fb:
-
+    with (
+        patch.object(
+            brain,
+            "_groq_with_tools",
+            new=AsyncMock(return_value=("Effect applied!", None, None)),
+        ),
+        patch.object(
+            brain,
+            "_casual_text_fallback",
+            new=AsyncMock(return_value="Effect is now removed."),
+        ) as casual_fb,
+    ):
         out = await brain.respond(
-            "remove the nightcore", user_id="123", guild_id=10,
+            "remove the nightcore",
+            user_id="123",
+            guild_id=10,
         )
 
-    # The casual response is returned, but music_handler was NEVER called.
-    # The casual path fabricates a response without actually applying anything.
-    brain._music_handler.assert_not_called()
-    # This is the bug: casual path returns something plausible but false.
-    # The fix ensures the routing model ALWAYS routes removal to music_assistant.
+    # The effect is genuinely applied, by the deterministic override.
+    brain._music_handler.assert_called_once()
+    assert brain._music_handler.call_args.kwargs["tool_args"] == {
+        "action": "apply_effect",
+        "effect": "nightcore",
+        "mode": "remove",
+    }
+    # And the casual path — the only thing that could fabricate success —
+    # never ran at all.
+    casual_fb.assert_not_called()
+    assert "Applied" in out
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +374,9 @@ def test_music_tool_definition_routes_effect_none() -> None:
     """MUSIC_TOOL.effect parameter must document that 'none' clears effects."""
     from poob.brain.poob import MUSIC_TOOL
 
-    effect_desc = MUSIC_TOOL["function"]["parameters"]["properties"]["effect"]["description"].lower()
+    effect_desc = MUSIC_TOOL["function"]["parameters"]["properties"]["effect"][
+        "description"
+    ].lower()
     assert "none" in effect_desc, "effect desc missing 'none' for clearing"
     assert "clear" in effect_desc or "remove" in effect_desc, (
         "effect desc missing clear/remove language"
@@ -301,7 +393,11 @@ def test_music_prompt_phrasings_for_effect_removal() -> None:
 
     # At least some removal phrasings should be explicitly listed as examples.
     removal_phrasings = [
-        "turn off", "remove", "clear", "stop", "normal",
+        "turn off",
+        "remove",
+        "clear",
+        "stop",
+        "normal",
     ]
     found = sum(1 for phrase in removal_phrasings if phrase in p)
     assert found >= 2, (
@@ -328,11 +424,18 @@ async def test_effect_removal_respects_guild_isolation() -> None:
     brain._music_handler = music_handler_a
 
     with patch.object(
-        brain, "_groq_with_tools",
-        new=AsyncMock(return_value=("", "music_assistant", {
-            "action": "apply_effect",
-            "effect": "none",
-        })),
+        brain,
+        "_groq_with_tools",
+        new=AsyncMock(
+            return_value=(
+                "",
+                "music_assistant",
+                {
+                    "action": "apply_effect",
+                    "effect": "none",
+                },
+            )
+        ),
     ):
         await brain.respond("remove nightcore", user_id="123", guild_id=10)
 
@@ -343,11 +446,18 @@ async def test_effect_removal_respects_guild_isolation() -> None:
     brain._music_handler = music_handler_b
 
     with patch.object(
-        brain, "_groq_with_tools",
-        new=AsyncMock(return_value=("", "music_assistant", {
-            "action": "apply_effect",
-            "effect": "none",
-        })),
+        brain,
+        "_groq_with_tools",
+        new=AsyncMock(
+            return_value=(
+                "",
+                "music_assistant",
+                {
+                    "action": "apply_effect",
+                    "effect": "none",
+                },
+            )
+        ),
     ):
         await brain.respond("remove nightcore", user_id="123", guild_id=20)
 

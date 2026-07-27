@@ -861,6 +861,74 @@ def _prefer_full_play_span(original_message: str, query: str) -> str:
     return query
 
 
+# Deterministic effect-clear phrases (2026-07-27). The 2026-06-09 normal-volume
+# fix taught the router that the word 'normal' is NOT evidence of an
+# effect-clear — necessary, but it over-corrected: "put the bass back to normal"
+# then routed NO tool at all, got a persona joke, and left ultrabass applied for
+# the rest of the session.
+#
+# The discriminator is the one that fix already stated: effects are NAMED audio
+# filters, volume is just how loud it is. Every phrase below NAMES an effect, so
+# none can collide with the loudness phrase sets (test-pinned: no member
+# contains "volume") — that separation is what keeps
+# docs/incidents/normal-volume-routed-to-filter.md fixed.
+#
+# Built from templates so a new effect noun is one edit, and still an EXACT
+# whole-message set like every other control phrase group — a longer sentence
+# that merely mentions bass keeps the LLM's routing.
+# See docs/incidents/effect-clear-suppressed-by-normal-guard.md.
+_EFFECT_CLEAR_TEMPLATES = (
+    "put the {} back to normal",
+    "{} back to normal",
+    "back to normal {}",
+    "turn off the {}",
+    "turn the {} off",
+    "take off the {}",
+    "remove the {}",
+    "no more {}",
+    "normal {}",
+)
+
+# GENERIC nouns only — "remove the effect(s)/filter(s)" genuinely means clear
+# everything, matching the routing prompt's own clear-all line.
+_EFFECT_CLEAR_NOUNS = ("filter", "filters", "effect", "effects")
+_EFFECT_CLEAR_PHRASES = frozenset(
+    tpl.format(noun) for noun in _EFFECT_CLEAR_NOUNS for tpl in _EFFECT_CLEAR_TEMPLATES
+)
+
+# NAMED effects remove only THEIR OWN dimension and keep the rest of the
+# stack. Mapping these to clear-all was a real defect caught in review: with
+# nightcore+reverb stacked, "remove the reverb" would have wiped both — and
+# because _music_safety_net returns the forced args unconditionally, it also
+# overwrote a CORRECT LLM route carrying mode='remove'. That is the exact
+# thing this override exists NOT to do ("reverse a correct decision instead of
+# correcting a wrong one"). Effects layer by category, so removal is per
+# effect: see docs/decisions/music-effect-stacking.md.
+#
+# The noun on the left is what a user SAYS; the value is the canonical effect
+# id. "base" is included because that is the spelling STT produced in the
+# 2026-07-27 incident, and "bass" maps to the bass-category preset so the
+# user's actual ultrabass is what gets dropped.
+_NAMED_EFFECT_REMOVALS: dict[str, str] = {
+    "bass": "bassboost",
+    "base": "bassboost",
+    "bass boost": "bassboost",
+    "nightcore": "nightcore",
+    "slowed": "slowed",
+    "reverb": "reverb",
+    "8d": "8d",
+    "tremolo": "tremolo",
+    "vibrato": "vibrato",
+}
+_EFFECT_REMOVE_OVERRIDES: tuple[tuple[frozenset[str], dict[str, str | int]], ...] = tuple(
+    (
+        frozenset(tpl.format(noun) for tpl in _EFFECT_CLEAR_TEMPLATES),
+        {"action": "apply_effect", "effect": effect_id, "mode": "remove"},
+    )
+    for noun, effect_id in _NAMED_EFFECT_REMOVALS.items()
+)
+
+
 def _trim_trailing_crosstalk(query: str) -> str:
     """Keep only the first sentence-ish segment of a safety-net play query.
 
@@ -1142,9 +1210,28 @@ class PoobBrain:
 
     # Ordered (phrase-set -> forced tool_args) table, checked after the leading
     # wake/address token is stripped. dict values are templates — callers copy
+    # Deterministic effect-clear override (2026-07-27). The 2026-06-09
+    # normal-volume fix taught the router that the word 'normal' is NOT
+    # evidence of an effect-clear — necessary, but it over-corrected: "put the
+    # bass back to normal" then routed NO tool, got a persona joke, and left
+    # ultrabass applied for the rest of the session.
+    #
+    # The discriminator is the one that fix already stated: effects are NAMED
+    # audio filters, volume is just how loud it is. Every phrase here NAMES an
+    # effect, so none can collide with the loudness sets (no member contains
+    # "volume") — that separation is what keeps
+    # docs/incidents/normal-volume-routed-to-filter.md fixed.
+    #
+    # Built from templates rather than hand-listed so a new effect noun stays
+    # one edit, and still an EXACT whole-message set like every other control
+    # phrase group. See docs/incidents/effect-clear-suppressed-by-normal-guard.md.
+    _EFFECT_CLEAR_PHRASES: ClassVar[frozenset[str]] = _EFFECT_CLEAR_PHRASES
+
     # before returning. ClassVar: a shared class constant, NOT a dataclass field.
     _CONTROL_OVERRIDES: ClassVar[tuple[tuple[frozenset[str], dict[str, str | int]], ...]] = (
         (_BARE_STOP_PHRASES, {"action": "stop"}),
+        (_EFFECT_CLEAR_PHRASES, {"action": "apply_effect", "effect": "none"}),
+        *_EFFECT_REMOVE_OVERRIDES,
         (_SKIP_PHRASES, {"action": "skip"}),
         (_MAX_VOLUME_PHRASES, {"action": "volume", "value": 200}),
         (_MUTE_PHRASES, {"action": "volume", "value": 0}),
@@ -1209,6 +1296,16 @@ class PoobBrain:
             norm = without_wake.strip().lower().strip(" .,!?")
             if not norm:
                 continue
+            # NOTE: matching stays EXACT-whole-message on purpose. A
+            # first-sentence-only trim was tried here (2026-07-27) to catch
+            # "Put the base back to normal. This isn't good." and was reverted:
+            # it applies to ALL override groups, so "Turn it up. Actually turn
+            # it down." force-fired volume_up on the retracted first clause,
+            # and "no more bass. Play some jazz." silently dropped the play
+            # request. It also only helps when the command LEADS, so the mirror
+            # phrasing still failed. Widening this matcher is not the right
+            # lever — see the "still open" section of
+            # docs/incidents/effect-clear-suppressed-by-normal-guard.md.
             for phrases, forced in self._CONTROL_OVERRIDES:
                 if norm in phrases:
                     return dict(forced)

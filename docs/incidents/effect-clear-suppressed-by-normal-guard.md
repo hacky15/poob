@@ -73,34 +73,82 @@ false-negative in the same sentence, and nothing tested the other direction.
 `normal-volume-routed-to-filter` has validation for "normal volume → volume"
 but none for "back to normal → effect cleared".
 
-## Fix — proposed, NOT yet implemented
+## Fix — two layers, one shipped
 
-Two layers, mirroring how every other control command in this codebase is
-handled:
+1. **Deterministic override (shipped)** — effect phrases added to
+   `_CONTROL_OVERRIDES`, generated from templates × nouns rather than
+   hand-listed. See "What actually shipped" below for the final shape; the
+   first two attempts were both wrong and are recorded so the reasoning is
+   not lost.
+2. **Prompt (deferred)** — narrow the guard clause from "do NOT fire just
+   because the word 'normal' appears" to the case it was written for:
+   *volume*. Needs `MUSIC_TOOL` token headroom
+   (`test_music_tool_stays_under_budget`, 1352/1400) first. This is the layer
+   that actually closes the reported utterance.
 
-1. **Deterministic override** — add an effect-clear entry to
-   `_CONTROL_OVERRIDES` (`{"action": "apply_effect", "effect": "none"}`)
-   keyed on an exact-phrase set in the established
-   `_BARE_*_PHRASES` style: "back to normal", "put it back to normal",
-   "bass back to normal", "normal bass", "remove the bass", "turn off the
-   bass", "no more bass". Exact-whole-message matching only, per the existing
-   discipline — that is what keeps "normal volume" (a genuine volume command,
-   and its own documented incident) from being swallowed.
-2. **Prompt** — narrow the guard clause from "do NOT fire just because the
-   word 'normal' appears" to the case it was actually written for: *volume*.
-   Something like "'normal volume' / 'regular volume' is VOLUME, not an
-   effect — but 'put X back to normal' where X is an effect (bass, speed,
-   nightcore) IS effect='none'."
+**Both directions must stay pinned in tests** — a one-directional test is
+what let this ship in the first place. `normal volume → volume` was tested;
+`back to normal → effect cleared` was not, and that is the direction that
+broke.
 
-**Both must be evidence-pinned in tests in both directions** — that is the
-specific gap that let this ship: `normal volume → volume` is tested,
-`bass back to normal → effect none` is not. Whichever direction is left
-untested is the one that regresses next.
+### What review caught — the fix was over-reaching and got scoped back
 
-Not implemented in this pass because `MUSIC_TOOL` is at 1352/1400 tokens and
-the prompt half needs the de-duplication tracked in
-`test_music_tool_stays_under_budget` first. The deterministic override half
-has no such constraint and can land independently.
+The first implementation **passed its own tests and did not fix the
+incident.** It matched `"put the bass back to normal"` while the real
+utterance was `"Hey, Poob. Put the base back to normal. This isn't good."`,
+and control overrides match the whole message exactly, so the trailing clause
+defeated it. The tests passed only because they were written against a
+tidied paraphrase of the logged string rather than the string itself.
+
+The obvious repair — reuse `_trim_trailing_crosstalk` to also try the first
+sentence — was implemented and then **reverted**, because an adversarial
+review proved it unsound in three separate ways:
+
+- It applied to **all 11 override groups**, not just effect-clear. *"Turn it
+  up. Actually turn it down."* force-fired `volume_up` on the retracted first
+  clause.
+- *"Hey Poob, no more bass. Play some jazz."* matched the first clause and
+  **silently dropped the play request.**
+- It only helped when the command **led** the utterance, so the mirror
+  phrasing (*"This isn't good. Put the base back to normal."*) still failed.
+
+And the guard test written for it **passed vacuously** — none of its phrases
+contained an interior sentence terminator, so the trim never ran. That is the
+same defect as the original: a test that cannot fail.
+
+A second, worse over-reach was also caught. The generated set mapped **named**
+effects (`remove the reverb`, `turn off the nightcore`) to
+`effect='none'` — clear-**all**. Because `_music_safety_net` returns the
+forced args unconditionally, that both wiped a deliberately-built stack and
+**overwrote a route the LLM had already got right** (`mode='remove'`), which
+is precisely what this override exists not to do. Verified end-to-end against
+the real player: `nightcore + reverb` → `"remove the reverb"` → everything
+gone, acked `[SILENT]` so the user hears nothing.
+
+## What actually shipped
+
+- **Generic** nouns (`effect(s)`, `filter(s)`) → `effect='none'` (clear all).
+- **Named** effects (`bass`/`base`→`bassboost`, `nightcore`, `slowed`,
+  `reverb`, `8d`, `tremolo`, `vibrato`) → `{effect: <id>, mode: 'remove'}`,
+  dropping only that dimension and preserving the stack, per
+  [[music-effect-stacking]]. A correct LLM `mode='remove'` route now passes
+  through untouched — test-pinned.
+- Matching stays **exact-whole-message**. The revert is recorded in a comment
+  at the call site so the next person does not re-attempt it blind.
+
+## Still open — stated plainly
+
+**The verbatim production utterance is NOT fixed by this override.** *"Put
+the base back to normal. This isn't good."* still returns `None`, and that is
+pinned by `test_trailing_crosstalk_form_is_a_documented_open_gap` so the
+limitation is visible instead of assumed away.
+
+What ships is strictly better — the bare command now works deterministically,
+and named removal no longer nukes the stack — but the exact reported
+utterance still depends on the router. Closing it properly belongs to the
+deferred **prompt** half (narrow the `'normal'` guard clause to volume), which
+needs `MUSIC_TOOL` token headroom first. Widening the deterministic matcher is
+the wrong lever; review demonstrated that concretely.
 
 ## Detection note
 
