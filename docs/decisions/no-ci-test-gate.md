@@ -112,3 +112,39 @@ Full unit suite green locally before this shipped, including the six tests
 that the `get_event_loop()` fix un-broke. The first PR carrying this
 workflow is its own proof — if the gate does not run, or runs and fails,
 that is visible immediately rather than in three weeks.
+
+## What the gate found on its very first run
+
+It failed, correctly, on two things **that could not be observed locally** —
+which is the entire argument for it, made in under six minutes:
+
+1. **The unit tests were reading the developer's on-disk `.env`.**
+   `AppConfig` is `pydantic-settings` with `env_file=".env"`, so it loads the
+   **file**; the existing `conftest` autouse fixture isolates `os.environ`
+   and is powerless against that. `test_music_handler_actions` passed
+   `discord_token="x"` — **not even a real field** (it is
+   `discord_bot_token`) — and validated anyway because `.env` silently
+   supplied the two required values. With no `.env` on the runner it failed
+   instantly.
+   The repo already had the correct pattern (`_env_file=None`, used properly
+   in `test_config.py` and `test_silero_vad_shared.py`); it simply was not
+   applied consistently. Verified empirically rather than assumed: from a
+   directory with no `.env`, the old construction reproduces the exact CI
+   `ValidationError` and the new one passes.
+
+2. **`tzdata` was declared `win32`-only** while `ZoneInfo("America/Chicago")`
+   is called in `formatter` and `patrol_scheduler`. The container ships a
+   system tzdata, so it never surfaced until CI ran on a bare Linux runner.
+   Now unconditional — vendor the data instead of trusting the host.
+
+**Tests that pass only because of untracked local secrets are not tests.**
+That whole class was invisible by construction: every developer had a
+`.env`, so everyone's local run agreed, and the suite silently certified
+something it was not actually checking.
+
+Result after the fixes: **1948 passed in CI vs 1947 locally** — the extra
+test is one the hermetic fix un-hid.
+
+`--maxfail` was also raised 5 → 20 on the strength of this: the first runs
+of a never-gated suite surface whole *classes* of environment coupling, and
+truncating at 5 hides the extent and costs a round-trip per batch.
