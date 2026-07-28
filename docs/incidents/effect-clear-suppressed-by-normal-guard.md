@@ -150,6 +150,33 @@ deferred **prompt** half (narrow the `'normal'` guard clause to volume), which
 needs `MUSIC_TOOL` token headroom first. Widening the deterministic matcher is
 the wrong lever; review demonstrated that concretely.
 
+## Corroborating evidence — the gap recurred within 24 hours
+
+2026-07-28 03:44, post-deploy, a **second** instance of the same shape — this
+time on `stop`, not an effect:
+
+```
+03:44:02  "Hey, Poob. Stop playing"                                    -> action=stop        (override hit)
+03:44:10  "Hey, Poob. Stop playing this shit. Where are you, Jackson?" -> NO tool routed
+          -> conversational reply: "i'm right here, hacky15 ... i stopped the song a minute ago"
+```
+
+Verified against the **live deployed code**: the first form returns
+`{"action": "stop"}`, the second returns `None`. The only reason there was no
+user harm is that the music had already been stopped 8 seconds earlier, so the
+casual reply happened to be true.
+
+This is the same failure as the bass incident with a different verb, so the
+gap is **not effect-specific — it is a property of exact-whole-message
+matching meeting real speech**. Two occurrences in 24 hours across two
+different control actions is the evidence threshold this codebase asks for
+before extending a phrase-matching behaviour.
+
+It also re-confirms that widening the matcher is the wrong lever (review
+already proved that concretely), which leaves the deferred **prompt** half as
+the real fix: the router, not the phrase table, is what can read
+"stop playing X" plus trailing crosstalk as a stop.
+
 ## Detection note
 
 This was found by a **pre-deploy baseline audit** of the night's logs, not by
