@@ -1,6 +1,6 @@
 ---
 type: incident
-status: active
+status: resolved
 date: 2026-07-27
 tags: [brain, music, routing, effects, over-correction, prompt]
 related: [[normal-volume-routed-to-filter]] [[control-command-misroute-by-weak-rung]] [[music-routing-prompt-thoughtfulness]] [[autoplay-request-enables-loop-one]]
@@ -80,11 +80,18 @@ but none for "back to normal → effect cleared".
    hand-listed. See "What actually shipped" below for the final shape; the
    first two attempts were both wrong and are recorded so the reasoning is
    not lost.
-2. **Prompt (deferred)** — narrow the guard clause from "do NOT fire just
-   because the word 'normal' appears" to the case it was written for:
-   *volume*. Needs `MUSIC_TOOL` token headroom
-   (`test_music_tool_stays_under_budget`, 1352/1400) first. This is the layer
-   that actually closes the reported utterance.
+2. **Prompt (shipped 2026-07-28)** — the guard clause is narrowed to the case
+   it was written for. See "Prompt fix" below.
+
+   **Correction:** this was first recorded as blocked on `MUSIC_TOOL` token
+   headroom. That was wrong — the clause lives in `_MUSIC_ROUTING_RULES`
+   (the system prompt), which the `MUSIC_TOOL` budget does not gate at all.
+   The real constraint was
+   `test_slim_routing_prompt.py::test_routing_prompt_is_substantially_shorter`
+   (`len(slim) < 0.6 * len(full)`), which had **3.6 characters** of slack —
+   roughly 9 addable characters, since text added to the shared rules grows
+   both sides. Recorded because "blocked on X" claims get repeated, and this
+   one was repeated three times before anyone measured it.
 
 **Both directions must stay pinned in tests** — a one-directional test is
 what let this ship in the first place. `normal volume → volume` was tested;
@@ -176,6 +183,81 @@ It also re-confirms that widening the matcher is the wrong lever (review
 already proved that concretely), which leaves the deferred **prompt** half as
 the real fix: the router, not the phrase table, is what can read
 "stop playing X" plus trailing crosstalk as a stop.
+
+## Prompt fix (2026-07-28) — the layer that actually closes it
+
+The deterministic override handles the bare command; the router is what can
+read a command wrapped in real speech. The clause became:
+
+```
+- 'remove the effect' / 'clear effect' / 'no effects' → apply_effect,
+  effect='none' (ALL). Naming one ('turn off the nightcore', 'bass back to
+  normal') → that effect, mode='remove'. Never invent an effect;
+  'normal volume' is VOLUME.
+```
+
+It is **shorter than what it replaced** — 233 chars / 64 tokens vs 280 / 75 —
+so it needed no headroom at all; slack on the ratio guard went from 3.6 to
+22.4 characters. Rewriting to be *more precise* turned out to cost less than
+the blunt version, which is worth remembering the next time a prompt change
+looks budget-blocked.
+
+What it preserves, what it changes:
+
+- Bare `'normal'` is still **not** a clear-all trigger — the 2026-06-09 false
+  positive stays fixed, still test-pinned.
+- Loudness is still explicitly VOLUME (`'normal volume' is VOLUME`, plus the
+  untouched "VOLUME IS NOT AN EFFECT" block below it).
+- **New:** naming an effect now routes to removing *that* effect
+  (`mode='remove'`), matching [[music-effect-stacking]] and the deterministic
+  override shipped alongside it — the two layers now agree instead of one
+  being silent.
+
+Two tests pinned the old wording as a literal string
+(`test_bare_normal_is_no_longer_an_effect_clear_trigger` and the
+`_MUSIC_RULE_SUBSTRINGS` sentinel list). Both were updated to assert the
+**intent** — bare 'normal' absent from the trigger list, loudness routed to
+volume, a named effect removable — rather than the exact sentence, so the
+next precise rewording does not read as a dropped rule.
+
+## The guard that guards the guards
+
+The first version of the new prompt-layer regression test was **vacuous** —
+the third such test written in this session. It asserted:
+
+```python
+assert "mode='remove'" in p
+assert "back to normal" in p.lower()
+```
+
+Both were **already true before the change**: `mode='remove'` comes from the
+untouched STACKING bullet, and `"back to normal"` from the old clause's own
+`'back to normal speed'`. Reverting the fix left it green. Caught by review
+via mutation testing, not by inspection — and notably not by the author's own
+verification pass, which happened to check the *other* (non-vacuous) test.
+
+Fixed by asserting substrings that **discriminate**: `"Naming one"`,
+`"that effect, mode='remove'"`, `"bass back to normal"`.
+
+And to stop this recurring a fourth time,
+`test_effect_clause_guards_are_not_vacuous` now reconstructs the pre-change
+clause and asserts every probe the other guards rely on is **absent** from
+it — a test whose only job is to prove the other tests can fail. It also
+pins the two original vacuous probes as documented counter-examples so they
+are not reintroduced.
+
+Verified by mutation, not assertion: reverting the clause to the 2026-06-09
+wording fails four tests
+(`test_bare_normal_is_no_longer_an_effect_clear_trigger`,
+`test_naming_an_effect_routes_to_removing_that_effect`,
+`test_effect_clause_guards_are_not_vacuous`,
+`test_routing_prompt_keeps_every_music_routing_rule`).
+
+**The generalisable lesson:** a regression guard written from the *new* text
+tends to assert whatever is convenient, and convenient strings are often
+already present. The only reliable check is to run the guard against the code
+it is meant to reject. Mutation-test regression guards, or assume they are
+decorative.
 
 ## Detection note
 

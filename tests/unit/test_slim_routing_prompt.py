@@ -42,7 +42,15 @@ _MUSIC_RULE_SUBSTRINGS = [
     "AUDIO EFFECTS ROUTING",
     "STACKING:",
     "mode='replace'",
-    "do NOT fire this just because the word",
+    # Effect-clear sentinels. These replaced "do NOT fire this just because
+    # the word 'normal' appears" on 2026-07-27 — that guard blocked the
+    # volume false-positive but also suppressed genuine effect-clears
+    # ("put the bass back to normal" routed nothing for 45 minutes). Same
+    # rule, stated precisely. See
+    # docs/incidents/effect-clear-suppressed-by-normal-guard.md.
+    "effect='none' (ALL)",
+    "mode='remove'",
+    "'normal volume' is VOLUME",
     "VOLUME IS NOT AN EFFECT",
     "NEVER apply_effect",
     "Be DILIGENT about catching real song requests",
