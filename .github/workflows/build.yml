@@ -1,5 +1,28 @@
 name: Build and push image
 
+# Serialize builds per ref so the NEWEST commit is always the last to push
+# :latest and fire the Komodo webhook.
+#
+# 2026-07-29: PRs #6 and #7 were merged 3 seconds apart. Both builds ran
+# concurrently and both push ghcr.io/…/poob:latest, so the winner was decided
+# by finish order, not commit order — and the OLDER commit won:
+#
+#   17:30:46.92  Komodo redeploy  sha=2b655b9  (newest commit)
+#   17:30:49.97  Komodo redeploy  sha=96e3b22  (older commit, 3s later)
+#
+# :latest ended up pointing at code missing the newer merge while main said
+# both were merged — silent version skew, the same class as a fix that never
+# reaches production.
+#
+# cancel-in-progress is deliberately FALSE, not true. Cancelling would also
+# fix the ordering, but this job pushes an image and fires a production deploy
+# webhook; interrupting it mid-push or mid-webhook trades version skew for a
+# half-applied deploy. Queueing costs one extra build on rapid merges and
+# guarantees the newest ref finishes last.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
 on:
   push:
     branches: [main]
