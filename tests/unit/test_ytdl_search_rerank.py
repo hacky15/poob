@@ -221,9 +221,7 @@ def test_implausible_gate_boundaries() -> None:
     # Long-form intent disables the gate.
     assert not ytdl._is_implausible_hit("song name mix", _track("x", 7200))
     # URLs are exempt.
-    assert not ytdl._is_implausible_hit(
-        "https://youtube.com/watch?v=x", _track("x", 7200)
-    )
+    assert not ytdl._is_implausible_hit("https://youtube.com/watch?v=x", _track("x", 7200))
     # Unknown duration → leave alone.
     assert not ytdl._is_implausible_hit("song name", _track("x", None))
 
@@ -299,3 +297,58 @@ async def test_junk_pass1_survives_when_widening_finds_nothing_better() -> None:
 
     assert track is not None
     assert track.identifier == "junk"
+
+
+# --- 2026-07-29 session: news/podcast junk under the duration gate ----------
+# Two of six song queues that night were news content about a person in the
+# headlines, both UNDER the 900s gate, and the user SKIPPED one of them:
+#   "Diddy Heilett"  (STT garble) -> "Diddy Trial Explained: What you need to
+#                                     know" [8:50 = 530s]
+#   "Diddy"                       -> "Joe Rogan REVEALS Why The Inmates
+#                                     Attacked Diddy In Prison" [12:19 = 739s]
+# Neither hit an existing marker. Both are the sub-900s gap the 07-17 addendum
+# was written for. Markers stay MULTI-WORD per that note's discipline: the
+# shorter "you need to know" was rejected in testing because it swallows
+# "Everything You Need To Know About Love".
+
+
+def test_news_explainer_junk_markers_trigger_rerank() -> None:
+    """The exact 2026-07-29 prod titles must be caught, both under the gate."""
+    ytdl = AsyncYTDL()
+    explainer = _track("Diddy Trial Explained: What you need to know", 530)
+    assert ytdl._is_implausible_hit("diddy heilett", explainer) is True
+    podcast = _track("Joe Rogan REVEALS Why The Inmates Attacked Diddy In Prison", 739)
+    assert ytdl._is_implausible_hit("diddy", podcast) is True
+
+
+def test_news_markers_do_not_swallow_real_song_titles() -> None:
+    """False-positive guard. These are the adversarial cases that killed the
+    shorter marker candidates during design."""
+    ytdl = AsyncYTDL()
+    for title, secs in (
+        ("Everything You Need To Know About Love", 200),  # kills "you need to know"
+        ("What You Need - Depeche Mode", 240),
+        ("The Trial - Pink Floyd", 160),
+        ("Why - Annie Lennox", 290),
+        ("Diddy Heil Epstein - Official Music Video [REUPLOAD]", 203),
+        ("P Diddy - I'll Be Missing You", 340),
+        ("Revelations - Iron Maiden", 380),
+    ):
+        assert ytdl._is_implausible_hit("some song", _track(title, secs)) is False, title
+
+
+def test_news_markers_are_multi_word_only() -> None:
+    """Discipline guard from the 07-17 addendum: bare words are traps
+    ('explained' alone would hit a song titled 'Explained'). Every marker
+    must contain a space."""
+    for marker in AsyncYTDL._JUNK_TITLE_MARKERS:
+        assert " " in marker or marker in {
+            "unboxing",
+            "tutorial",
+            "walkthrough",
+            "keynote",
+            "sermon",
+            "briefing",
+            "documentary",
+            "audiobook",
+        }, f"bare-word marker {marker!r} added without justification"

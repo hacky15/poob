@@ -109,6 +109,7 @@ class AsyncYTDL:
         """Lazy-init the main YoutubeDL instance."""
         if self._ytdl is None:
             import yt_dlp
+
             self._ytdl = yt_dlp.YoutubeDL(self._extract_opts)
         return self._ytdl
 
@@ -116,6 +117,7 @@ class AsyncYTDL:
         """Lazy-init the playlist YoutubeDL instance."""
         if self._ytdl_playlist is None:
             import yt_dlp
+
             self._ytdl_playlist = yt_dlp.YoutubeDL(self._playlist_opts)
         return self._ytdl_playlist
 
@@ -265,7 +267,9 @@ class AsyncYTDL:
     def _looks_like_url(query: str) -> bool:
         """Quick check for direct URL — skips the fallback path."""
         q = query.strip().lower()
-        return q.startswith(("http://", "https://", "www.")) or "youtube.com" in q or "youtu.be" in q
+        return (
+            q.startswith(("http://", "https://", "www.")) or "youtube.com" in q or "youtu.be" in q
+        )
 
     # ------------------------------------------------------------------
     # Candidate re-ranking (see docs/decisions/music-search-candidate-rerank)
@@ -364,6 +368,12 @@ class AsyncYTDL:
         "full episode",
         "audiobook",
         "sermon",
+        # 2026-07-29: news/podcast content about a person in the headlines,
+        # both under the 900s gate; the user skipped one. Multi-word per the
+        # discipline above — the shorter "you need to know" was rejected in
+        # testing because it swallows "Everything You Need To Know About Love".
+        "what you need to know",
+        "reveals why",
     )
 
     @classmethod
@@ -477,9 +487,7 @@ class AsyncYTDL:
 
         entries = list(info.get("entries", []))
         return [
-            self._info_to_track(e, requester_id, requester_name)
-            for e in entries
-            if e is not None
+            self._info_to_track(e, requester_id, requester_name) for e in entries if e is not None
         ]
 
     async def get_playlist_tracks(
@@ -501,16 +509,18 @@ class AsyncYTDL:
                 continue
             video_url = entry.get("url") or f"https://www.youtube.com/watch?v={entry.get('id', '')}"
             dur = entry.get("duration")
-            tracks.append(Track(
-                title=entry.get("title", "Unknown"),
-                url=video_url,
-                duration=timedelta(seconds=dur) if dur else None,
-                requester_id=requester_id,
-                requester_name=requester_name,
-                identifier=entry.get("id"),
-                thumbnail=entry.get("thumbnail"),
-                source=TrackSource.YOUTUBE,
-            ))
+            tracks.append(
+                Track(
+                    title=entry.get("title", "Unknown"),
+                    url=video_url,
+                    duration=timedelta(seconds=dur) if dur else None,
+                    requester_id=requester_id,
+                    requester_name=requester_name,
+                    identifier=entry.get("id"),
+                    thumbnail=entry.get("thumbnail"),
+                    source=TrackSource.YOUTUBE,
+                )
+            )
         log.info("Playlist extracted", title=title, tracks=len(tracks))
         return (title, tracks)
 
@@ -544,7 +554,7 @@ class AsyncYTDL:
         return stream_url
 
     # Pre-download guardrails: anything bigger/longer than this streams instead
-    MAX_PREDOWNLOAD_DURATION_SEC = 900     # 15 minutes
+    MAX_PREDOWNLOAD_DURATION_SEC = 900  # 15 minutes
     MAX_PREDOWNLOAD_FILESIZE = 100_000_000  # 100 MB (yt-dlp hard cap)
 
     async def download_track(self, track: Track, *, timeout: float = 30.0) -> str | None:
@@ -613,8 +623,13 @@ class AsyncYTDL:
                     ydl.download([track.url])
                 # yt-dlp may change the extension
                 base = os.path.splitext(tmp_path)[0]
-                for candidate in [tmp_path, base + ".opus", base + ".m4a",
-                                  base + ".webm", base + ".mp3"]:
+                for candidate in [
+                    tmp_path,
+                    base + ".opus",
+                    base + ".m4a",
+                    base + ".webm",
+                    base + ".mp3",
+                ]:
                     if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
                         state["result"] = candidate
                         return candidate
@@ -630,9 +645,15 @@ class AsyncYTDL:
         def _cleanup_partial(base_path: str) -> None:
             """Remove any partial file yt-dlp may have created."""
             base = os.path.splitext(base_path)[0]
-            for candidate in [base_path, base + ".opus", base + ".m4a",
-                              base + ".webm", base + ".mp3",
-                              base_path + ".part", base + ".webm.part"]:
+            for candidate in [
+                base_path,
+                base + ".opus",
+                base + ".m4a",
+                base + ".webm",
+                base + ".mp3",
+                base_path + ".part",
+                base + ".webm.part",
+            ]:
                 try:
                     if os.path.isfile(candidate):
                         os.unlink(candidate)
@@ -652,7 +673,7 @@ class AsyncYTDL:
             if tmp_path:
                 loop.run_in_executor(
                     self._executor,
-                    lambda: (_cleanup_partial(tmp_path)),
+                    lambda: _cleanup_partial(tmp_path),
                 )
             return None
         except Exception as exc:
@@ -662,8 +683,12 @@ class AsyncYTDL:
         if result:
             track.local_file = result
             size_mb = os.path.getsize(result) / 1_000_000
-            log.info("Track pre-downloaded", title=track.title[:50],
-                     file=result, size_mb=f"{size_mb:.1f}")
+            log.info(
+                "Track pre-downloaded",
+                title=track.title[:50],
+                file=result,
+                size_mb=f"{size_mb:.1f}",
+            )
         return result
 
     @staticmethod
