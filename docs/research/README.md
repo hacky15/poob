@@ -12,6 +12,7 @@ When research leads to a commitment, open a matching decision note and link to i
 
 ## Entries
 
+- [[voice-session-audit-2026-07-29]] — three reported symptoms (slow responses, a double response, junk results); only ONE warranted a code change. Documents why the loopback gate and the FIFO response queue were deliberately left alone, and that `total_ms` measures speech duration rather than latency
 ### Voice / Brain
 
 - [[music-failure-census-2026-07-17]] — full-log census (9 days, 225 addressed interactions, pre/post-deploy split) behind the "it's so on and off" complaint: deploy fixes verified working; 8 root causes ranked by post-deploy frequency (Deepgram stream death = 38% of attempts); 8 fixes shipped, 4 deferred with triggers

@@ -106,3 +106,23 @@ cannot plausibly appear in song titles — bare words were rejected as traps
 widened re-rank regardless of duration and (b) applies a −0.6 scoring
 penalty so any actual-music candidate wins. Still never hard-rejects — the
 additive guarantee is test-pinned for the junk trigger too.
+
+## 2026-07-29 addendum — news-explainer markers
+
+Two of six song queues in the 07-29 session were news/podcast content about a
+person in the headlines, both UNDER the 900s gate, and the user **skipped**
+one of them:
+
+- `"Diddy Heilett"` (STT garble) -> **"Diddy Trial Explained: What you need to
+  know"** [530s]
+- `"Diddy"` -> **"Joe Rogan REVEALS Why The Inmates Attacked Diddy In
+  Prison"** [739s]
+
+Added `"what you need to know"` and `"reveals why"` — one per observed
+failure, multi-word per the discipline above. The shorter `"you need to
+know"` was tested and rejected: it swallows *"Everything You Need To Know
+About Love"*, the same trap already recorded for `"how to"`.
+
+Mutation-verified: with the two markers removed, both titles score as
+plausible and the new tests fail. See
+[[voice-session-audit-2026-07-29]].
