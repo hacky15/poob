@@ -245,7 +245,16 @@ async def test_music_wrap_is_toob_persona() -> None:
 
 @pytest.mark.asyncio
 async def test_music_wrap_caps_tokens_tightly() -> None:
-    """A one-line status has no business ballooning into a paragraph."""
+    """A one-line status has no business ballooning into a paragraph.
+
+    2026-08-26: cap raised 40 -> 100 when voice_llm_model became a
+    reasoning model (gpt-oss-20b) — it spends part of the budget on hidden
+    reasoning before any visible text, so 40 was no longer enough headroom
+    to reliably produce output. The VISIBLE reply length is still governed
+    by the prompt's "ONE sentence (6-10 words)" instruction, not this cap;
+    this test still guards against unbounded ballooning, just at the new
+    ceiling. See docs/incidents/voice-llm-model-deprecated-and-never-wired.md.
+    """
     brain = _make_brain()
     client = _fake_groq_client("mock line")
 
@@ -256,7 +265,7 @@ async def test_music_wrap_caps_tokens_tightly() -> None:
             500,
         )
 
-    assert client.chat.completions.create.call_args.kwargs["max_tokens"] <= 40
+    assert client.chat.completions.create.call_args.kwargs["max_tokens"] <= 100
 
 
 @pytest.mark.asyncio

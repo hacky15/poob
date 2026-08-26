@@ -471,7 +471,16 @@ class AppConfig(BaseSettings):
     voice_energy_threshold: float = 150.0  # RMS energy threshold for speech detection
     voice_min_speech_ms: int = 200  # Minimum speech duration to avoid spurious triggers
     voice_max_utterance_seconds: int = 30  # Max single utterance length
-    voice_llm_model: str = "llama-3.1-8b-instant"  # Fast Groq model for voice
+    # 2026-08-26: was "llama-3.1-8b-instant" — Groq removed it from their
+    # catalog entirely (confirmed via a live models.list() call, not a
+    # transient 429/503). This field also was not being passed into
+    # PoobBrain's constructor (see main.py), so changing it here previously
+    # had NO effect; every call site hardcoded the literal directly. Both are
+    # now fixed — this is the actual value in effect. gpt-oss-20b was
+    # benchmarked FASTER (~485ms vs ~720ms) than the dead model in
+    # docs/research/free-llm-tier-audit-2026-06.md, with no clearly-better
+    # free alternative found for this quick-reaction voice role.
+    voice_llm_model: str = "openai/gpt-oss-20b"  # Fast Groq model for voice
     voice_llm_max_tokens: int = 200  # Allow 2-4 sentences for more natural conversation
     voice_conversation_max_history: int = 10  # Rolling context window
 
