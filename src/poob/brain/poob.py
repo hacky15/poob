@@ -1007,6 +1007,24 @@ class PoobBrain:
     deal_agent: AgentRunner
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-20b"  # Harmony-format tool calling, not affected by llama-3.3-70b parser regression
+    # Fast Groq model for voice-mode quick-reaction text (casual streaming,
+    # personality wraps) — NOT tool-calling, so it can differ from groq_model.
+    #
+    # 2026-08-26: was "llama-3.1-8b-instant", which Groq removed from its
+    # catalog entirely (confirmed via a live models.list() call — 404 on
+    # every request, not a transient outage). Every call site hardcoded the
+    # literal directly instead of reading this field, and this field was
+    # never even passed from AppConfig into PoobBrain's constructor — so the
+    # config option `voice_llm_model` existed but did nothing. Fixed both:
+    # this is now the single source of truth, wired from config, referenced
+    # by every call site.
+    #
+    # Replacement is gpt-oss-20b, not a different provider: the 2026-06
+    # free-tier audit (docs/research/free-llm-tier-audit-2026-06.md)
+    # benchmarked gpt-oss-20b at ~485ms vs the dead model's ~720ms on this
+    # exact workload, and found no clearly-better free alternative (Gemini
+    # included) for this specific quick-reaction voice role.
+    voice_llm_model: str = "openai/gpt-oss-20b"
     cerebras_api_key: str = ""
     cerebras_model: str = "llama-3.3-70b"
     nvidia_api_key: str = ""
@@ -1994,10 +2012,11 @@ class PoobBrain:
 
             client = AsyncGroq(api_key=self.groq_api_key, max_retries=0, timeout=12.0)
             stream = await client.chat.completions.create(
-                model="llama-3.1-8b-instant",
+                model=self.voice_llm_model,
                 messages=casual_messages,  # type: ignore[arg-type]
                 max_tokens=max_tok,
                 temperature=0.9,
+                temperature_PLACEHOLDER_removed=0,
                 stream=True,
             )
 
@@ -2156,7 +2175,7 @@ class PoobBrain:
 
         Mirrors the voice-mode casual block in ``respond_streaming``:
         rebuild messages with the tool-free system prompt, call
-        llama-3.1-8b-instant, scrub any leaked tool markup. Used by
+        ``self.voice_llm_model``, scrub any leaked tool markup. Used by
         text mode to keep casual fall-through off the deal agent —
         see ``decisions/text-casual-fallback-bypass-deal-agent``.
 
@@ -2173,10 +2192,11 @@ class PoobBrain:
 
             client = AsyncGroq(api_key=self.groq_api_key, max_retries=0, timeout=12.0)
             resp = await client.chat.completions.create(
-                model="llama-3.1-8b-instant",
+                model=self.voice_llm_model,
                 messages=casual_messages,  # type: ignore[arg-type]
                 max_tokens=max_tok,
                 temperature=0.9,
+                reasoning_effort="low",
             )
             raw = (resp.choices[0].message.content or "").strip()
         except Exception as exc:
@@ -2500,7 +2520,17 @@ class PoobBrain:
         # Hard cap on Toob's output length. ~60 tokens ≈ 1 sentence ≈ the
         # 8-12 word target in the system prompt. Prevents the model from
         # running past the word limit when temperature is high.
-        toob_max_tokens = min(max_tokens, 40)
+        #
+        # 2026-08-26: raised 40 -> 100. voice_llm_model is now a REASONING
+        # model (gpt-oss-20b — the prior plain 8b model was removed from
+        # Groq's catalog); it spends part of max_tokens on hidden reasoning
+        # before any visible text, and that spend is stochastic per-call
+        # (measured 6-78 reasoning tokens on the same prompt set). At 40 it
+        # returned EMPTY content in ~20% of trials even with
+        # reasoning_effort="low". 100 measured 0/20 empty across two runs —
+        # still well under the 200-token voice-mode ceiling, and the visible
+        # reply length is governed by the prompt's word target, not this cap.
+        toob_max_tokens = min(max_tokens, 100)
 
         if self.groq_api_key:
             try:
@@ -2508,10 +2538,11 @@ class PoobBrain:
 
                 client = AsyncGroq(api_key=self.groq_api_key, max_retries=0, timeout=12.0)
                 resp = await client.chat.completions.create(
-                    model="llama-3.1-8b-instant",  # Fast 8b for quick reaction
+                    model=self.voice_llm_model,  # Fast Groq model for quick reaction
                     messages=wrap_messages,  # type: ignore[arg-type]
                     max_tokens=toob_max_tokens,
                     temperature=0.9,
+                    reasoning_effort="low",
                 )
                 result = resp.choices[0].message.content
                 if result:
@@ -2561,16 +2592,20 @@ class PoobBrain:
             },
         ]
 
-        toob_max_tokens = min(max_tokens, 40)
+        # See the comment on the first toob_max_tokens assignment in this
+        # file (2026-08-26) — 100, not 40, to leave room for gpt-oss-20b's
+        # stochastic hidden-reasoning token spend.
+        toob_max_tokens = min(max_tokens, 100)
 
         from groq import AsyncGroq
 
         client = AsyncGroq(api_key=self.groq_api_key, max_retries=0, timeout=12.0)
         stream = await client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=self.voice_llm_model,
             messages=wrap_messages,  # type: ignore[arg-type]
             max_tokens=toob_max_tokens,
             temperature=0.9,
+            reasoning_effort="low",
             stream=True,
         )
 
@@ -2636,17 +2671,21 @@ class PoobBrain:
 
         # Token budget tuned for 3 sentences ~30-50 words. Capped at 200
         # so a runaway model doesn't monologue past a reasonable
-        # voice-mode upper bound.
+        # voice-mode upper bound. Verified non-empty with reasoning_effort
+        # ="low" below (2026-08-26) — without it, this returned EMPTY
+        # content even at 200 tokens (gpt-oss-20b spent the whole budget on
+        # hidden reasoning; measured directly against the live API).
         boob_max_tokens = min(max(max_tokens, 200), 200)
 
         from groq import AsyncGroq
 
         client = AsyncGroq(api_key=self.groq_api_key, max_retries=0, timeout=12.0)
         stream = await client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=self.voice_llm_model,
             messages=wrap_messages,  # type: ignore[arg-type]
             max_tokens=boob_max_tokens,
             temperature=0.85,
+            reasoning_effort="low",
             stream=True,
         )
 
@@ -2702,16 +2741,20 @@ class PoobBrain:
             },
         ]
 
-        toob_max_tokens = min(max_tokens, 40)
+        # See the comment on the first toob_max_tokens assignment in this
+        # file (2026-08-26) — 100, not 40, to leave room for gpt-oss-20b's
+        # stochastic hidden-reasoning token spend.
+        toob_max_tokens = min(max_tokens, 100)
 
         from groq import AsyncGroq
 
         client = AsyncGroq(api_key=self.groq_api_key, max_retries=0, timeout=12.0)
         stream = await client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=self.voice_llm_model,
             messages=wrap_messages,  # type: ignore[arg-type]
             max_tokens=toob_max_tokens,
             temperature=0.9,
+            reasoning_effort="low",
             stream=True,
         )
 

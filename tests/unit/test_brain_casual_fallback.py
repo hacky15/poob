@@ -6,7 +6,7 @@ docs/decisions/text-casual-fallback-bypass-deal-agent.md:
 When ``_groq_with_tools`` returns ``("", None, None)`` (empty content,
 no tool — gpt-oss's silent-refusal mode), the brain runs
 ``_casual_text_fallback`` to get a casual reply from
-``llama-3.1-8b-instant`` instead of falling through to the
+``self.voice_llm_model`` instead of falling through to the
 deal sub-agent (which uses an RLHF-aligned model that refuses
 edgy content).
 """
@@ -496,3 +496,95 @@ async def test_hallucinated_query_still_dropped_when_no_play_intent() -> None:
 
     assert called["hit"] is False
     assert "didn't catch a music request" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-26: voice_llm_model deprecation + dead config wiring
+# ---------------------------------------------------------------------------
+# Production outage: llama-3.1-8b-instant was removed from Groq's catalog
+# entirely (confirmed via a live models.list() call — 404 on every request,
+# not a transient failure). Six call sites hardcoded the literal directly,
+# and AppConfig.voice_llm_model was never even passed into PoobBrain's
+# constructor in main.py — so the config option existed but changing it did
+# nothing. User-facing symptom: "brain glitched, say that again" / "something
+# went wrong with the music" instead of real responses.
+#
+# The replacement (gpt-oss-20b) is a REASONING model — it spends part of
+# max_tokens on hidden reasoning before any visible text, and that spend is
+# stochastic per call (measured 6-78 reasoning tokens on an identical prompt
+# set against the live API). Without reasoning_effort="low" it returned EMPTY
+# content in every trial at realistic voice token budgets (40-200 tokens).
+# With it, empty responses dropped to 0/40 across live trials — verified
+# against the real Groq API before shipping, not assumed from the SDK docs.
+
+
+def test_voice_llm_model_is_not_the_removed_groq_model() -> None:
+    """The dead model must never come back as the default. Cheap sentinel —
+    if Groq ever removes gpt-oss-20b too, THIS test won't catch it, but it
+    guarantees the specific 2026-08-26 regression can't silently return."""
+    brain = _make_brain()
+    assert brain.voice_llm_model != "llama-3.1-8b-instant"
+    assert brain.voice_llm_model == "openai/gpt-oss-20b"
+
+
+def test_voice_llm_model_is_configurable_independent_of_groq_model() -> None:
+    """Regression guard for the OTHER half of the bug: voice_llm_model must
+    be a real, independently-settable field, not silently aliased to
+    groq_model (which would reintroduce coupling the field exists to avoid —
+    groq_model is tuned for tool-calling, voice_llm_model for quick
+    conversational text)."""
+    brain = PoobBrain(
+        deal_agent=None,
+        groq_model="some-routing-model",
+        voice_llm_model="some-other-voice-model",
+    )
+    assert brain.groq_model == "some-routing-model"
+    assert brain.voice_llm_model == "some-other-voice-model"
+    assert brain.groq_model != brain.voice_llm_model
+
+
+@pytest.mark.asyncio
+async def test_casual_text_fallback_uses_configured_voice_model_with_low_reasoning() -> None:
+    """The actual API call must reference self.voice_llm_model (not a
+    hardcoded literal) and pass reasoning_effort='low' — without it,
+    gpt-oss-20b returns EMPTY content at realistic voice token budgets
+    (measured directly against the live Groq API before this fix shipped)."""
+    brain = _make_brain()
+    brain.voice_llm_model = "some-configured-model"
+
+    fake_response = type(
+        "Resp",
+        (),
+        {"choices": [type("C", (), {"message": type("M", (), {"content": "yeah I'd smash"})()})()]},
+    )()
+    fake_client = type("Client", (), {})()
+    fake_client.chat = type("Chat", (), {})()
+    fake_client.chat.completions = type("Comp", (), {})()
+    create = AsyncMock(return_value=fake_response)
+    fake_client.chat.completions.create = create
+
+    messages = [{"role": "user", "content": "test"}]
+    with patch("groq.AsyncGroq", return_value=fake_client):
+        await brain._casual_text_fallback(messages, max_tok=110, guild_id=10)
+
+    _, kwargs = create.call_args
+    assert kwargs["model"] == "some-configured-model"
+    assert kwargs["reasoning_effort"] == "low"
+
+
+def test_main_wires_config_voice_llm_model_into_poobbrain() -> None:
+    """Structural regression guard for the actual root cause: the config
+    field existed but was never passed into PoobBrain's constructor, so
+    changing VOICE_LLM_MODEL in .env did nothing. A behavioral test can't
+    catch a MISSING keyword argument in a different module's 800-line
+    startup function — this asserts the wiring exists in source, the same
+    way test_music_tool_stays_under_budget guards MUSIC_TOOL's shape."""
+    import inspect
+
+    from poob import main as main_module
+
+    source = inspect.getsource(main_module.startup)
+    assert "voice_llm_model=config.voice_llm_model" in source, (
+        "PoobBrain(...) in main.py no longer passes voice_llm_model from "
+        "config — the field would silently stop doing anything again"
+    )

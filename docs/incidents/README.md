@@ -14,6 +14,10 @@ Resolved incidents stay `status: resolved`. Open ones stay `status: active`. If 
 
 ## Entries
 
+### 2026-08
+
+- [[voice-llm-model-deprecated-and-never-wired]] — Groq removed `llama-3.1-8b-instant` from its catalog entirely (confirmed live via models.list()); AppConfig.voice_llm_model existed for exactly this swap but was never passed into PoobBrain, so 6 call sites hardcoded the dead literal directly. The naive fix (swap to gpt-oss-20b) almost shipped a SECOND bug: it is a reasoning model that silently returns empty content at realistic token budgets (measured 0-100% empty depending on config) unless `reasoning_effort="low"` is set. Found live, mid-outage, by reading production logs (2026-08-26, resolved)
+
 ### 2026-07
 
 - [[concurrent-builds-race-latest-tag]] — PRs #6 and #7 merged 3 seconds apart; both builds pushed `:latest` concurrently and the OLDER commit finished last, so the tag pointed at code missing the newer merge while main said both were shipped. Every step reported success. Fixed: `concurrency` group on build.yml with `cancel-in-progress: false` (a deploy job must not be interrupted mid-push) (2026-07-29, resolved)

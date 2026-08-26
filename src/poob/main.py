@@ -566,7 +566,8 @@ async def startup() -> None:
     poob_brain = PoobBrain(
         deal_agent=agent_runner,
         groq_api_key=config.groq_api_key,
-        groq_model=config.groq_model,  # 70b for text + function calling (voice streaming uses 8b separately)
+        groq_model=config.groq_model,  # 70b for text + function calling
+        voice_llm_model=config.voice_llm_model,  # fast voice model; was unwired until 2026-08-26
         cerebras_api_key=config.cerebras_api_key,
         cerebras_model=config.cerebras_model,
         nvidia_api_key=config.nvidia_api_key,

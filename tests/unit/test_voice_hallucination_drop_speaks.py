@@ -200,7 +200,14 @@ async def test_no_command_reaction_does_not_fabricate_a_request() -> None:
 @pytest.mark.asyncio
 async def test_no_command_reaction_uses_same_tight_token_budget_as_toob_wrap() -> None:
     """One sentence, 6-10 words -- same discipline as the real-request wrap,
-    matching Toob's established tight-line character."""
+    matching Toob's established tight-line character.
+
+    2026-08-26: cap raised 40 -> 100 alongside every other toob_max_tokens
+    site when voice_llm_model became a reasoning model (gpt-oss-20b) — see
+    docs/incidents/voice-llm-model-deprecated-and-never-wired.md. This test's
+    actual invariant (this call site's budget matches the OTHER toob wrap
+    sites) is unaffected by the raise; only the shared numeric ceiling moved.
+    """
     brain = _make_brain()
     captured: dict[str, int] = {}
 
@@ -220,7 +227,7 @@ async def test_no_command_reaction_uses_same_tight_token_budget_as_toob_wrap() -
         ):
             pass
 
-    assert captured["max_tokens"] <= 40
+    assert captured["max_tokens"] <= 100
 
 
 @pytest.mark.asyncio
