@@ -141,6 +141,36 @@ number changed. Full suite re-confirmed green after the update.
     — asserts the real API call carries both `model` and `reasoning_effort`.
 - Full unit suite green.
 
+## Addendum (2026-08-28) — the fix itself shipped a corrupted line
+
+Two days after this fix deployed, every casual voice response started
+failing again: `"AsyncCompletions.create() got an unexpected keyword
+argument 'temperature_PLACEHOLDER_removed'"` — the exact "brain glitched"
+failure class this incident exists to close.
+
+Root cause: mutation-testing residue. While verifying the
+`reasoning_effort` regression guard during this fix, a `sed` command
+temporarily corrupted one call site into
+`temperature_PLACEHOLDER_removed=0,` for the mutation test. The restore
+step searched for and reinserted a *missing* `reasoning_effort` line via a
+different code path, and never noticed the corrupted line still sitting
+next to it. Both landed in the diff; the full 1964-test suite passed
+anyway, because every test mocked the Groq client with `AsyncMock()` or a
+hand-built fake — both accept any keyword argument silently. The real SDK
+has no such tolerance; it raised immediately in production.
+
+Fixed in a follow-up PR with a structural test that parses `poob.py`'s AST
+and validates every `client.chat.completions.create(...)` call against the
+real `AsyncCompletions.create` signature via `inspect.signature` — the
+exact check no mock could provide. Mutation-verified against the precise
+corruption that shipped.
+
+**The lesson, stated plainly:** a mock that accepts any keyword argument
+cannot tell a correct call from a typo. Any test suite built entirely on
+such mocks has this blind spot everywhere Groq (or any SDK with a strict
+signature) is called — this incident closed it for the 6 sites this fix
+touched; the same gap may exist elsewhere in the codebase.
+
 ## Follow-ups
 
 - No alert exists for "a model referenced in code was removed from the
