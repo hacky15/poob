@@ -2016,7 +2016,7 @@ class PoobBrain:
                 messages=casual_messages,  # type: ignore[arg-type]
                 max_tokens=max_tok,
                 temperature=0.9,
-                temperature_PLACEHOLDER_removed=0,
+                reasoning_effort="low",
                 stream=True,
             )
 
