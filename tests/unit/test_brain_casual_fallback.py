@@ -588,3 +588,57 @@ def test_main_wires_config_voice_llm_model_into_poobbrain() -> None:
         "PoobBrain(...) in main.py no longer passes voice_llm_model from "
         "config — the field would silently stop doing anything again"
     )
+
+
+def test_all_groq_completion_calls_use_real_sdk_parameters() -> None:
+    """2026-08-28: a mutation-testing artifact ('temperature_PLACEHOLDER_removed')
+    was left in a live call site and shipped to production, breaking every
+    casual voice response with `TypeError: AsyncCompletions.create() got an
+    unexpected keyword argument`. Existing tests used AsyncMock()/hand-built
+    fake clients that accept ANY kwarg silently — they could not have caught
+    this. The real groq SDK's create() has NO **kwargs catch-all, so a typo'd
+    or corrupted keyword raises immediately; this test validates every
+    `client.chat.completions.create(...)` call site in poob.py against the
+    REAL SDK signature via AST, statically, without needing to execute each
+    (some are streaming generators with real network calls if invoked)."""
+    import ast
+    import inspect
+
+    from groq.resources.chat.completions import AsyncCompletions
+
+    valid_params = set(inspect.signature(AsyncCompletions.create).parameters)
+
+    import poob.brain.poob as poob_module
+
+    source = inspect.getsource(poob_module)
+    tree = ast.parse(source)
+
+    checked = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        # Match `<anything>.chat.completions.create(...)`.
+        if not (
+            isinstance(func, ast.Attribute)
+            and func.attr == "create"
+            and isinstance(func.value, ast.Attribute)
+            and func.value.attr == "completions"
+        ):
+            continue
+        checked += 1
+        for kw in node.keywords:
+            if kw.arg is None:
+                continue  # **kwargs spread; nothing to validate statically
+            assert kw.arg in valid_params, (
+                f"poob.py line {node.lineno}: client.chat.completions.create() "
+                f"is called with keyword {kw.arg!r}, which is NOT a real groq "
+                f"SDK parameter. This is exactly the class of bug that shipped "
+                f"'temperature_PLACEHOLDER_removed' to production."
+            )
+
+    assert checked >= 6, (
+        f"expected at least 6 client.chat.completions.create(...) call sites "
+        f"(one per voice_llm_model use), found {checked} - this guard's AST "
+        f"pattern may need updating if the call shape changed"
+    )
