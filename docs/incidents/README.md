@@ -14,8 +14,13 @@ Resolved incidents stay `status: resolved`. Open ones stay `status: active`. If 
 
 ## Entries
 
+### 2026-09
+
+- [[gateway-keepalive-result-block-no-recovery]] — a routine voice auto-join was followed 60.15s later by py-cord's own "stopped responding to the gateway" warning, then TOTAL silence for 6+ minutes (voice, text, patrol) with the process alive and idle — confirmed py-cord's own recovery (`KeepAliveHandler.run()`) blocks its thread forever on an unbounded `f.result()` if the socket close never completes. Fixed: `GatewayWatchdog`, an asyncio-independent thread that force-exits the process (container `unless-stopped` policy recovers) if the gateway goes silent past threshold — mirrors the patrol scheduler's existing wedge-recovery pattern (2026-09-05, resolved)
+
 ### 2026-08
 
+- [[query-extension-defeated-duplicate-play-dedup]] — "play crank that by pickle" queued twice 16s apart: the router-truncation guard extended the second request's query ('...Oh, yeah, dude') AFTER dedup had already keyed on the un-extended first, so a byte-identical routed retry never matched. Fixed: dedup keys on the query as originally routed, captured before extension, at both call sites (`_handle_music`, `_handle_music_voice_streaming`) (2026-08-31, resolved)
 - [[voice-llm-model-deprecated-and-never-wired]] — Groq removed `llama-3.1-8b-instant` from its catalog entirely (confirmed live via models.list()); AppConfig.voice_llm_model existed for exactly this swap but was never passed into PoobBrain, so 6 call sites hardcoded the dead literal directly. The naive fix (swap to gpt-oss-20b) almost shipped a SECOND bug: it is a reasoning model that silently returns empty content at realistic token budgets (measured 0-100% empty depending on config) unless `reasoning_effort="low"` is set. Found live, mid-outage, by reading production logs (2026-08-26, resolved)
 
 ### 2026-07
@@ -39,7 +44,7 @@ Resolved incidents stay `status: resolved`. Open ones stay `status: active`. If 
 - [[normal-volume-routed-to-filter]] — "normal volume" hijacked to apply_effect (Gemini even hallucinated super_slowed); bare 'normal' had been added as an effect-clear trigger by the effect-off fix. Fixed: principled volume-vs-effect split in the routing prompt (2026-06-09, resolved)
 - [[groq-daily-cap-routing-storm]] — back-to-back questions took 22-23s and serialized (the "was slavery good" cluster); Groq's 200k-TPD exhausted and the cascade re-probed the capped model every turn with SDK retry-backoff. Fixed: fail-fast client + provider circuit-breaker driven by the 429's own retry-after (2026-06-08, resolved)
 - [[wake-address-hey-dropout]] — operator's "Hey Poob, play X" got no response (his audio was fine); Deepgram dropped/mangled the "hey" lead-in ("A Poob", "Apoob", "Poob") so the hey-required text regex rejected 6 real addresses as spurious. Fixed: second deterministic "poob-opener + command-verb" matcher; spurious-fire rejection kept load-bearing (2026-06-04, resolved)
-- [[voice-4014-reconnect-event-loop-wedge]] — voice WS 4014 force-disconnect → DAVE MLS re-key ran unlocked on the shared event-loop thread → native `davey` FFI wedge froze voice + text + patrol for 8 min; recovered by restart. Root: the serialization lock dropped in the Pycord migration (2026-06-01, active — fix planned)
+- [[voice-4014-reconnect-event-loop-wedge]] — voice WS 4014 force-disconnect → DAVE MLS re-key ran unlocked on the shared event-loop thread → native `davey` FFI wedge froze voice + text + patrol for 8 min; recovered by restart. Root: the serialization lock dropped in the Pycord migration (2026-06-01, resolved — lock + executor offload confirmed shipped 2026-09-05, status had gone stale)
 
 ### 2026-05
 

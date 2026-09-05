@@ -1,9 +1,9 @@
 ---
 type: incident
-status: active
+status: resolved
 date: 2026-06-01
 tags: [voice, dave, voice-compat, davey, event-loop, reconnect, pycord]
-related: [[dave-ready-flag-is-not-truth]] [[dave-timeout-fail-hard-regression]] [[dave-handshake-failure-april2026]] [[davey-session-needs-serialization-lock]] [[main-browser-cdp-wedge-infinite-hang]] [[project_pycord_migration]]
+related: [[dave-ready-flag-is-not-truth]] [[dave-timeout-fail-hard-regression]] [[dave-handshake-failure-april2026]] [[davey-session-needs-serialization-lock]] [[main-browser-cdp-wedge-infinite-hang]] [[project_pycord_migration]] [[gateway-keepalive-result-block-no-recovery]]
 ---
 
 # Voice WS 4014 reconnect wedged the entire event loop (voice + text dead)
@@ -48,6 +48,30 @@ Verified decisively. The recent Deepgram-STT reconnect frame-buffering (`_buffer
 - audio-thread→loop handoffs are fire-and-forget `run_coroutine_threadsafe` with no `.result()` — cannot back-pressure the loop.
 
 Those queued coroutines piled up *unexecuted* on the already-wedged loop (a symptom), but are not on the reconnect path.
+
+## Addendum (2026-09-05) — status correction: items 1-2 were already shipped, undocumented; item 5 now shipped
+
+Investigating a fresh, mechanistically-different gateway freeze
+([[gateway-keepalive-result-block-no-recovery]]), this note was the first
+hypothesis followed — but a direct grep of the current
+`src/poob/voice/voice_compat.py` shows items 1 (`_dave_lock` guarding
+every native `davey` call site) and 2 (the expensive re-key native call
+wrapped in `loop.run_in_executor`) below are **already fully implemented
+and correct**, verified by reading every `_dave_lock` call site directly —
+none hold the lock across an `await`. This note's `status: active` was
+stale documentation from a fix that shipped (likely alongside the
+`davey-session-needs-serialization-lock` gotcha's own authoring, same
+date) without this note being updated to match. It is not a live gap.
+
+Item 5 (bot-process loop-liveness watchdog) genuinely was never shipped
+until [[gateway-keepalive-result-block-no-recovery]]'s `GatewayWatchdog`.
+Items 3-4 (reset stale MLS state on 4014; lock-release on disconnect in
+`_play_audio`) were not re-verified in this pass — flagging as unconfirmed
+rather than claiming they're done without checking.
+
+Marking this note `resolved` for the parts confirmed shipped; if items 3-4
+are later found un-shipped, re-open with a note here rather than silently
+fixing without recording the reopening.
 
 ## Fix (planned — not yet shipped; see status)
 
