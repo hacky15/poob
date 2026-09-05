@@ -2296,6 +2296,19 @@ class PoobBrain:
                     scrubbed=query[:80],
                 )
                 tool_args = {**tool_args, "query": query}
+            # Dedup identity, captured BEFORE the router-truncation guard below
+            # can rewrite `query`. 2026-08-31 prod: "play crank that by pickle"
+            # routed query='crank that by pickle' -> queued a junk hit; the
+            # SAME user re-asked 16s later (well inside the dedup window), the
+            # LLM routed the SAME 'crank that by pickle', but the guard then
+            # extended it to 'crank that by pickle Oh, yeah, dude' because that
+            # retry's raw message happened to carry the extra trailing words —
+            # so dedup compared the extended string against the previous
+            # UN-extended one, never matched, and both got queued. The routed
+            # query (pre-extension) is the stable identity a retry naturally
+            # reproduces; the extended query is what actually gets searched.
+            # See docs/incidents/query-extension-defeated-duplicate-play-dedup.md.
+            dedup_query = query
             # Router-truncation guard: when the routed query is a literal
             # fragment of what the user said after the play verb, prefer the
             # full span (2026-07-16 02:06:33: "play home or let the barts out"
@@ -2380,7 +2393,7 @@ class PoobBrain:
             # Duplicate-play suppression — per (guild, user). The same
             # user with Poob in multiple servers can play the same song
             # in each independently.
-            if self._is_duplicate_play(guild_id, user_id, query):
+            if self._is_duplicate_play(guild_id, user_id, dedup_query):
                 log.warning(
                     "music.play duplicate suppressed",
                     query=query[:80],
@@ -2389,9 +2402,12 @@ class PoobBrain:
                 )
                 return "" if voice else "Already queued that one."
 
-        play_query_for_dedup = (
-            (tool_args or {}).get("query", "") if (tool_args or {}).get("action") == "play" else ""
-        )
+        # Must match whatever _is_duplicate_play was actually keyed on above
+        # (dedup_query, pre-extension) — reading the post-extension
+        # tool_args["query"] here would mismatch the stored record and
+        # silently no-op _clear_play_on_failure, leaving a failed play
+        # blocking retries for the full dedup window.
+        play_query_for_dedup = dedup_query if (tool_args or {}).get("action") == "play" else ""
 
         try:
             music_response = await self._music_handler(
@@ -2803,6 +2819,19 @@ class PoobBrain:
                     scrubbed=query[:80],
                 )
                 tool_args = {**tool_args, "query": query}
+            # Dedup identity, captured BEFORE the router-truncation guard below
+            # can rewrite `query`. 2026-08-31 prod: "play crank that by pickle"
+            # routed query='crank that by pickle' -> queued a junk hit; the
+            # SAME user re-asked 16s later (well inside the dedup window), the
+            # LLM routed the SAME 'crank that by pickle', but the guard then
+            # extended it to 'crank that by pickle Oh, yeah, dude' because that
+            # retry's raw message happened to carry the extra trailing words —
+            # so dedup compared the extended string against the previous
+            # UN-extended one, never matched, and both got queued. The routed
+            # query (pre-extension) is the stable identity a retry naturally
+            # reproduces; the extended query is what actually gets searched.
+            # See docs/incidents/query-extension-defeated-duplicate-play-dedup.md.
+            dedup_query = query
             # Router-truncation guard: when the routed query is a literal
             # fragment of what the user said after the play verb, prefer the
             # full span (2026-07-16 02:06:33: "play home or let the barts out"
@@ -2888,7 +2917,7 @@ class PoobBrain:
                             yield sentence
                         return
 
-            if self._is_duplicate_play(guild_id, user_id, query):
+            if self._is_duplicate_play(guild_id, user_id, dedup_query):
                 log.warning(
                     "music.play duplicate suppressed",
                     query=query[:80],
@@ -2908,7 +2937,13 @@ class PoobBrain:
             )
         )
 
-        play_query_for_dedup = (tool_args or {}).get("query") or ""
+        # Must match whatever _is_duplicate_play was actually keyed on above
+        # (dedup_query, pre-extension) -- reading the post-extension
+        # tool_args["query"] here would mismatch the stored record and
+        # silently no-op _clear_play_on_failure. Guarded by the same
+        # action == "play" check as the dedup call above: dedup_query is
+        # only ever assigned inside that branch.
+        play_query_for_dedup = dedup_query if (tool_args or {}).get("action") == "play" else ""
 
         def _on_music_task_done(t: asyncio.Task) -> None:
             try:

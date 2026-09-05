@@ -63,6 +63,14 @@ class ScraperBot(commands.Bot):
         self.voice_session_factory: object | None = None  # Callable[[VoiceClient], VoiceSession]
         self._cogs_loaded = False
         self._owner_notified = False
+        # Backstop for a wedged gateway that py-cord's own KeepAliveHandler
+        # can't recover from (its close(4000)+result() has no timeout — see
+        # docs/incidents/gateway-keepalive-result-block-no-recovery.md).
+        # Started once cogs are loaded; GatewayWatchdog.start() is itself
+        # idempotent against the repeat on_ready calls a reconnect triggers.
+        from poob.discord_bot.gateway_watchdog import GatewayWatchdog
+
+        self._gateway_watchdog = GatewayWatchdog(self)
 
     async def _load_cogs(self) -> None:
         """Load all cog extensions. Called from on_ready (Pycord compatibility)."""
@@ -208,6 +216,10 @@ class ScraperBot(commands.Bot):
 
     async def on_ready(self) -> None:
         """Called when the bot has connected to Discord."""
+        # Gateway is up — safe to start reading bot.ws._keep_alive now.
+        # start() is idempotent, so a reconnect re-firing on_ready is fine.
+        self._gateway_watchdog.start()
+
         # Load cogs on first ready (Pycord doesn't have setup_hook)
         if not self._cogs_loaded:
             self._cogs_loaded = True
