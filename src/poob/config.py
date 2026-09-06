@@ -480,7 +480,11 @@ class AppConfig(BaseSettings):
     # benchmarked FASTER (~485ms vs ~720ms) than the dead model in
     # docs/research/free-llm-tier-audit-2026-06.md, with no clearly-better
     # free alternative found for this quick-reaction voice role.
-    voice_llm_model: str = "openai/gpt-oss-20b"  # Fast Groq model for voice
+    # 2026-09-06: qwen3.8-27b — measured faster (438ms vs 601ms median) and a
+    # better persona fit than gpt-oss-20b, and critically a DIFFERENT model
+    # from groq_model so voice replies stop sharing its 8k TPM bucket.
+    # See docs/research/voice-model-eval-2026-09-06.md.
+    voice_llm_model: str = "qwen/qwen3.8-27b"  # Fast Groq model for voice
     voice_llm_max_tokens: int = 200  # Allow 2-4 sentences for more natural conversation
     voice_conversation_max_history: int = 10  # Rolling context window
 

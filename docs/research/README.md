@@ -14,6 +14,7 @@ When research leads to a commitment, open a matching decision note and link to i
 
 - [[voice-session-audit-2026-07-29]] — three reported symptoms (slow responses, a double response, junk results); only ONE warranted a code change. Documents why the loopback gate and the FIFO response queue were deliberately left alone, and that `total_ms` measures speech duration rather than latency
 ### Voice / Brain
+- [[voice-model-eval-2026-09-06]] — eval gating the `voice_llm_model` swap to qwen3.8-27b: ~27% faster (438ms vs 601ms median), better fit for the target register, 0/18 empty and 0/18 `<think>` leaks. Also records a measurement error worth not repeating — a latency benchmark sharing a rate-limited bucket with itself measures the rate limiter, not the model
 
 - [[music-failure-census-2026-07-17]] — full-log census (9 days, 225 addressed interactions, pre/post-deploy split) behind the "it's so on and off" complaint: deploy fixes verified working; 8 root causes ranked by post-deploy frequency (Deepgram stream death = 38% of attempts); 8 fixes shipped, 4 deferred with triggers
 - [[dave-handshake-failure-april2026]] — DAVE never completes; bot deaf in voice; Option A workaround (env flag) recommended

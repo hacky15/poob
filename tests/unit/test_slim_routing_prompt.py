@@ -66,7 +66,7 @@ _MUSIC_RULE_SUBSTRINGS = [
 
 # Generation-only text that must NOT appear in the routing prompt.
 _GENERATION_ONLY_SUBSTRINGS = [
-    "loud, bold",
+    "unhinged friend",
     "horniness level",
     "RULES:",
     "NEVER:",
@@ -134,7 +134,7 @@ def test_casual_generation_prompt_still_carries_persona_and_rules() -> None:
     audit moved off routing must still live here."""
     c = _build_system_prompt(5, voice=False, with_tools=False)
     for s in (
-        "loud, bold",
+        "unhinged friend",
         "RULES:",
         "NEVER:",
         "as an AI",
@@ -165,7 +165,7 @@ def test_full_system_prompt_with_tools_output_unchanged_by_refactor() -> None:
     # the exact deal->music join the old single-literal produced
     assert "shopping stuff. Only use when explicitly asked.\nYou have a music_assistant" in full
     # persona still present (wrap generators rely on with_tools=True default)
-    assert "loud, bold" in full
+    assert "unhinged friend" in full
 
 
 # --- routing-context trim (the per-route token lever) -----------------------
@@ -214,7 +214,7 @@ def test_build_messages_routing_prompt_is_slim_with_handler() -> None:
     sys = next(m["content"] for m in msgs if m["role"] == "system")
     assert "music_assistant" in sys
     assert "VOLUME IS NOT AN EFFECT" in sys
-    assert "loud, bold" not in sys  # persona is NOT in the routing prompt
+    assert "unhinged friend" not in sys  # persona is NOT in the routing prompt
     assert "NEVER:" not in sys
 
 
