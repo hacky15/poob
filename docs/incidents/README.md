@@ -16,6 +16,7 @@ Resolved incidents stay `status: resolved`. Open ones stay `status: active`. If 
 
 ### 2026-09
 
+- [[routing-tpm-ceiling-degrades-cascade]] — the common denominator behind "brain glitched" (25x), wrong/slow effects, and 15 misrouted plays: every route costs ~3,100 tokens against Groq's 8k TPM, so ~2.6 routes/min, after which 20% of routes fall to the Gemini rung documented to hallucinate actions, and behind it FIVE configured model ids are dead (verified against live catalogs). Four prior fixes trimmed the per-call cost but never the structure (2026-09-06, active — voice model split shipped, dead models + freshness check outstanding)
 - [[gateway-keepalive-result-block-no-recovery]] — a routine voice auto-join was followed 60.15s later by py-cord's own "stopped responding to the gateway" warning, then TOTAL silence for 6+ minutes (voice, text, patrol) with the process alive and idle — confirmed py-cord's own recovery (`KeepAliveHandler.run()`) blocks its thread forever on an unbounded `f.result()` if the socket close never completes. Fixed: `GatewayWatchdog`, an asyncio-independent thread that force-exits the process (container `unless-stopped` policy recovers) if the gateway goes silent past threshold — mirrors the patrol scheduler's existing wedge-recovery pattern (2026-09-05, resolved)
 
 ### 2026-08

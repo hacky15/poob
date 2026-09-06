@@ -520,11 +520,27 @@ async def test_hallucinated_query_still_dropped_when_no_play_intent() -> None:
 
 def test_voice_llm_model_is_not_the_removed_groq_model() -> None:
     """The dead model must never come back as the default. Cheap sentinel —
-    if Groq ever removes gpt-oss-20b too, THIS test won't catch it, but it
-    guarantees the specific 2026-08-26 regression can't silently return."""
+    if Groq ever removes the current default too, THIS test won't catch it
+    (that needs the live catalog check), but it guarantees the specific
+    2026-08-26 regression can't silently return."""
     brain = _make_brain()
     assert brain.voice_llm_model != "llama-3.1-8b-instant"
-    assert brain.voice_llm_model == "openai/gpt-oss-20b"
+    assert brain.voice_llm_model == "qwen/qwen3.8-27b"
+
+
+def test_voice_llm_model_defaults_to_a_different_model_than_groq_model() -> None:
+    """Groq rate-limits per MODEL, so pointing voice replies at the same
+    model as the router drains one 8k TPM bucket twice per request — that
+    is what PR #9 accidentally did (both on gpt-oss-20b), and it showed up
+    in production as 429 -> weak-fallback -> misroutes and 'brain glitched'.
+    The two roles must default to DIFFERENT models so they draw on separate
+    per-model buckets. See docs/incidents/routing-tpm-ceiling-degrades-cascade.md.
+    """
+    brain = _make_brain()
+    assert brain.voice_llm_model != brain.groq_model, (
+        "voice_llm_model and groq_model share a model, so they share one "
+        "Groq per-model TPM bucket — the contention that degraded routing"
+    )
 
 
 def test_voice_llm_model_is_configurable_independent_of_groq_model() -> None:
