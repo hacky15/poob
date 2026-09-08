@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Awaitable, Class
 
 import httpx
 
+from poob.resilience.provider_cooldown import ProviderCooldownRegistry
 from poob.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -1120,20 +1121,31 @@ class PoobBrain:
         default_factory=dict,
         init=False,
     )
-    # Provider/model rate-limit cooldown: model -> monotonic deadline to skip
-    # until. Set from a 429's Retry-After so the routing cascade stops
-    # re-probing a capped model every turn. Global — rate limits aren't
-    # per-guild. See docs/decisions/provider-circuit-breaker.md.
-    _provider_cooldown: dict[str, float] = field(
-        default_factory=dict,
+    # Provider/model rate-limit cooldown, shared with any other cascade that
+    # wants it (e.g. voice/stt.py's STT cascade reaches into this same
+    # instance via `.brain._provider_breaker` — a 429'd Gemini STT model and
+    # a 429'd Gemini routing model are different keys, so they cool down
+    # independently, but sharing one registry means every cascade in the
+    # process benefits from the same extraction/tests). See
+    # docs/decisions/provider-cooldown-registry.md (supersedes
+    # docs/decisions/provider-circuit-breaker.md).
+    _provider_breaker: ProviderCooldownRegistry = field(
+        default_factory=ProviderCooldownRegistry,
         init=False,
     )
-    # Consecutive-timeout counter per model; N in a row arms a short cooldown
-    # (a hung provider otherwise costs the full REST timeout on every turn).
-    _provider_timeouts: dict[str, int] = field(
-        default_factory=dict,
-        init=False,
-    )
+
+    # Back-compat views onto the registry's internal dicts (same mutable
+    # objects, not copies) — existing call sites and tests that poke
+    # `_provider_cooldown[...]` / `_provider_timeouts[...]` directly keep
+    # working unchanged after this class delegated its logic to
+    # ProviderCooldownRegistry.
+    @property
+    def _provider_cooldown(self) -> dict[str, float]:
+        return self._provider_breaker._cooldown
+
+    @property
+    def _provider_timeouts(self) -> dict[str, int]:
+        return self._provider_breaker._timeout_streak
 
     def set_music_handler(self, handler: MusicHandler) -> None:
         """Register the music command handler."""
@@ -3431,114 +3443,44 @@ class PoobBrain:
         return "", tool_name, args
 
     # --- Provider circuit breaker (driven by each 429's own Retry-After) ---
-    # Groq's daily-token-cap 429 returns "try again in <N>", and a busy voice
-    # night exhausts the 200k TPD (see incidents/groq-daily-cap-routing-storm).
-    # Re-probing a capped model on every turn cost seconds of cascade latency.
-    # We cool the model down for the server-advised window instead.
-    # Groq says "try again in 2m5.3s"; Gemini says "Please retry in 46.4s"
-    # (in the response BODY, not the exception message — see
-    # _retry_after_seconds).
-    _RETRY_AFTER_RE = re.compile(
-        r"(?:try again|retry) in\s+(?:(\d+)\s*m)?\s*([\d.]+)\s*s", re.IGNORECASE
-    )
-    _COOLDOWN_MIN_S = 5.0
-    _COOLDOWN_MAX_S = 1800.0  # never strand a model longer than 30 min
-    _COOLDOWN_DEFAULT_S = 60.0  # rate-limited but no advised time
-    # A provider that consistently TIMES OUT is functionally down (e.g. the
-    # 2026-06-09 NVIDIA NIM outage: every routing turn paid the full REST
-    # timeout before failing over). One timeout is transient — don't react;
-    # consecutive timeouts arm a short fixed cooldown (no server signal
-    # exists for "I'm hung", so this one is ours, deliberately brief).
-    _TIMEOUT_ARM_COUNT = 2
-    _TIMEOUT_COOLDOWN_S = 120.0
-
-    @staticmethod
-    def _is_rate_limit_error(exc: Exception) -> bool:
-        """True only for 429 / rate-limit / quota errors — NOT timeouts or
-        other failures (those are transient; don't cool the model down)."""
-        blob = f"{getattr(exc, 'status_code', '')} {exc}".lower()
-        return (
-            "429" in blob
-            or "rate_limit" in blob
-            or "rate limit" in blob
-            or "resource_exhausted" in blob
-            or "too many requests" in blob
-        )
-
-    @classmethod
-    def _retry_after_seconds(cls, exc: Exception) -> float | None:
-        """Server-advised cooldown for a 429: prefer the Retry-After header,
-        fall back to the provider's 'try again in 2m5.3s' message. None if
-        neither is present (caller applies a conservative default)."""
-        resp = getattr(exc, "response", None)
-        if resp is not None:
-            try:
-                hdr = resp.headers.get("retry-after")
-            except Exception:
-                hdr = None
-            if hdr:
-                try:
-                    return float(hdr)
-                except (TypeError, ValueError):
-                    pass
-        # Search the exception text AND the response body — Gemini's
-        # "Please retry in 46.4s" lives in the 429 JSON body, which
-        # raise_for_status does not include in str(exc).
-        blob = str(exc)
-        if resp is not None:
-            try:
-                blob += " " + resp.text[:2000]
-            except Exception:
-                pass
-        m = cls._RETRY_AFTER_RE.search(blob)
-        if m:
-            return float(m.group(1) or 0) * 60.0 + float(m.group(2) or 0)
-        return None
+    # Delegates to ProviderCooldownRegistry (poob.resilience.provider_cooldown)
+    # — extracted so the STT cascade (voice/session.py) can share the same
+    # mechanism and the same registry instance. These wrappers exist for
+    # backward compatibility (call sites + tests reference them as
+    # PoobBrain._retry_after_seconds / instance._note_model_rate_limited etc)
+    # and to keep the brain's own telemetry event names
+    # (provider.cooldown_set / provider.cooldown_skip). See
+    # docs/decisions/provider-cooldown-registry.md.
+    _is_rate_limit_error = staticmethod(ProviderCooldownRegistry.is_rate_limit_error)
+    _retry_after_seconds = ProviderCooldownRegistry.retry_after_seconds
+    _is_timeout_error = staticmethod(ProviderCooldownRegistry.is_timeout_error)
 
     def _model_in_cooldown(self, model: str) -> bool:
-        until = self._provider_cooldown.get(model)
-        return until is not None and time.monotonic() < until
+        return self._provider_breaker.in_cooldown(model)
 
     def _note_model_rate_limited(self, model: str, exc: Exception) -> None:
         """Cool a model down after a 429 for its server-advised window
         (clamped). No-op for non-rate-limit errors. Driven by the 429's own
         Retry-After — never a guessed TTL."""
-        if not self._is_rate_limit_error(exc):
-            return
-        secs = self._retry_after_seconds(exc)
-        if secs is None:
-            secs = self._COOLDOWN_DEFAULT_S
-        secs = max(self._COOLDOWN_MIN_S, min(secs, self._COOLDOWN_MAX_S))
-        self._provider_cooldown[model] = time.monotonic() + secs
-        log.info("provider.cooldown_set", model=model, seconds=round(secs, 1))
-
-    @staticmethod
-    def _is_timeout_error(exc: Exception) -> bool:
-        """True for request timeouts (httpx/asyncio/SDK). Kept separate from
-        rate-limit classification — one timeout is transient, but consecutive
-        ones mean the provider is hung (see _note_model_timeout)."""
-        if isinstance(exc, (httpx.TimeoutException, asyncio.TimeoutError)):
-            return True
-        return "timeout" in type(exc).__name__.lower()
+        before = self._provider_breaker.in_cooldown(model)
+        self._provider_breaker.note_rate_limited(model, exc)
+        if not before and self._provider_breaker.in_cooldown(model):
+            secs = self._provider_cooldown[model] - time.monotonic()
+            log.info("provider.cooldown_set", model=model, seconds=round(secs, 1))
 
     def _note_model_timeout(self, model: str, exc: Exception) -> None:
-        """Arm a short fixed cooldown after _TIMEOUT_ARM_COUNT consecutive
-        timeouts for a model. A hung provider (2026-06-09 NVIDIA NIM outage)
-        otherwise costs the full REST timeout on EVERY routing turn. Fixed
-        window because no server signal exists for a hang; deliberately short
-        so a recovered provider rejoins quickly."""
-        if not self._is_timeout_error(exc):
-            self._provider_timeouts.pop(model, None)
-            return
-        n = self._provider_timeouts.get(model, 0) + 1
-        self._provider_timeouts[model] = n
-        if n >= self._TIMEOUT_ARM_COUNT:
-            self._provider_cooldown[model] = time.monotonic() + self._TIMEOUT_COOLDOWN_S
-            self._provider_timeouts.pop(model, None)
+        """Arm a short fixed cooldown after consecutive timeouts for a
+        model. A hung provider (2026-06-09 NVIDIA NIM outage) otherwise
+        costs the full REST timeout on EVERY routing turn. Fixed window
+        because no server signal exists for a hang; deliberately short so a
+        recovered provider rejoins quickly."""
+        before = self._provider_breaker.in_cooldown(model)
+        self._provider_breaker.note_timeout(model, exc)
+        if not before and self._provider_breaker.in_cooldown(model):
             log.info(
                 "provider.cooldown_set",
                 model=model,
-                seconds=self._TIMEOUT_COOLDOWN_S,
+                seconds=self._provider_breaker.timeout_cooldown_s,
                 reason="consecutive_timeouts",
             )
 
@@ -3548,11 +3490,11 @@ class PoobBrain:
         is keyed by model (Groq's TPD is per-model, so Scout's separate budget
         is unaffected when gpt-oss-20b is capped). Never strands the cascade:
         if every model is cooling, returns the full list (least-bad)."""
-        active = [(p, m) for (p, m) in providers if not self._model_in_cooldown(m)]
-        if active and len(active) < len(providers):
+        active = self._provider_breaker.filter_active(providers, key=lambda pm: pm[1])
+        if len(active) < len(providers):
             skipped = [m for (_p, m) in providers if self._model_in_cooldown(m)]
             log.info("provider.cooldown_skip", skipped=skipped)
-        return active or providers
+        return active
 
     def _make_groq_client(self, *, timeout: float, max_retries: int = 0):
         """Construct an AsyncGroq client with fail-fast defaults.
