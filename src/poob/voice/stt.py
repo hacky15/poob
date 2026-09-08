@@ -16,6 +16,17 @@ from poob.utils.logging import get_logger
 log = get_logger("voice.stt")
 
 
+class STTRateLimitError(Exception):
+    """Raised when an STT provider returns a rate-limit / quota error (429).
+
+    Carries an optional `response` attribute when available (httpx.Response).
+    """
+
+    def __init__(self, message: str = "", response: object | None = None) -> None:
+        super().__init__(message)
+        self.response = response
+
+
 @runtime_checkable
 class STTProvider(Protocol):
     """Speech-to-text provider protocol."""
@@ -108,6 +119,10 @@ class GroqWhisperSTT:
                 log.debug("Groq Whisper transcribed", length=len(text), text=text[:80])
             return text
         except Exception as exc:
+            # Detect rate-limit/quota signals and propagate as STTRateLimitError
+            _blob = str(exc).lower()
+            if "429" in _blob or "resource_exhausted" in _blob or "rate limit" in _blob:
+                raise STTRateLimitError(str(exc))
             log.warning("Groq Whisper STT failed", error=str(exc)[:120])
             return ""
 
@@ -183,6 +198,10 @@ class GeminiSTT:
                 log.debug("Gemini STT transcribed", length=len(text), text=text[:80])
             return text
         except Exception as exc:
+            # Gemini surfaces quota errors in the exception/body text
+            _blob = str(exc).lower()
+            if "429" in _blob or "resource_exhausted" in _blob or "rate limit" in _blob:
+                raise STTRateLimitError(str(exc))
             log.warning("Gemini STT failed", error=str(exc)[:150])
             return ""
 
@@ -253,10 +272,13 @@ class DeepgramSTT:
                 )
             return text
         except httpx.HTTPStatusError as exc:
+            # If Deepgram returns 429, propagate as STTRateLimitError with response
+            if exc.response is not None and getattr(exc.response, "status_code", None) == 429:
+                raise STTRateLimitError(str(exc), response=exc.response)
             log.warning(
                 "Deepgram STT failed",
-                status=exc.response.status_code,
-                body=exc.response.text[:300],
+                status=exc.response.status_code if exc.response is not None else None,
+                body=exc.response.text[:300] if exc.response is not None else None,
             )
             return ""
         except Exception as exc:

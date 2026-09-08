@@ -17,6 +17,7 @@ import subprocess
 from typing import Any, TYPE_CHECKING
 
 import discord
+import time
 
 
 def _find_ffmpeg() -> str:
@@ -259,6 +260,9 @@ class VoiceSession:
         # In-flight response tasks. Tracked so cleanup() can cancel
         # pending work when the bot leaves a voice channel.
         self._inflight_tasks: set[asyncio.Task] = set()
+
+        # STT provider cooldowns: provider_name -> monotonic deadline
+        self._stt_provider_cooldown: dict[str, float] = {}
 
         # --- Passive context + multi-signal address detection ---
         # Rolling transcript of recent conversation (all users, attributed).
