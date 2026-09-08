@@ -1,10 +1,16 @@
 ---
 type: decision
-status: active
+status: superseded
+superseded_by: [[provider-cooldown-registry]]
 date: 2026-06-08
 tags: [brain, llm, routing, resilience, rate-limit, groq]
 related: [[groq-failfast-client]] [[groq-daily-cap-routing-storm]] [[gemini-tool-router-rung]]
 ---
+
+> **Superseded 2026-09-08**: this note's logic still describes how the
+> mechanism works, but it now lives in `poob.resilience.provider_cooldown.
+> ProviderCooldownRegistry`, shared with the STT cascade — not brain-only
+> anymore. See [[provider-cooldown-registry]].
 
 # Provider circuit breaker — skip a rate-limited model for its advised window
 
