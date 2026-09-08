@@ -177,6 +177,45 @@ def test_note_success_clears_both_cooldown_and_timeout_streak() -> None:
     assert not r.in_cooldown("m")
 
 
+# --- permanent-failure classification (404/410/403/402, not 429) ---
+
+
+def test_404_410_403_402_are_permanent_failures() -> None:
+    for status in (402, 403, 404, 410):
+        assert (
+            ProviderCooldownRegistry.is_permanent_failure_error(_FakeExc("x", status_code=status))
+            is True
+        )
+
+
+def test_429_is_not_a_permanent_failure() -> None:
+    assert ProviderCooldownRegistry.is_permanent_failure_error(_FakeExc(_GROQ_429)) is False
+
+
+def test_timeout_is_not_a_permanent_failure() -> None:
+    assert ProviderCooldownRegistry.is_permanent_failure_error(httpx.ReadTimeout("x")) is False
+
+
+def test_gone_message_text_detected_without_status_code() -> None:
+    exc = _FakeExc(
+        "Client error '410 Gone' for url 'https://x' The model has reached its end of life"
+    )
+    assert ProviderCooldownRegistry.is_permanent_failure_error(exc) is True
+
+
+def test_note_permanent_failure_sets_long_cooldown() -> None:
+    r = _reg()
+    r.note_permanent_failure("m", _FakeExc("x", status_code=410))
+    left = r._cooldown["m"] - time.monotonic()
+    assert 1795 <= left <= 1801  # permanent_failure_cooldown_s default (30 min)
+
+
+def test_note_permanent_failure_noop_for_rate_limit() -> None:
+    r = _reg()
+    r.note_permanent_failure("m", _FakeExc(_GROQ_429))
+    assert not r.in_cooldown("m")
+
+
 # --- generic cascade filtering (works over ANY item type via key_fn) ---
 
 _PROVIDERS = [

@@ -3235,10 +3235,17 @@ class PoobBrain:
         # 3. NVIDIA NIM — different provider, sidesteps Groq rate limits.
         if self.nvidia_api_key:
             providers.append(("nvidia", self.nvidia_model))
-        # 4. Groq Scout 17B — LAST resort only. Fast but routes too aggressively
-        #    to music_assistant. Only used when all other providers are down.
+        # 4. LAST resort only, when Groq primary + Gemini + NVIDIA are all
+        #    down. Was meta-llama/llama-4-scout-17b-16e-instruct, confirmed
+        #    absent from Groq's live catalog 2026-09-08 (Groq exited Scout
+        #    entirely, not a transient outage) — every real call 404'd here,
+        #    unconditionally, on every worst-case cascade traversal.
+        #    Replaced with qwen/qwen3.8-27b, smoke-tested live for real
+        #    tool-call emission (not just existence) against this exact
+        #    schema shape before shipping. See docs/decisions/
+        #    disable-dead-vision-and-fallback-model-rungs.md.
         if self.groq_api_key:
-            providers.append(("groq", "meta-llama/llama-4-scout-17b-16e-instruct"))
+            providers.append(("groq", "qwen/qwen3.8-27b"))
 
         # Circuit breaker: drop rungs whose model is still in rate-limit
         # cooldown so a capped model (e.g. Groq's spent daily TPD) is skipped
@@ -3380,6 +3387,10 @@ class PoobBrain:
                 # Hung? Consecutive timeouts arm a short cooldown (the
                 # 2026-06-09 NVIDIA outage cost the full REST timeout per turn).
                 self._note_model_timeout(model, exc)
+                # Gone/not-entitled (404/410/403/402)? Long cooldown — no
+                # server signal says "try again in Ns" for this class, and
+                # a short retry is pure waste until a human fixes it.
+                self._note_model_permanent_failure(model, exc)
                 if not is_last:
                     # Fall back to the exception TYPE when the message is empty —
                     # httpx timeouts stringify to '' and were invisible in triage
@@ -3482,6 +3493,23 @@ class PoobBrain:
                 model=model,
                 seconds=self._provider_breaker.timeout_cooldown_s,
                 reason="consecutive_timeouts",
+            )
+
+    def _note_model_permanent_failure(self, model: str, exc: Exception) -> None:
+        """Cool a model down for a long fixed window on a model-gone /
+        not-entitled error (404/410/403/402). No-op for anything else.
+        2026-09-08: an NVIDIA rung on a sunset model generation returned
+        410 on every single call, forever, and was re-probed on every
+        worst-case cascade traversal because 410 matched neither the
+        rate-limit nor the timeout classifier."""
+        before = self._provider_breaker.in_cooldown(model)
+        self._provider_breaker.note_permanent_failure(model, exc)
+        if not before and self._provider_breaker.in_cooldown(model):
+            log.info(
+                "provider.cooldown_set",
+                model=model,
+                seconds=self._provider_breaker.permanent_failure_cooldown_s,
+                reason="permanent_failure",
             )
 
     def _active_providers(self, providers: list[tuple[str, str]]) -> list[tuple[str, str]]:
