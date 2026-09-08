@@ -17,7 +17,6 @@ import subprocess
 from typing import Any, TYPE_CHECKING
 
 import discord
-import time
 
 
 def _find_ffmpeg() -> str:
@@ -260,9 +259,6 @@ class VoiceSession:
         # In-flight response tasks. Tracked so cleanup() can cancel
         # pending work when the bot leaves a voice channel.
         self._inflight_tasks: set[asyncio.Task] = set()
-
-        # STT provider cooldowns: provider_name -> monotonic deadline
-        self._stt_provider_cooldown: dict[str, float] = {}
 
         # --- Passive context + multi-signal address detection ---
         # Rolling transcript of recent conversation (all users, attributed).
@@ -1057,13 +1053,24 @@ class VoiceSession:
             )
 
     async def _transcribe(self, pcm_audio: bytes) -> str:
-        """Try STT providers in cascade order."""
-        for provider in self.stt_providers:
+        """Try STT providers in cascade order.
+
+        Shares PoobBrain's provider cooldown registry (see
+        docs/decisions/provider-cooldown-registry.md) so a 429'd STT
+        provider is skipped for its server-advised window instead of
+        re-probed on every utterance, and automatically rejoins the
+        cascade once that window passes.
+        """
+        breaker = self.brain._provider_breaker
+        for provider in breaker.filter_active(self.stt_providers, key=lambda p: p.name):
             try:
                 text = await provider.transcribe(pcm_audio)
+                breaker.note_success(provider.name)
                 if text:
                     return text
             except Exception as exc:
+                breaker.note_rate_limited(provider.name, exc)
+                breaker.note_timeout(provider.name, exc)
                 log.warning(
                     "STT provider failed, trying next",
                     provider=provider.name,
@@ -1078,13 +1085,18 @@ class VoiceSession:
         holds downsampled 16k mono frames, so the cascade must be told the
         real sample rate (providers default to 48kHz). See
         docs/incidents/wake-utterances-lost-to-deepgram-miss-salvage.md.
+        Shares the same provider cooldown registry as `_transcribe`.
         """
-        for provider in self.stt_providers:
+        breaker = self.brain._provider_breaker
+        for provider in breaker.filter_active(self.stt_providers, key=lambda p: p.name):
             try:
                 text = await provider.transcribe(pcm_audio, sample_rate=16000)
+                breaker.note_success(provider.name)
                 if text:
                     return text
             except Exception as exc:
+                breaker.note_rate_limited(provider.name, exc)
+                breaker.note_timeout(provider.name, exc)
                 log.warning(
                     "Salvage STT provider failed, trying next",
                     provider=provider.name,
