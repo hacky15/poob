@@ -3,8 +3,19 @@ type: incident
 status: active
 date: 2026-09-06
 tags: [brain, llm, routing, rate-limit, cascade, groq, gemini, model-freshness]
-related: [[slim-tool-schemas]] [[slim-routing-prompt]] [[cascade-outage-nvidia-hang-gemini-rpm]] [[groq-daily-cap-routing-storm]] [[control-command-misroute-by-weak-rung]] [[voice-llm-model-deprecated-and-never-wired]] [[voice-model-eval-2026-09-06]]
+related: [[slim-tool-schemas]] [[slim-routing-prompt]] [[cascade-outage-nvidia-hang-gemini-rpm]] [[groq-daily-cap-routing-storm]] [[control-command-misroute-by-weak-rung]] [[voice-llm-model-deprecated-and-never-wired]] [[voice-model-eval-2026-09-06]] [[nvidia-cerebras-account-entitlement-gaps]] [[disable-dead-vision-and-fallback-model-rungs]]
 ---
+
+> **Correction (2026-09-08):** the NVIDIA row below was classified as "just
+> a stale model id" alongside the other four. Digging into the replacement
+> found something larger: this API key currently has **zero working
+> chat-completions models on NVIDIA at all** — a platform-wide model
+> generation retirement plus a missing entitlement for the replacement
+> lineup, not a config change. See [[nvidia-cerebras-account-entitlement-gaps]]
+> for the full finding (and the same class of issue independently found on
+> Cerebras). The other four rows (Groq vision, the two dead Gemini ids)
+> were straightforward stale-id swaps, now fixed in
+> [[disable-dead-vision-and-fallback-model-rungs]].
 
 # The 8k TPM routing ceiling is the common denominator behind "brain glitched", wrong effects, and misroutes
 

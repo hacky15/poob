@@ -167,6 +167,14 @@ class CerebrasProvider:
             log.error("No Cerebras model works, using configured as fallback", model=model)
 
         self._model_name = detected or model
+        # `detected is None` means EVERY candidate failed real inference (not
+        # just a quality-tier issue) -- e.g. a 402 payment-required account
+        # problem, or every listed model 404ing. Falling back to the
+        # configured model in that case keeps the object constructible, but
+        # is_available() must say False: that model was JUST proven not to
+        # work, unverified guesses aren't "available". See
+        # docs/incidents/nvidia-cerebras-account-entitlement-gaps.md.
+        self._detection_failed = detected is None
         self._quality_ok = self._model_name in _MIN_QUALITY_MODELS
 
         self._chat_model = ChatOpenAI(
@@ -191,9 +199,19 @@ class CerebrasProvider:
     def is_available(self) -> bool:
         """Check if the Cerebras API is reachable with a quality model.
 
-        Returns False if only weak models (e.g. 8B) are available — Groq's
-        70B is a better fallback than Cerebras's 8B.
+        Returns False if every candidate failed real inference during
+        auto-detection (account/billing issue, or nothing in the live
+        catalog matches anything we know) — the configured-model fallback
+        in that case is unverified, not proven working. Also False if only
+        weak models (e.g. 8B) are available — Groq's 70B is a better
+        fallback than Cerebras's 8B.
         """
+        if self._detection_failed:
+            log.info(
+                "Cerebras skipped (no model passed real inference test)",
+                model=self._model_name,
+            )
+            return False
         if not self._quality_ok:
             log.info(
                 "Cerebras skipped (model below quality threshold)",
