@@ -122,6 +122,22 @@ _PROVIDERS = [
 ]
 
 
+def test_note_model_permanent_failure_cools_down_on_410() -> None:
+    """2026-09-08 production: an NVIDIA rung on a sunset model generation
+    returned 410 Gone on every single call, forever, and was re-probed on
+    every worst-case cascade traversal — 410 matched neither the
+    rate-limit nor the timeout classifier, so nothing ever cooled it."""
+    b = _brain()
+    b._note_model_permanent_failure("m", _FakeExc("Gone", status_code=410))
+    assert b._model_in_cooldown("m") is True
+
+
+def test_note_model_permanent_failure_noop_for_rate_limit() -> None:
+    b = _brain()
+    b._note_model_permanent_failure("m", _FakeExc(_GROQ_429))
+    assert b._model_in_cooldown("m") is False
+
+
 def test_active_providers_skips_cooled_model_only() -> None:
     b = _brain()
     b._provider_cooldown["openai/gpt-oss-20b"] = time.monotonic() + 100

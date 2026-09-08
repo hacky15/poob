@@ -843,7 +843,7 @@ def build_vlm_cascade(config: Any, *, kv_store: Any | None = None) -> VLMCascade
     # Moved above Gemma: Groq responds in 0.5-1.5s vs Gemma's 5-12s, making it
     # a better primary voter. Gemma was getting cancelled on every voting round
     # because Groq + Flash Lite reached consensus before Gemma finished.
-    if config.groq_api_key:
+    if config.groq_api_key and config.groq_vision_model:
         from langchain_groq import ChatGroq
 
         groq_vlm = ChatGroq(

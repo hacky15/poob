@@ -57,6 +57,11 @@ class ProviderCooldownRegistry:
     # deliberately brief so a recovered provider rejoins quickly).
     timeout_arm_count: int = 2
     timeout_cooldown_s: float = 120.0
+    # A permanent failure (model removed, account not entitled/billed) has
+    # no "try again in N" signal and, unlike a rate limit, no reason to
+    # believe a SHORT wait helps — defaults to the same ceiling as the
+    # longest rate-limit cooldown rather than a short guess.
+    permanent_failure_cooldown_s: float = 1800.0
 
     _cooldown: dict[str, float] = field(default_factory=dict, init=False)
     _timeout_streak: dict[str, int] = field(default_factory=dict, init=False)
@@ -113,6 +118,31 @@ class ProviderCooldownRegistry:
             return True
         return "timeout" in type(exc).__name__.lower()
 
+    @staticmethod
+    def is_permanent_failure_error(exc: Exception) -> bool:
+        """True for errors that mean "this will never work until a human
+        fixes something" — model removed/EOL'd (404/410) or the account
+        lacks entitlement/billing for it (403/402) — as opposed to a 429
+        rate limit (temporary, server tells us when it clears) or a
+        timeout (transient, or the provider is merely hung).
+
+        Confirmed live 2026-09-08: an NVIDIA rung stuck on a model whose
+        entire generation was sunset returns 410 on every single call,
+        forever, and the routing cascade re-probed it on every worst-case
+        traversal because 410 matched neither existing classifier. See
+        docs/decisions/disable-dead-vision-and-fallback-model-rungs.md.
+        """
+        status = getattr(exc, "status_code", None)
+        if status is None:
+            resp = getattr(exc, "response", None)
+            status = getattr(resp, "status_code", None)
+        if status in (402, 403, 404, 410):
+            return True
+        blob = str(exc).lower()
+        return any(
+            s in blob for s in ("404", "410", "not_found", "payment_required", "payment required")
+        )
+
     # --- stateful cooldown tracking ------------------------------------------
 
     def in_cooldown(self, key: str) -> bool:
@@ -129,6 +159,16 @@ class ProviderCooldownRegistry:
             secs = self.cooldown_default_s
         secs = max(self.cooldown_min_s, min(secs, self.cooldown_max_s))
         self._cooldown[key] = time.monotonic() + secs
+
+    def note_permanent_failure(self, key: str, exc: Exception) -> None:
+        """Cool a key down for `permanent_failure_cooldown_s` on a
+        model-gone / not-entitled error (404/410/403/402). No-op for
+        anything else. A long, fixed cooldown rather than a short retry —
+        there is no reason a permanent failure clears itself in seconds,
+        unlike a rate limit's server-advised window."""
+        if not self.is_permanent_failure_error(exc):
+            return
+        self._cooldown[key] = time.monotonic() + self.permanent_failure_cooldown_s
 
     def note_timeout(self, key: str, exc: Exception) -> None:
         """Arm a short fixed cooldown after `timeout_arm_count` consecutive

@@ -57,7 +57,12 @@ class AppConfig(BaseSettings):
     # See docs/decisions/gemini-router-prefer-2.5-ga-over-3.1-preview.md.
     agent_google_model: str = "gemini-2.5-flash-lite"
     # Gemini 3 Flash: non-thinking, fast — preferred agent fallback over 2.5-flash-lite
-    agent_google_model_fast: str = "gemini-3-flash"
+    # 2026-09-08: "gemini-3-flash" (no such id — confirmed absent from the
+    # live catalog) replaced with gemini-3.6-flash, smoke-tested live
+    # (~1.7s median vs a same-day 3.5-flash-lite run that swung 0.6-8s —
+    # rejected for this "fast" role on that inconsistency). See
+    # docs/decisions/disable-dead-vision-and-fallback-model-rungs.md.
+    agent_google_model_fast: str = "gemini-3.6-flash"
 
     # --- Cerebras (free tier: 1K RPM with max_tokens capped, 64K TPM, 1M tokens/day) ---
     cerebras_api_key: str = ""
@@ -94,7 +99,13 @@ class AppConfig(BaseSettings):
         ),
     )
     groq_model: str = "openai/gpt-oss-20b"
-    groq_vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
+    # Empty by default: Groq exited the vision-model business entirely
+    # (confirmed live via models.list() 2026-09-08 — zero vision-capable
+    # models in the catalog, not just this one removed). No live
+    # replacement exists on Groq. Set only if Groq ever ships one again;
+    # main.py and vlm_cascade.py both gate on this being non-empty. See
+    # docs/decisions/disable-dead-vision-and-fallback-model-rungs.md.
+    groq_vision_model: str = ""
     # Agent brain primary: GPT-OSS 120B — reasoning-capable, 500 T/sec on Groq
     agent_groq_model: str = "openai/gpt-oss-120b"
 
@@ -108,7 +119,15 @@ class AppConfig(BaseSettings):
 
     # --- Browser ---
     browser_llm_provider: str = "nvidia"  # "nvidia", "gemini", or "ollama"
-    browser_google_model: str = "gemini-2.0-flash"  # separate model avoids sharing RPM quota
+    # 2026-09-08: "gemini-2.0-flash" (confirmed absent from the live
+    # catalog) replaced with gemini-3.5-flash-lite, smoke-tested live and
+    # functional (latency swings 0.6-8s, tolerable here since browser
+    # navigation steps already dominate wall-clock time; unlike
+    # agent_google_model_fast, which needed the more consistent
+    # gemini-3.6-flash). Kept distinct from every other configured Gemini
+    # model for its own RPM bucket. See docs/decisions/
+    # disable-dead-vision-and-fallback-model-rungs.md.
+    browser_google_model: str = "gemini-3.5-flash-lite"  # separate model avoids sharing RPM quota
     browser_headless: bool = False
     browser_profiles_dir: Path = Path("browser_profiles")
     browser_use_vision: bool = True

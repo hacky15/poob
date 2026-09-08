@@ -82,6 +82,29 @@ class TestCerebrasProvider:
         )
         assert provider.is_available() is False
 
+    @patch("poob.llm.cerebras_provider._detect_best_model", return_value=None)
+    @patch("poob.llm.cerebras_provider.ChatOpenAI")
+    def test_is_available_false_when_every_candidate_failed_inference(
+        self, mock_chat_cls, mock_detect
+    ) -> None:
+        """2026-09-08 production: Cerebras's account hit 402 Payment Required
+        on every model. _detect_best_model correctly returned None (every
+        real inference call failed), but the provider fell back to the
+        UNVERIFIED configured model — which happened to be in the
+        quality-tier set, so the old is_available() said True for a
+        provider that had just been proven 100% broken. This is the
+        regression guard: detection failing entirely must be treated as
+        unavailable regardless of which model the fallback name happens to
+        be, quality tier included."""
+        from poob.llm.cerebras_provider import CerebrasProvider
+
+        provider = CerebrasProvider(
+            api_key="test-key",
+            model="qwen-3-235b-a22b-instruct-2507",  # a _MIN_QUALITY_MODELS member
+            temperature=0.3,
+        )
+        assert provider.is_available() is False
+
     @patch("poob.llm.cerebras_provider._detect_best_model", return_value="qwen-3-235b-a22b-instruct-2507")
     @patch("poob.llm.cerebras_provider.ChatOpenAI")
     def test_satisfies_llm_provider_protocol(self, mock_chat_cls, mock_detect):
