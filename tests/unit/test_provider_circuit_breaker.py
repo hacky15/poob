@@ -255,3 +255,27 @@ def test_second_gemini_rung_configured() -> None:
     # The alt rung is appended only when set + distinct (guarded), so an empty
     # alt adds no second gemini rung / no 6s timeout tax.
     assert "self.gemini_router_model_alt != self.gemini_router_model" in src
+
+
+def test_qwen_last_resort_ordered_before_unstable_nvidia_rung() -> None:
+    """2026-09-09 operator directive: NVIDIA's nemotron-3.5-lightning rung
+    measured 315ms-12,000ms across a clean back-to-back run (no errors,
+    just silent multi-second stalls) -- it must never sit ahead of a rung
+    that is both fast AND reliable. qwen3.8-27b measured 315-842ms with
+    better MATRIX-oracle accuracy than the primary rung. The cascade must
+    try qwen3.8-27b BEFORE nvidia, not after, so a Groq-primary + Gemini
+    outage degrades to the fast reliable fallback first."""
+    import inspect
+
+    import poob.brain.poob as brain_mod
+
+    src = inspect.getsource(brain_mod)
+    qwen_pos = src.find('providers.append(("groq", "qwen/qwen3.8-27b"))')
+    nvidia_pos = src.find('providers.append(("nvidia", self.nvidia_model))')
+    assert qwen_pos != -1, "qwen3.8-27b rung not found in the routing cascade"
+    assert nvidia_pos != -1, "nvidia rung not found in the routing cascade"
+    assert qwen_pos < nvidia_pos, (
+        "qwen3.8-27b (fast, reliable) must be appended to the cascade BEFORE "
+        "nvidia (measured unstable, 315ms-12s) -- see docs/decisions/"
+        "disable-dead-vision-and-fallback-model-rungs.md"
+    )

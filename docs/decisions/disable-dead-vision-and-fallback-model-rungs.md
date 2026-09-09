@@ -89,3 +89,34 @@ except-block as the existing rate-limit/timeout calls.
 - Full unit suite: 2015 passed, 1 skipped, no regressions.
 - Every "dead" claim verified against the live provider catalog/API
   directly, same session, not carried over from an earlier check.
+
+## Addendum (2026-09-09) — qwen3.8-27b reordered ahead of NVIDIA
+
+[[nvidia-cerebras-account-entitlement-gaps]]'s addendum re-provisioned
+NVIDIA and picked `nemotron-3.5-lightning-30b-a3b` for that rung, which
+originally landed as rung 3 (before the Groq qwen3.8-27b last-resort rung
+from this note). A live back-to-back latency run of that exact NVIDIA
+model found it stochastically slow — 315ms on some calls, up to 12,000ms
+on others, no errors on the slow ones, just silent multi-second stalls.
+Separately, a clean (non-rate-limited) MATRIX-oracle run comparing
+qwen3.8-27b against the rung-1 primary (`gpt-oss-20b`) found qwen3.8-27b
+both more accurate (6/6 vs 5/7) and faster (315-842ms vs 458-972ms).
+
+Operator directive: a rung measured that unstable must never sit ahead of
+one that is both fast and reliable, regardless of provider-diversity
+reasoning. The cascade order was changed from `groq(gpt-oss-20b) →
+gemini → nvidia → groq(qwen3.8-27b)` to `groq(gpt-oss-20b) → gemini →
+groq(qwen3.8-27b) → nvidia`, so a Groq-primary + Gemini outage degrades to
+the fast, reliable fallback before reaching the unstable one.
+
+qwen3.8-27b was deliberately NOT promoted to rung 1 (primary router) in
+this change — it shares a Groq TPM bucket with `voice_llm_model` (also
+`qwen/qwen3.8-27b`), and promoting it to the highest-traffic rung
+reintroduces the exact bucket-contention risk that [[voice-llm-model-deprecated-and-never-wired]]'s
+predecessor decision split apart. It stays a rarely-invoked fallback.
+
+Validation: `tests/unit/test_provider_circuit_breaker.py::test_qwen_last_resort_ordered_before_unstable_nvidia_rung`
+asserts source order via `inspect.getsource`, mutation-verified (swapped
+the two `providers.append` blocks, confirmed the assertion failed with
+the correct message, restored, confirmed pass). Full unit suite: 2019
+passed, 1 skipped.

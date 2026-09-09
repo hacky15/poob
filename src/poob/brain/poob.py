@@ -3250,20 +3250,33 @@ class PoobBrain:
             and self.gemini_router_model_alt != self.gemini_router_model
         ):
             providers.append(("gemini", self.gemini_router_model_alt))
-        # 3. NVIDIA NIM — different provider, sidesteps Groq rate limits.
-        if self.nvidia_api_key:
-            providers.append(("nvidia", self.nvidia_model))
-        # 4. LAST resort only, when Groq primary + Gemini + NVIDIA are all
-        #    down. Was meta-llama/llama-4-scout-17b-16e-instruct, confirmed
-        #    absent from Groq's live catalog 2026-09-08 (Groq exited Scout
-        #    entirely, not a transient outage) — every real call 404'd here,
-        #    unconditionally, on every worst-case cascade traversal.
-        #    Replaced with qwen/qwen3.8-27b, smoke-tested live for real
-        #    tool-call emission (not just existence) against this exact
-        #    schema shape before shipping. See docs/decisions/
-        #    disable-dead-vision-and-fallback-model-rungs.md.
+        # 3. Groq qwen3.8-27b — different MODEL from the rung-1 gpt-oss-20b
+        #    (separate TPM bucket), reached once Groq's primary AND Gemini
+        #    are both down. Was meta-llama/llama-4-scout-17b-16e-instruct,
+        #    confirmed absent from Groq's live catalog 2026-09-08 (Groq
+        #    exited Scout entirely, not a transient outage) — every real
+        #    call 404'd here, unconditionally. Replaced with qwen3.8-27b,
+        #    smoke-tested live for real tool-call emission against this
+        #    exact schema shape, then measured head-to-head against rung 1
+        #    on the real MATRIX oracle (6/6 vs 5/7) and real latency
+        #    (315-842ms vs rung 1's 458-972ms) — it beat the primary on
+        #    both axes. Ordered BEFORE NVIDIA deliberately: it is fast and
+        #    consistent where NVIDIA is neither (see rung 4's comment). See
+        #    docs/decisions/disable-dead-vision-and-fallback-model-rungs.md.
         if self.groq_api_key:
             providers.append(("groq", "qwen/qwen3.8-27b"))
+        # 4. NVIDIA NIM — different provider, sidesteps Groq rate limits
+        #    entirely. Deliberately LAST, not rung 3: measured live,
+        #    latency on this exact rung's model (nemotron-3.5-lightning)
+        #    ranged 315ms-12,000ms across a clean back-to-back run with NO
+        #    errors on the slow calls — just silent multi-second stalls.
+        #    Correct on every tool-routing prompt tested, but that
+        #    instability means it must never sit ahead of a rung that is
+        #    both fast AND reliable (rung 3). Reached only when Groq
+        #    primary, Gemini, AND qwen3.8-27b have all failed. See
+        #    docs/incidents/nvidia-cerebras-account-entitlement-gaps.md.
+        if self.nvidia_api_key:
+            providers.append(("nvidia", self.nvidia_model))
 
         # Circuit breaker: drop rungs whose model is still in rate-limit
         # cooldown so a capped model (e.g. Groq's spent daily TPD) is skipped
