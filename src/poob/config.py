@@ -504,7 +504,12 @@ class AppConfig(BaseSettings):
     # from groq_model so voice replies stop sharing its 8k TPM bucket.
     # See docs/research/voice-model-eval-2026-09-06.md.
     voice_llm_model: str = "qwen/qwen3.8-27b"  # Fast Groq model for voice
-    voice_llm_max_tokens: int = 200  # Allow 2-4 sentences for more natural conversation
+    # 2026-09-09: raised 200 -> 1000 (reproduced live: a real question at
+    # 200 spent 100% of budget on qwen3.8-27b's hidden reasoning, 0/8
+    # visible answers -- see docs/incidents/
+    # voice-reasoning-model-token-starvation-on-real-questions.md). This is
+    # a ceiling, not a target -- short replies still generate short.
+    voice_llm_max_tokens: int = 1000  # Allow 2-4 sentences for more natural conversation
     voice_conversation_max_history: int = 10  # Rolling context window
 
     # --- Site Credentials ---

@@ -1081,7 +1081,20 @@ class PoobBrain:
     ollama_model: str = "qwen3:8b"
     max_history: int = 15
     max_tokens: int = 300
-    max_tokens_voice: int = 110
+    # 2026-09-09: raised 110 -> 1000. qwen3.8-27b (voice_llm_model) spends
+    # part of every budget on hidden reasoning before any visible text, and
+    # that spend is stochastic AND content-dependent -- a real question
+    # ("which attacker should I start with") measured 200-300 reasoning
+    # tokens with ZERO left for the answer at the old ceiling (100% empty,
+    # 8/8 reproduced live), while casual banter needs far less. This isn't
+    # a tighter recalibration of the same idea -- it's deliberately high
+    # headroom so a genuinely long, "talk your ear off" reply is never
+    # truncated either. The persona prompt still says "default tight,
+    # breathe when it earns it" -- that instruction, not this ceiling, is
+    # what keeps normal replies short; this number exists ONLY to stop
+    # being the failure mode. See docs/incidents/
+    # voice-reasoning-model-token-starvation-on-real-questions.md.
+    max_tokens_voice: int = 1000
 
     # Music handler — set by VoiceCog/MusicCog when music system is wired.
     # Async callback: (request, user_id, guild_id) -> response string
@@ -2578,20 +2591,17 @@ class PoobBrain:
             },
         ]
 
-        # Hard cap on Toob's output length. ~60 tokens ≈ 1 sentence ≈ the
-        # 8-12 word target in the system prompt. Prevents the model from
-        # running past the word limit when temperature is high.
-        #
-        # 2026-08-26: raised 40 -> 100. voice_llm_model is now a REASONING
-        # model (gpt-oss-20b — the prior plain 8b model was removed from
-        # Groq's catalog); it spends part of max_tokens on hidden reasoning
-        # before any visible text, and that spend is stochastic per-call
-        # (measured 6-78 reasoning tokens on the same prompt set). At 40 it
-        # returned EMPTY content in ~20% of trials even with
-        # reasoning_effort="low". 100 measured 0/20 empty across two runs —
-        # still well under the 200-token voice-mode ceiling, and the visible
-        # reply length is governed by the prompt's word target, not this cap.
-        toob_max_tokens = min(max_tokens, 100)
+        # Hard cap on Toob's output length. The prompt's own "ONE sentence,
+        # 6-10 words" instruction is what actually keeps replies short —
+        # this cap exists only to stop being a failure mode, not to shape
+        # length. It has to be generous because voice_llm_model is a
+        # REASONING model that spends part of the budget on hidden
+        # reasoning before any visible text, and that spend is stochastic
+        # AND content-dependent (2026-09-09: a real question measured
+        # 200-300 reasoning tokens with the qwen3.8-27b swap, well past the
+        # 100 this was set to for gpt-oss-20b on 2026-08-26 — see
+        # docs/incidents/voice-reasoning-model-token-starvation-on-real-questions.md).
+        toob_max_tokens = min(max_tokens, 400)
 
         if self.groq_api_key:
             try:
@@ -2654,9 +2664,9 @@ class PoobBrain:
         ]
 
         # See the comment on the first toob_max_tokens assignment in this
-        # file (2026-08-26) — 100, not 40, to leave room for gpt-oss-20b's
-        # stochastic hidden-reasoning token spend.
-        toob_max_tokens = min(max_tokens, 100)
+        # file (2026-09-09) — 400, not 100, to leave room for qwen3.8-27b's
+        # stochastic, content-dependent hidden-reasoning token spend.
+        toob_max_tokens = min(max_tokens, 400)
 
         from groq import AsyncGroq
 
@@ -2803,9 +2813,9 @@ class PoobBrain:
         ]
 
         # See the comment on the first toob_max_tokens assignment in this
-        # file (2026-08-26) — 100, not 40, to leave room for gpt-oss-20b's
-        # stochastic hidden-reasoning token spend.
-        toob_max_tokens = min(max_tokens, 100)
+        # file (2026-09-09) — 400, not 100, to leave room for qwen3.8-27b's
+        # stochastic, content-dependent hidden-reasoning token spend.
+        toob_max_tokens = min(max_tokens, 400)
 
         from groq import AsyncGroq
 
