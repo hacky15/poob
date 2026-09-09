@@ -247,13 +247,14 @@ async def test_music_wrap_is_toob_persona() -> None:
 async def test_music_wrap_caps_tokens_tightly() -> None:
     """A one-line status has no business ballooning into a paragraph.
 
-    2026-08-26: cap raised 40 -> 100 when voice_llm_model became a
-    reasoning model (gpt-oss-20b) — it spends part of the budget on hidden
-    reasoning before any visible text, so 40 was no longer enough headroom
-    to reliably produce output. The VISIBLE reply length is still governed
-    by the prompt's "ONE sentence (6-10 words)" instruction, not this cap;
-    this test still guards against unbounded ballooning, just at the new
-    ceiling. See docs/incidents/voice-llm-model-deprecated-and-never-wired.md.
+    2026-09-09: cap raised 100 -> 400 after the qwen3.8-27b swap — a real
+    question reproduced 0/8 visible output at 200-300 tokens because this
+    reasoning model's hidden-reasoning spend is stochastic AND
+    content-dependent, not a fixed small overhead. The VISIBLE reply length
+    is still governed by the prompt's "ONE sentence (6-10 words)"
+    instruction, not this cap; this test still guards against unbounded
+    ballooning, just at the new ceiling. See docs/incidents/
+    voice-reasoning-model-token-starvation-on-real-questions.md.
     """
     brain = _make_brain()
     client = _fake_groq_client("mock line")
@@ -265,7 +266,18 @@ async def test_music_wrap_caps_tokens_tightly() -> None:
             500,
         )
 
-    assert client.chat.completions.create.call_args.kwargs["max_tokens"] <= 100
+    got = client.chat.completions.create.call_args.kwargs["max_tokens"]
+    assert got <= 400
+    # The missing half of this guard, and the actual regression: a ceiling
+    # that's only checked for "not too high" can silently drop to a value
+    # too low for the current voice_llm_model's reasoning overhead with no
+    # test catching it — exactly how this shipped. 300 floor: production's
+    # real-question reproduction went 100% empty at 300 tokens.
+    assert got > 300, (
+        f"toob_max_tokens={got} is at or below the measured full-starvation "
+        "point for the current voice_llm_model -- see docs/incidents/"
+        "voice-reasoning-model-token-starvation-on-real-questions.md"
+    )
 
 
 @pytest.mark.asyncio
