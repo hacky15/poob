@@ -1062,7 +1062,15 @@ class PoobBrain:
     cerebras_api_key: str = ""
     cerebras_model: str = "llama-3.3-70b"
     nvidia_api_key: str = ""
-    nvidia_model: str = "qwen/qwen3-next-80b-a3b-instruct"
+    # 2026-09-08: replaced after account re-provisioning fixed a 403/410
+    # blanket entitlement gap (not a model problem -- see docs/incidents/
+    # nvidia-cerebras-account-entitlement-gaps.md). Live-tested against the
+    # real routing tool schema: correct on every prompt (including the
+    # NOT-music "flip a coin" case), no reasoning-trace leakage. Rejected
+    # candidates: openai/gpt-oss-20b (hallucinated a fake tool on the
+    # NOT-music test), nemotron-3-super-120b-a12b (leaked chain-of-thought,
+    # slower). See docs/decisions/disable-dead-vision-and-fallback-model-rungs.md.
+    nvidia_model: str = "nvidia/nemotron-3.5-lightning-30b-a3b"
     # Gemini tool-router rung — RPD-limited, NO daily token cap, so it carries
     # routing when Groq's per-day token cap is spent mid-session. Reaches Gemini
     # via its OpenAI-compatible endpoint (reuses the OpenAI-compat code path).

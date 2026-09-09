@@ -99,13 +99,51 @@ checked first in `is_available()` regardless of quality tier.
   — mutation-verified regression guard for the `is_available()` bug.
 - Full unit suite green (2015 passed).
 
+## Addendum (2026-09-08) — NVIDIA re-provisioned, model chosen and eval'd
+
+Operator generated a new NVIDIA API key at build.nvidia.com. Confirmed live
+against the exact failure signatures above:
+
+- `meta/llama-3.1-8b-instruct` (an old-generation model) still 410s —
+  correctly, that generation really is EOL'd platform-wide, unrelated to
+  entitlement.
+- `nvidia/nemotron-3.5-lightning-30b-a3b` and `openai/gpt-oss-20b`
+  (current-generation models that 403'd on the old key) now return real
+  200 responses. **The entitlement gap is fixed for the new key.**
+
+Chose `nemotron-3.5-lightning-30b-a3b` for `agent_nvidia_model` /
+`PoobBrain.nvidia_model` after evaluating three live candidates against the
+real `music_assistant` tool schema (not just a bare ping):
+
+| Candidate | Correctness (4-5 routing prompts) | Reasoning-trace leak | Latency (median) |
+|---|---|---|---|
+| `nemotron-3.5-lightning-30b-a3b` | **all correct**, including NOT-music "flip a coin" → NO_TOOL | none, in either path | ~2.5s |
+| `openai/gpt-oss-20b` (on NVIDIA) | hallucinated a nonexistent `flip_coin` tool call on the NOT-music case | none | ~3.5s |
+| `nemotron-3-super-120b-a12b` | correct decision on NOT-music case | **leaked partial chain-of-thought** into the discarded no-tool content field | ~6s |
+
+`gpt-oss-20b`'s failure is notable precisely because it's the *same model
+weights* this project already trusts on Groq — the routing-accuracy defect
+is specific to NVIDIA's hosting of it (different default sampling/params,
+unconfirmed which), not the model itself. Not investigated further since a
+working alternative was already found.
+
+`nvidia_model` (the SEPARATE config field feeding browser-use, which needs
+grammar-constrained structured output — a stricter requirement than plain
+tool-calling) was deliberately **not** changed here — none of the three
+candidates were tested against that requirement.
+
+Cerebras remains fully open — no account action taken yet on that side.
+This incident stays `active` until Cerebras is also resolved.
+
 ## Follow-ups
 
-- This incident stays `active` (not `resolved`) — the code-level gaps are
-  fixed, but the actual capacity (a working NVIDIA rung, a working Cerebras
-  rung) is not restored until the operator acts on the account issues
-  above. Re-verify live and flip to `resolved` once confirmed.
-- The routing cascade currently tolerates both rungs being fully dead
-  (Groq + Gemini absorb the load), so this is a capacity/redundancy loss,
-  not a current outage — worth stating plainly rather than overstating
-  urgency.
+- Cerebras: still needs the billing-tab check at cloud.cerebras.ai.
+  Re-verify live and flip to `resolved` once both providers are confirmed
+  working.
+- `nvidia_model` (browser-use) is still on the dead `qwen3-next-80b-a3b`
+  default — now that the account itself is fixed, this just needs its own
+  candidate eval against the grammar/structured-output requirement
+  specifically, using the same re-provisioned key.
+- The routing cascade tolerated both rungs being fully dead throughout
+  (Groq + Gemini absorbed the load) — this was a capacity/redundancy loss,
+  not an outage, worth stating plainly rather than overstating urgency.

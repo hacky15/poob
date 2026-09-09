@@ -111,11 +111,34 @@ class AppConfig(BaseSettings):
 
     # --- NVIDIA NIM ---
     nvidia_api_key: str = ""
-    # qwen3-next: supports grammar-based structured output required by browser-use
+    # qwen3-next: supports grammar-based structured output required by browser-use.
+    # STILL DEAD as of 2026-09-08 (confirmed 410 Gone, platform-wide EOL) -- NOT
+    # yet replaced. Unlike agent_nvidia_model below, browser-use's grammar-
+    # constrained structured-output requirement is stricter than plain tool-
+    # calling and was not verified for any candidate here. See
+    # docs/incidents/nvidia-cerebras-account-entitlement-gaps.md.
     nvidia_model: str = "qwen/qwen3-next-80b-a3b-instruct"
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
-    # Agent brain model on NVIDIA NIM (tool calling for conversational agent)
-    agent_nvidia_model: str = "qwen/qwen3-next-80b-a3b-instruct"
+    # Agent brain model on NVIDIA NIM (tool calling for conversational agent) --
+    # this is what actually feeds PoobBrain.nvidia_model (main.py wires it
+    # through), i.e. the LLM routing cascade's NVIDIA rung.
+    #
+    # 2026-09-08: replaced with nemotron-3.5-lightning-30b-a3b after the
+    # account was re-provisioned (the prior 403/410 blanket failure was an
+    # entitlement gap, not a model choice -- see docs/incidents/
+    # nvidia-cerebras-account-entitlement-gaps.md). Live-tested against the
+    # real music_assistant tool schema: correct on every prompt tried
+    # (play/skip/tiki-tiki/flip-a-coin-is-NOT-music), zero visible
+    # reasoning-trace leakage in either the tool-call or plain-text path.
+    # Two other live candidates were tested and rejected: openai/gpt-oss-20b
+    # (hallucinated a nonexistent flip_coin tool call on the NOT-music test
+    # -- same weights we trust on Groq, wrong here); nemotron-3-super-120b-a12b
+    # (got the routing decision right but leaked partial chain-of-thought
+    # into the discarded no-tool text, and was slower, ~6s median).
+    # Latency: median ~2.5s across 4 real routing prompts -- meaningfully
+    # slower than Groq/Gemini, acceptable ONLY because this is the last-
+    # priority fallback rung, reached solely when both of those are down.
+    agent_nvidia_model: str = "nvidia/nemotron-3.5-lightning-30b-a3b"
 
     # --- Browser ---
     browser_llm_provider: str = "nvidia"  # "nvidia", "gemini", or "ollama"
