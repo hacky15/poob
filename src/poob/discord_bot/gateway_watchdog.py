@@ -79,12 +79,28 @@ class GatewayWatchdog:
         # seconds) never trips it, while still recovering well inside a
         # user-visible "is this thing dead" window.
         silence_threshold_s: float = 150.0,
+        # 2026-09-10: this exact incident recurred, and the FIRST question
+        # in triage -- "did the watchdog even run?" -- was unanswerable from
+        # logs alone. A silently-doing-nothing watchdog (never started, or
+        # perpetually unable to read _last_recv) is indistinguishable from a
+        # correctly-running one that just never saw silence, UNLESS it
+        # periodically proves it's alive. heartbeat_every_n_ticks controls
+        # that cadence; unreadable_warn_after_s bounds how long the "can't
+        # read gateway state" case stays silent before it becomes a WARNING
+        # instead of an indefinite no-op.
+        heartbeat_every_n_ticks: int = 20,
+        unreadable_warn_after_s: float = 150.0,
     ) -> None:
         self._bot = bot
         self._check_interval_s = check_interval_s
         self._silence_threshold_s = silence_threshold_s
+        self._heartbeat_every_n_ticks = heartbeat_every_n_ticks
+        self._unreadable_warn_after_s = unreadable_warn_after_s
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._tick_count = 0
+        self._none_streak = 0
+        self._warned_unreadable = False
 
     def start(self) -> None:
         """Start the watchdog thread. Idempotent — safe to call again on
@@ -93,6 +109,11 @@ class GatewayWatchdog:
             return
         self._thread = threading.Thread(target=self._run, name="gateway-watchdog", daemon=True)
         self._thread.start()
+        log.info(
+            "GatewayWatchdog started",
+            check_interval_s=self._check_interval_s,
+            silence_threshold_s=self._silence_threshold_s,
+        )
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -115,8 +136,39 @@ class GatewayWatchdog:
 
     def _run(self) -> None:
         while not self._stop_event.wait(self._check_interval_s):
+            self._tick_count += 1
             age = self._last_recv_age_s()
-            if age is None or age <= self._silence_threshold_s:
+
+            if age is None:
+                self._none_streak += 1
+                unreadable_s = self._none_streak * self._check_interval_s
+                if not self._warned_unreadable and unreadable_s > self._unreadable_warn_after_s:
+                    self._warned_unreadable = True
+                    log.warning(
+                        "GatewayWatchdog cannot read gateway keep-alive state "
+                        "(bot.ws._keep_alive._last_recv) -- either still "
+                        "connecting for an unusually long time, or a py-cord "
+                        "internals change broke the attribute path. The "
+                        "watchdog is effectively blind until this clears.",
+                        unreadable_for_s=round(unreadable_s, 1),
+                    )
+                continue
+            self._none_streak = 0
+            self._warned_unreadable = False
+
+            # Proof-of-life: with zero periodic output, a watchdog that never
+            # started and one that's running and simply never seeing silence
+            # are indistinguishable after the fact. See docs/incidents/
+            # gateway-keepalive-result-block-no-recovery.md's 2026-09-10
+            # addendum.
+            if self._tick_count % self._heartbeat_every_n_ticks == 0:
+                log.info(
+                    "GatewayWatchdog heartbeat",
+                    last_recv_age_s=round(age, 1),
+                    threshold_s=self._silence_threshold_s,
+                )
+
+            if age <= self._silence_threshold_s:
                 continue
             log.critical(
                 "Discord gateway silent past threshold — py-cord's own "

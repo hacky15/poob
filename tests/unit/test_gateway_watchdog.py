@@ -179,6 +179,147 @@ def test_start_is_idempotent() -> None:
     assert watchdog._thread is first_thread
 
 
+# --- 2026-09-10 addendum: observability after this exact incident recurred
+# --- and it was impossible to tell, after the fact, whether the watchdog
+# --- had ever run at all. See docs/incidents/
+# --- gateway-keepalive-result-block-no-recovery.md's 2026-09-10 addendum.
+
+
+def test_start_logs_confirmation() -> None:
+    """start() must log so a post-incident audit can answer 'did this even
+    run' from logs alone -- the exact question that was unanswerable during
+    the 2026-09-10 recurrence."""
+    bot = _bot_with_last_recv(time.perf_counter())
+    watchdog = GatewayWatchdog(bot, check_interval_s=0.01, silence_threshold_s=100.0)
+
+    with patch("poob.discord_bot.gateway_watchdog.log") as mock_log:
+        watchdog.start()
+        try:
+            pass
+        finally:
+            watchdog.stop()
+
+    assert mock_log.info.called
+    assert "started" in mock_log.info.call_args[0][0].lower()
+
+
+def test_heartbeat_logged_periodically_while_healthy() -> None:
+    """A running-but-never-tripped watchdog must periodically prove it's
+    alive -- without this, 'never started' and 'started and stayed healthy'
+    produce IDENTICAL log output (none), which is exactly the ambiguity
+    that blocked triage on 2026-09-10."""
+    bot = _bot_with_last_recv(time.perf_counter())
+    watchdog = GatewayWatchdog(
+        bot,
+        check_interval_s=0.01,
+        silence_threshold_s=100.0,
+        heartbeat_every_n_ticks=3,
+    )
+
+    with (
+        patch("poob.discord_bot.gateway_watchdog.log") as mock_log,
+        patch("poob.discord_bot.gateway_watchdog.os._exit") as mock_exit,
+    ):
+        watchdog.start()
+        try:
+            deadline = time.monotonic() + 2.0
+            while mock_log.info.call_count < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+        finally:
+            watchdog.stop()
+
+    assert not mock_exit.called
+    heartbeat_calls = [c for c in mock_log.info.call_args_list if "heartbeat" in c[0][0].lower()]
+    assert len(heartbeat_calls) >= 1, "no periodic heartbeat log while gateway was healthy"
+
+
+def test_warns_once_when_gateway_state_stays_unreadable() -> None:
+    """If _last_recv_age_s() returns None (broken internals path, or an
+    unusually long pre-connect window) for longer than
+    unreadable_warn_after_s, the watchdog must say so at WARNING -- silently
+    doing nothing forever is indistinguishable from 'healthy and never
+    silent', which is the exact ambiguity this addendum exists to close."""
+    bot = _bot_with_last_recv(None)  # ws is None -> age is always None
+    watchdog = GatewayWatchdog(
+        bot,
+        check_interval_s=0.01,
+        silence_threshold_s=100.0,
+        unreadable_warn_after_s=0.05,
+    )
+
+    with (
+        patch("poob.discord_bot.gateway_watchdog.log") as mock_log,
+        patch("poob.discord_bot.gateway_watchdog.os._exit") as mock_exit,
+    ):
+        watchdog.start()
+        try:
+            deadline = time.monotonic() + 2.0
+            while not mock_log.warning.called and time.monotonic() < deadline:
+                time.sleep(0.01)
+        finally:
+            watchdog.stop()
+
+    assert not mock_exit.called
+    assert mock_log.warning.called
+    assert "cannot read" in mock_log.warning.call_args[0][0].lower()
+
+
+def test_unreadable_warning_fires_only_once() -> None:
+    """Must not spam a WARNING on every tick once past the threshold -- one
+    warning per unreadable-streak is enough signal."""
+    bot = _bot_with_last_recv(None)
+    watchdog = GatewayWatchdog(
+        bot,
+        check_interval_s=0.01,
+        silence_threshold_s=100.0,
+        unreadable_warn_after_s=0.02,
+    )
+
+    with (
+        patch("poob.discord_bot.gateway_watchdog.log") as mock_log,
+        patch("poob.discord_bot.gateway_watchdog.os._exit"),
+    ):
+        watchdog.start()
+        try:
+            time.sleep(0.3)
+        finally:
+            watchdog.stop()
+
+    assert mock_log.warning.call_count == 1
+
+
+def test_unreadable_streak_resets_once_readable_again() -> None:
+    """A transient unreadable blip (e.g. brief reconnect window) must not
+    permanently latch the warning state -- once age becomes readable again,
+    a LATER unreadable streak should be able to warn again."""
+
+    class _FlakyWs:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __getattr__(self, name: str):  # pragma: no cover - trivial
+            raise AttributeError(name)
+
+    readable_bot = _bot_with_last_recv(time.perf_counter())
+    watchdog = GatewayWatchdog(
+        readable_bot,
+        check_interval_s=0.01,
+        silence_threshold_s=100.0,
+        unreadable_warn_after_s=0.02,
+    )
+
+    with patch("poob.discord_bot.gateway_watchdog.log") as mock_log:
+        watchdog.start()
+        try:
+            time.sleep(0.1)
+        finally:
+            watchdog.stop()
+
+    assert not mock_log.warning.called
+    assert watchdog._none_streak == 0
+    assert watchdog._warned_unreadable is False
+
+
 def test_exception_reading_last_recv_does_not_crash_watchdog_thread() -> None:
     """A future py-cord upgrade could rename/remove `_keep_alive._last_recv`.
     The watchdog reaches into private library internals by necessity (see
