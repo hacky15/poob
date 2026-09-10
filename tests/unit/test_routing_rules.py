@@ -828,6 +828,120 @@ def test_misrouted_play_override_leaves_play_and_deal_routes_alone() -> None:
     )
 
 
+# --- silent-control veto (2026-09-09 prod: content present, but no evidence)-
+# Two real production failures, same night: an addressed utterance with real
+# words after "Hey, Poob" (not the bare-wake-address case _is_content_free
+# already covers) got routed to a stateful control action with NOTHING in
+# the message supporting it -- almost certainly a stale echo of an earlier
+# turn's real command. Because these actions are [SILENT] (no spoken ack),
+# the user heard nothing at all, both times:
+#   "It doesn't. What'd you say, Logan? Hey, Poob." -> apply_effect/slowed
+#   "K. Hey, Poob. You alive there?"                 -> apply_effect/slowed
+
+
+def test_silent_control_veto_rejects_prod_regression_you_alive_there() -> None:
+    """The exact second prod occurrence: no keyword anywhere in the message
+    supports 'apply_effect' -> vetoed to (None, None), falls through to a
+    normal casual reply instead of executing silently."""
+    b = _brain()
+    assert b._music_safety_net(
+        "K. Hey, Poob. You alive there?",
+        "music_assistant",
+        {"action": "apply_effect", "effect": "slowed", "mode": "add"},
+        voice=True,
+    ) == (None, None)
+
+
+def test_silent_control_veto_rejects_prod_regression_logan() -> None:
+    """The exact first prod occurrence."""
+    b = _brain()
+    assert b._music_safety_net(
+        "It doesn't. What'd you say, Logan? Hey, Poob.",
+        "music_assistant",
+        {"action": "apply_effect", "effect": "slowed", "mode": "add"},
+        voice=True,
+    ) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "action_args",
+    [
+        {"action": "skip"},
+        {"action": "pause"},
+        {"action": "resume"},
+        {"action": "stop"},
+        {"action": "volume", "value": 100},
+        {"action": "volume_up"},
+        {"action": "volume_down"},
+        {"action": "shuffle"},
+        {"action": "loop", "mode": "one"},
+        {"action": "apply_effect", "effect": "bassboost", "mode": "add"},
+        {"action": "autoplay", "mode": "on"},
+        {"action": "restore"},
+        {"action": "replay"},
+        {"action": "previous"},
+        {"action": "seek", "time": "1:00"},
+        {"action": "leave"},
+    ],
+)
+def test_silent_control_veto_covers_every_silent_action(action_args: dict) -> None:
+    """Every stateful, no-free-text-argument action is covered by the veto
+    when the message carries zero supporting keywords."""
+    b = _brain()
+    assert b._music_safety_net(
+        "so anyway did you see that meme earlier",
+        "music_assistant",
+        dict(action_args),
+        voice=True,
+    ) == (None, None), action_args
+
+
+def test_silent_control_veto_does_not_fire_with_keyword_evidence() -> None:
+    """A control action WITH real supporting language in the message is left
+    alone -- the veto only fires on zero evidence, never on a legitimate but
+    non-exact-phrase command (that's the router's job, not this guard's)."""
+    b = _brain()
+    assert b._music_safety_net(
+        "hey poob can you add a bit more reverb to this",
+        "music_assistant",
+        {"action": "apply_effect", "effect": "reverb", "mode": "add"},
+        voice=True,
+    ) == ("music_assistant", {"action": "apply_effect", "effect": "reverb", "mode": "add"})
+
+
+def test_silent_control_veto_never_touches_play_or_readonly_actions() -> None:
+    """'play'/'queue_many' carry their own query as evidence and are excluded
+    from this veto; read-only info actions are harmless even if imprecise."""
+    b = _brain()
+    for args in (
+        {"action": "play", "query": "some obscure b-side"},
+        {"action": "queue_many", "tracks": ["A", "B"]},
+        {"action": "now_playing"},
+        {"action": "list_effects"},
+        {"action": "list_playlists"},
+        {"action": "lyrics"},
+        {"action": "queue"},
+    ):
+        assert b._music_safety_net(
+            "so anyway did you see that meme earlier",
+            "music_assistant",
+            dict(args),
+            voice=True,
+        ) == ("music_assistant", args), args
+
+
+def test_silent_control_veto_never_touches_deal_routes() -> None:
+    """Scoped to music_assistant only -- never touches a routed deal query
+    even if it happens to share an action-shaped dict."""
+    b = _brain()
+    assert b._music_safety_net(
+        "so anyway did you see that meme earlier",
+        "deal_assistant",
+        {"request": "skip"},
+        voice=True,
+    ) == ("deal_assistant", {"request": "skip"})
+
+
 # --- _looks_like_non_music_play_usage: opinion-question / game-reference /---
 # --- figure-of-speech guard (2026-07-21 prod regression) --------------------
 # "Hey, Poob. Do you think we should play hard or standard?" (asking Poob's
