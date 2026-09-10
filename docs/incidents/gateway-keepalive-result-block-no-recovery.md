@@ -166,3 +166,74 @@ the repeat `on_ready` calls a reconnect triggers).
 - Consider upstreaming a timeout fix to py-cord's `KeepAliveHandler.run()`
   (`f.result(timeout=...)` instead of unbounded `f.result()`) — out of
   scope here, but the actual defect lives there.
+
+## Addendum (2026-09-10) — recurred; the watchdog itself did not fire
+
+Live production audit found the identical signature again, timed almost to
+the second:
+
+```
+03:15:19.270  Voice WS closed (1006), reconnected successfully by 03:15:21.215
+03:16:21.358  "Shard ID None has stopped responding to the gateway.
+              Closing and restarting." (60.14s after the voice reconnect —
+              the original incident measured 60.15s)
+              ───── TOTAL SILENCE for 33+ minutes ─────
+```
+
+`docker inspect poob` showed `RestartCount=0` — 33 minutes past the
+watchdog's 150s threshold, it had not force-exited. Verified everything
+the watchdog depends on was actually intact in the running container:
+`gateway_watchdog.py` present on disk, `bot.py`'s `on_ready` calling
+`self._gateway_watchdog.start()` as the first line (confirmed via
+`docker exec poob grep`), `_keep_alive`/`_last_recv` attribute paths
+confirmed valid against the installed py-cord 2.7.0 source
+(`inspect.getsource`). Every thread's `/proc/*/wchan` was in a legitimate
+blocking syscall (`ep_poll`, `futex_wait_queue`, `hrtimer_nanosleep`) — no
+native-call deadlock signature. `py-spy dump` was blocked again by the same
+harness safety classifier as the original incident, so the exact reason
+the watchdog thread didn't trip could not be proven directly.
+
+**Recovered by manual `docker restart poob`** (operator-authorized,
+outward-facing action) — confirmed clean reconnect (`Bot is ready`, DAVE
+audio receive resumed, voice handshake complete) within ~20s.
+
+**What this addendum actually fixes**: not the unproven "why didn't it
+fire" — that requires a live `py-spy dump` captured *during* a future
+occurrence, still not available. What's fixable now is that the watchdog
+was a black box: a thread that never started and one that ran the whole
+time but genuinely never saw silence produce **identical log output —
+none**. That ambiguity is what stalled triage this time. `GatewayWatchdog`
+now:
+
+- Logs `"GatewayWatchdog started"` at INFO from `start()` — answers "did
+  this even run" from logs alone.
+- Logs a periodic `"GatewayWatchdog heartbeat"` at INFO (every 20 ticks,
+  ~5 min at the default 15s interval) showing the current
+  `last_recv_age_s` while healthy — proves the thread is alive and shows
+  what it's actually observing.
+- Logs a one-time WARNING if `_last_recv_age_s()` returns `None` (can't
+  read gateway state at all) for longer than `unreadable_warn_after_s`
+  (default 150s) — turns "silently blind forever" into a visible signal
+  instead of an indistinguishable no-op.
+
+If this recurs with the heartbeat logs in place: a `last_recv_age_s`
+staying small right up to the silence proves the *gateway* connection is
+genuinely healthy and something else (the event loop, or app-level code)
+is the wedge — pointing back at
+[[voice-4014-reconnect-event-loop-wedge]]-class causes instead. A growing
+`last_recv_age_s` with no eventual force-exit would point at a bug in the
+watchdog's own force-exit path itself. Either way, the next occurrence
+will have the evidence this one lacked.
+
+### Validation
+
+- `tests/unit/test_gateway_watchdog.py` (+6): start-confirmation log,
+  periodic heartbeat while healthy, one-time warning on a stuck-unreadable
+  streak, warning fires only once (not every tick), streak resets once
+  readable again. Mutation-verified: disabled each new condition in turn,
+  confirmed the matching test failed, restored, confirmed all pass.
+- Full unit suite: 2045 passed, 1 skipped.
+- Status stays `resolved` for the original mechanism (the force-exit path
+  itself is unchanged and still covered by the original 6 tests); this
+  addendum is an observability hardening, not a claim that the root
+  trigger is now understood.
