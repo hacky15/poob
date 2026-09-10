@@ -372,6 +372,23 @@ def test_music_prompt_nonsense_name_is_the_song() -> None:
     assert "cheeky cheeky" in p or "tiki tiki" in p, "missing the nonsense example"
 
 
+def test_persona_prompt_encourages_using_names() -> None:
+    """2026-09-10 operator directive: use people's actual names more,
+    especially when directly addressing someone — not just 'you'/'dude'."""
+    from poob.brain.poob import _build_system_prompt
+    p = _build_system_prompt(level=5, voice=False, with_tools=False).lower()
+    assert "use people's actual names more" in p
+
+
+def test_persona_prompt_has_logan_wilson_easter_egg() -> None:
+    """2026-09-10 operator directive: sprinkle in a Logan Wilson reference
+    roughly 1 response in 10 -- rare, not a catchphrase."""
+    from poob.brain.poob import _build_system_prompt
+    p = _build_system_prompt(level=5, voice=False, with_tools=False)
+    assert "Logan Wilson" in p
+    assert "1 response in 10" in p, "missing the rarity guidance -- must not fire every response"
+
+
 def test_music_tool_query_description_is_current_turn_only() -> None:
     """MUSIC_TOOL.query must say extract from the CURRENT message and never
     from earlier context — the tool-def half of the anti-hallucination fix."""
