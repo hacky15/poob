@@ -1062,7 +1062,15 @@ class PoobBrain:
     cerebras_api_key: str = ""
     cerebras_model: str = "llama-3.3-70b"
     nvidia_api_key: str = ""
-    nvidia_model: str = "qwen/qwen3-next-80b-a3b-instruct"
+    # 2026-09-08: replaced after account re-provisioning fixed a 403/410
+    # blanket entitlement gap (not a model problem -- see docs/incidents/
+    # nvidia-cerebras-account-entitlement-gaps.md). Live-tested against the
+    # real routing tool schema: correct on every prompt (including the
+    # NOT-music "flip a coin" case), no reasoning-trace leakage. Rejected
+    # candidates: openai/gpt-oss-20b (hallucinated a fake tool on the
+    # NOT-music test), nemotron-3-super-120b-a12b (leaked chain-of-thought,
+    # slower). See docs/decisions/disable-dead-vision-and-fallback-model-rungs.md.
+    nvidia_model: str = "nvidia/nemotron-3.5-lightning-30b-a3b"
     # Gemini tool-router rung — RPD-limited, NO daily token cap, so it carries
     # routing when Groq's per-day token cap is spent mid-session. Reaches Gemini
     # via its OpenAI-compatible endpoint (reuses the OpenAI-compat code path).
@@ -1302,6 +1310,92 @@ class PoobBrain:
     # phrase group. See docs/incidents/effect-clear-suppressed-by-normal-guard.md.
     _EFFECT_CLEAR_PHRASES: ClassVar[frozenset[str]] = _EFFECT_CLEAR_PHRASES
 
+    # Keywords that constitute linguistic evidence for a playback-control
+    # request. Shared by two structurally different guards:
+    #  - _groq_with_tools' cascade-continuation check (a NO_TOOL answer while
+    #    one of these appears must not end the cascade — see the
+    #    music_playing gate there).
+    #  - _music_safety_net's silent-control veto (below): a routed action
+    #    with NONE of these present in the current message is almost
+    #    certainly a stale echo, not a real command.
+    # A single shared list means the two checks can't drift out of sync.
+    _CONTROL_ACTION_KEYWORDS: ClassVar[tuple[str, ...]] = (
+        "play",
+        "skip",
+        "next",
+        "pause",
+        "resume",
+        "unpause",
+        "stop",
+        "leave",
+        "volume",
+        "louder",
+        "quieter",
+        "loud",
+        "quiet",
+        "mute",
+        "max",
+        "slow",
+        "speed",
+        "fast",
+        "reverb",
+        "nightcore",
+        "bass",
+        "effect",
+        "filter",
+        "shuffle",
+        "loop",
+        "repeat",
+        "turn it",
+        "autoplay",
+        "auto play",
+        "previous",
+        "replay",
+        "restore",
+        "again",
+        "back on",
+        "seek",
+        "rewind",
+        "remove",
+        "clear",
+        "queue",
+        "move",
+        "playlist",
+    )
+
+    # music_assistant actions with NO free-text argument to independently
+    # verify — a stateful, usually-SILENT control action. Excludes: "play"/
+    # "queue_many"/"queue_spotify_playlist" (carry their own query/url, and
+    # are covered by the misrouted-play override instead); "now_playing"/
+    # "list_effects"/"list_playlists"/"lyrics"/"queue" (read-only, harmless
+    # even if imprecisely routed). See _music_safety_net's silent-control veto.
+    _SILENT_CONTROL_ACTIONS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "skip",
+            "previous",
+            "replay",
+            "restore",
+            "pause",
+            "resume",
+            "stop",
+            "volume",
+            "volume_up",
+            "volume_down",
+            "shuffle",
+            "loop",
+            "move",
+            "remove",
+            "clear",
+            "apply_effect",
+            "seek",
+            "autoplay",
+            "save_playlist",
+            "load_playlist",
+            "delete_playlist",
+            "leave",
+        }
+    )
+
     # before returning. ClassVar: a shared class constant, NOT a dataclass field.
     _CONTROL_OVERRIDES: ClassVar[tuple[tuple[frozenset[str], dict[str, str | int]], ...]] = (
         (_BARE_STOP_PHRASES, {"action": "stop"}),
@@ -1491,6 +1585,37 @@ class PoobBrain:
                     query=span[:60],
                 )
                 return "music_assistant", {"action": "play", "query": span}
+
+        # Silent-control veto: a stateful control action with no free-text
+        # argument (skip/pause/volume/apply_effect/autoplay/...) that has NO
+        # supporting keyword ANYWHERE in the current message is almost
+        # certainly a hallucinated repeat of an earlier turn's real command
+        # resurfacing on unrelated content — and because these actions are
+        # [SILENT] (no spoken ack), the user hears nothing at all (2026-09-09
+        # prod: "Hey, Poob. You alive there?" -> apply_effect/slowed, echoing
+        # an effect applied 4 turns earlier). This generalizes the
+        # bare-wake-address gap (_is_content_free only catches ZERO content)
+        # to the case where real, but non-actionable, content is present.
+        # "play"/"queue_many"/read-only actions are excluded — they either
+        # carry their own evidence (a query) or are handled above, or are
+        # harmless even when imprecise. See
+        # docs/incidents/silent-control-action-hallucinated-on-content-lacking-evidence.md.
+        if (
+            tool_name == "music_assistant"
+            and (tool_args or {}).get("action") in self._SILENT_CONTROL_ACTIONS
+        ):
+            has_evidence = any(
+                sig in self._WAKE_PREFIX_RE.sub("", variant, count=1).lower()
+                for variant in self._head_stripped_variants(clean_message, voice)
+                for sig in self._CONTROL_ACTION_KEYWORDS
+            )
+            if not has_evidence:
+                log.warning(
+                    "Vetoed silent control action -- no keyword evidence in message",
+                    original=clean_message[:60],
+                    routed_args=tool_args,
+                )
+                return None, None
 
         if tool_name is not None:
             return tool_name, tool_args
@@ -3242,20 +3367,33 @@ class PoobBrain:
             and self.gemini_router_model_alt != self.gemini_router_model
         ):
             providers.append(("gemini", self.gemini_router_model_alt))
-        # 3. NVIDIA NIM — different provider, sidesteps Groq rate limits.
-        if self.nvidia_api_key:
-            providers.append(("nvidia", self.nvidia_model))
-        # 4. LAST resort only, when Groq primary + Gemini + NVIDIA are all
-        #    down. Was meta-llama/llama-4-scout-17b-16e-instruct, confirmed
-        #    absent from Groq's live catalog 2026-09-08 (Groq exited Scout
-        #    entirely, not a transient outage) — every real call 404'd here,
-        #    unconditionally, on every worst-case cascade traversal.
-        #    Replaced with qwen/qwen3.8-27b, smoke-tested live for real
-        #    tool-call emission (not just existence) against this exact
-        #    schema shape before shipping. See docs/decisions/
-        #    disable-dead-vision-and-fallback-model-rungs.md.
+        # 3. Groq qwen3.8-27b — different MODEL from the rung-1 gpt-oss-20b
+        #    (separate TPM bucket), reached once Groq's primary AND Gemini
+        #    are both down. Was meta-llama/llama-4-scout-17b-16e-instruct,
+        #    confirmed absent from Groq's live catalog 2026-09-08 (Groq
+        #    exited Scout entirely, not a transient outage) — every real
+        #    call 404'd here, unconditionally. Replaced with qwen3.8-27b,
+        #    smoke-tested live for real tool-call emission against this
+        #    exact schema shape, then measured head-to-head against rung 1
+        #    on the real MATRIX oracle (6/6 vs 5/7) and real latency
+        #    (315-842ms vs rung 1's 458-972ms) — it beat the primary on
+        #    both axes. Ordered BEFORE NVIDIA deliberately: it is fast and
+        #    consistent where NVIDIA is neither (see rung 4's comment). See
+        #    docs/decisions/disable-dead-vision-and-fallback-model-rungs.md.
         if self.groq_api_key:
             providers.append(("groq", "qwen/qwen3.8-27b"))
+        # 4. NVIDIA NIM — different provider, sidesteps Groq rate limits
+        #    entirely. Deliberately LAST, not rung 3: measured live,
+        #    latency on this exact rung's model (nemotron-3.5-lightning)
+        #    ranged 315ms-12,000ms across a clean back-to-back run with NO
+        #    errors on the slow calls — just silent multi-second stalls.
+        #    Correct on every tool-routing prompt tested, but that
+        #    instability means it must never sit ahead of a rung that is
+        #    both fast AND reliable (rung 3). Reached only when Groq
+        #    primary, Gemini, AND qwen3.8-27b have all failed. See
+        #    docs/incidents/nvidia-cerebras-account-entitlement-gaps.md.
+        if self.nvidia_api_key:
+            providers.append(("nvidia", self.nvidia_model))
 
         # Circuit breaker: drop rungs whose model is still in rate-limit
         # cooldown so a capped model (e.g. Groq's spent daily TPD) is skipped
@@ -3314,31 +3452,7 @@ class PoobBrain:
                 for m in messages
             )
             if music_playing:
-                control_signals = (
-                    "play",
-                    "skip",
-                    "pause",
-                    "resume",
-                    "stop",
-                    "volume",
-                    "louder",
-                    "quieter",
-                    "slow",
-                    "speed",
-                    "fast",
-                    "reverb",
-                    "nightcore",
-                    "bass",
-                    "effect",
-                    "filter",
-                    "shuffle",
-                    "loop",
-                    "repeat",
-                    "mute",
-                    "next song",
-                    "turn it",
-                )
-                looks_tool_worthy = any(s in user_msg for s in control_signals)
+                looks_tool_worthy = any(s in user_msg for s in self._CONTROL_ACTION_KEYWORDS)
 
         last_text = ""
         last_tool: str | None = None
