@@ -754,6 +754,21 @@ _NOT_MUSIC_LEADIN_RE = re.compile(
 # defeated rigid phrase matching elsewhere in this incident.
 _NOT_MUSIC_SPAN_PREFIX_RE = re.compile(r"^it\s+(?:\w+\s+)?(?:cool|safe)\b", re.IGNORECASE)
 
+# 2026-09-11 production evidence for the documented residual gap above:
+# "Hey, Poob. What Rainbow Six Siege map should we play on?" carries no
+# recognized opinion anchor ("do you think"/"reckon"/"your take"), so it
+# fell through to the play backfill, which found nothing after "play" but
+# the preposition "on", and asked "play what?" out loud to a genuine
+# strategy question. A WH-question (what/which) introducing the clause,
+# combined with NO real content surviving after the play verb, is a
+# distinct and much safer signal than trying to enumerate opinion phrases:
+# a real play command always names something ("play some jazz"), so
+# "play" followed by nothing but function words is never a real command
+# regardless of what precedes it. Checked only when content is empty
+# (below) so it never touches a genuine "what should we play, some jazz
+# or rock?" (real content survives there).
+_WH_QUESTION_LEADIN_RE = re.compile(r"\b(?:what|which)\b", re.IGNORECASE)
+
 # Short praise / figure-of-speech idioms — low collision risk, checked
 # unconditionally against the whole message (see rationale above).
 _NOT_MUSIC_IDIOM_RE = re.compile(
@@ -847,6 +862,8 @@ def _looks_like_non_music_play_usage(clean_message: str) -> bool:
     if _NOT_MUSIC_SPAN_PREFIX_RE.match(span):
         return True
     content = _play_span_content_tokens(span) - _GAME_REFERENCE_MODIFIERS
+    if not content and _WH_QUESTION_LEADIN_RE.search(lead):
+        return True
     return bool(content) and content <= _GAME_REFERENCE_WORDS
 
 

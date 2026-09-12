@@ -1096,6 +1096,56 @@ def test_specific_game_titles_are_a_documented_accepted_gap() -> None:
     assert _looks_like_non_music_play_usage("want to play some Among Us") is False
 
 
+# --- 2026-09-11 production evidence: bare WH-question + empty content -----
+# "Hey, Poob. What Rainbow Six Siege map should we play on?" -- a real
+# strategy question, no recognized opinion anchor -- fell through to the
+# play backfill, extracted "on" as a song, found no content, and asked
+# "play what?" out loud. This is exactly the residual gap
+# test_documented_v1_bug_reports_are_fixed's sibling tests already flagged
+# as "deferred to new production evidence" -- this is that evidence.
+
+
+def test_wh_question_with_no_play_content_is_not_music() -> None:
+    """The exact prod transcript, plus paraphrases: a WH-question (what/
+    which) introducing the clause, with nothing but function words after
+    the play verb, is recognized as non-music regardless of whether it
+    matches one of the enumerated opinion-anchor phrases."""
+    from poob.brain.poob import _looks_like_non_music_play_usage
+
+    for msg in (
+        "Hey, Poob. What Rainbow Six Siege map should we play on?",
+        "What map should we play on?",
+        "Which map should we play on",
+        "What difficulty should we play on?",
+        "Which one should we play with?",
+    ):
+        assert _looks_like_non_music_play_usage(msg) is True, msg
+
+
+def test_wh_question_guard_does_not_touch_real_content() -> None:
+    """The new guard only fires when NOTHING survives after the play verb --
+    a genuine 'what should we play, X' request with real content (a song,
+    artist, or genre) must still play, exactly like the pre-existing
+    'should we play some Metallica' case."""
+    from poob.brain.poob import _looks_like_non_music_play_usage
+
+    for msg in (
+        "What should we play, some jazz or rock?",
+        "Which song should we play, Bohemian Rhapsody?",
+        "what do you want to play, despacito or tiki tiki",
+    ):
+        assert _looks_like_non_music_play_usage(msg) is False, msg
+
+
+def test_wh_question_guard_scoped_to_the_verbs_own_clause() -> None:
+    """Same clause-scoping discipline as every other check here: an
+    unrelated WH-question in an earlier clause must not suppress a real
+    trailing play command in a different clause."""
+    from poob.brain.poob import _looks_like_non_music_play_usage
+
+    assert _looks_like_non_music_play_usage("What map are we on, play Bohemian Rhapsody") is False
+
+
 def test_real_play_commands_are_not_flagged() -> None:
     """The guard must never suppress genuine play requests — including the
     documented vault catches, mid-sentence commands, and the exact phrasings

@@ -234,12 +234,13 @@ positive means "actively defeat an already-necessary recovery attempt."
 
 ## Follow-ups
 
-- **Documented residual gap:** opinion questions phrased WITHOUT one of the
-  recognized lead-in anchors (e.g. bare "should we play X or Y" with no
-  "do you think"/"reckon" framing) can still slip through, by design — the
-  review proved that catching these via phrase enumeration reliably breaks
-  real requests instead. Extend `_NOT_MUSIC_LEADIN_RE` only with new
-  production evidence, not preemptively.
+- **Documented residual gap — RESOLVED 2026-09-11, see addendum below.**
+  Opinion questions phrased WITHOUT one of the recognized lead-in anchors
+  (e.g. bare "should we play X or Y" with no "do you think"/"reckon"
+  framing) can still slip through, by design — the review proved that
+  catching these via phrase enumeration reliably breaks real requests
+  instead. Extend `_NOT_MUSIC_LEADIN_RE` only with new production
+  evidence, not preemptively.
 - **Documented residual gap (new in v3):** a comma-separated opinion
   question — anchor phrase and play verb in different clauses ("What do
   you reckon, play attack or defense?") — is no longer caught, since the
@@ -264,3 +265,63 @@ positive means "actively defeat an already-necessary recovery attempt."
   trimmed. Deliberately left unchanged: extending crosstalk-trimming to
   commas risks truncating real comma-containing song titles typed via text
   ("Hello, Goodbye"). Out of scope here, tracked as a follow-up.
+
+## Addendum (2026-09-11) — the documented residual gap recurred, now fixed with real evidence
+
+Live production, operator report: *"why did it try to play music when i
+said 'what map should we play'? i really really hope this stupid system
+doesn't actually think i want to play music whenever i say the word
+'play'."* Log confirms the exact documented residual gap from the
+Follow-ups section above, not a broader failure:
+
+```
+02:50:10  Dual: wake word addressed  text="Hey, Poob. What Rainbow Six Siege map should we play on?"
+          → router correctly returned NO TOOL
+02:50:10  Safety net play span carries no content — deferring to 'Play what?'  span=on
+02:50:10  Safety net caught missed music intent  query=
+02:50:11  First sentence ready  sentence='play what?'  voice=toob
+```
+
+No recognized opinion anchor ("do you think"/"reckon"/"your take") appears
+before "play", so `_NOT_MUSIC_LEADIN_RE` didn't fire; the router got it
+right and the code-level safety net reversed the correct decision — the
+same failure *class* as the original incident, this session's new
+production evidence for the accepted gap.
+
+### Fix
+
+Rather than enumerating more opinion phrases (the exact approach v1/v2
+already proved unsound), added a narrower, more general signal:
+`_WH_QUESTION_LEADIN_RE` (`what`/`which`) checked ONLY when the extracted
+play-span has NO surviving content after stopword filtering. Rationale: a
+real play command always names something ("play some jazz" — content
+survives); "play" trailed by nothing but function words, introduced by a
+WH-question, is never a real command regardless of which specific opinion
+phrase (if any) precedes it. This is strictly narrower than the old
+lead-in enumeration — it can't fire on "what should we play, some jazz or
+rock?" (content survives) or "should I play the new Drake album" (no
+WH-word), both already-pinned real-request cases.
+
+As a side effect this also closes an adjacent, previously-unnoticed gap:
+"what game should we play" (game-reference word BEFORE "play") wasn't
+caught by the existing `_GAME_REFERENCE_WORDS` check either, since that
+only inspects the span AFTER the verb.
+
+### Validation
+
+- `tests/unit/test_routing_rules.py`: the exact prod transcript plus
+  paraphrases ("What map should we play on?", "Which map should we play
+  on", "What difficulty should we play on?", "Which one should we play
+  with?") — all correctly flagged non-music. Confirmed the guard does NOT
+  touch real content ("What should we play, some jazz or rock?", "Which
+  song should we play, Bohemian Rhapsody?") and stays scoped to the play
+  verb's own clause (an unrelated leading WH-question doesn't suppress a
+  real trailing command).
+- Mutation-verified: disabled the new condition, confirmed the exact prod
+  transcript's test failed, restored, confirmed all 124 tests in the file
+  pass.
+- Full unit suite: 2050 passed, 1 skipped, no regressions.
+- Deliberately did NOT add "as" to `_PLAY_SPAN_STOPWORDS` to also catch
+  "what should we play as?" — no production evidence for that specific
+  shape yet, consistent with this note's own "extend only with evidence"
+  discipline. Watch for recurrence.
