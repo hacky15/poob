@@ -34,6 +34,7 @@ Gotchas differ from incidents: an incident is a specific event in the past, a go
 - [[pycord-auto-sync-commands-fires-before-cogs]] — auto-sync runs in `on_connect`, before `on_ready` cog loading
 - [[pycord-is-playing-is-a-property]] — `player.is_playing()` crashes; it's a property, not a method
 - [[voice-music-common-pitfalls]] — asetrate inversion, yield-from-async, grace periods, temp-file cleanup
+- [[addressed-silence-threshold-is-a-deliberate-tradeoff]] — the 2000ms addressed-silence VAD threshold looks like free latency to cut (measured ~2s dead air on every wake turn); it's deliberate, stops Poob cutting people off mid-sentence — operator confirmed 2026-09-11: leave it
 
 ### Scanner / Marketplace
 
