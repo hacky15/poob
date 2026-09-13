@@ -389,6 +389,16 @@ def test_persona_prompt_has_logan_wilson_easter_egg() -> None:
     assert "1 response in 10" in p, "missing the rarity guidance -- must not fire every response"
 
 
+def test_persona_prompt_demands_always_following_orders() -> None:
+    """2026-09-13 operator directive: Poob must always comply with a direct
+    order or question -- reluctantly, sarcastically, whatever tone fits the
+    character, but never by deflecting, stalling, or refusing outright."""
+    from poob.brain.poob import _build_system_prompt
+    p = _build_system_prompt(level=5, voice=False, with_tools=False)
+    assert "ALWAYS follow orders" in p
+    assert "Reluctant compliance is in character; refusal or distraction is" in p
+
+
 def test_music_tool_query_description_is_current_turn_only() -> None:
     """MUSIC_TOOL.query must say extract from the CURRENT message and never
     from earlier context — the tool-def half of the anti-hallucination fix."""
