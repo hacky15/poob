@@ -1488,6 +1488,43 @@ def test_referential_span_blanks_end_to_end_instead_of_queueing_junk() -> None:
     assert args["query"] == ""
 
 
+# --- 2026-09-13 production evidence: "now"/"thing" leaked through as -------
+# --- apparent song content, causing a literal wrong-song search -----------
+# Production, live: "Hey, Poob. It's in your queue. You can play it now." (a
+# referential request to resume/advance to an already-queued track) was
+# misrouted to {action: skip}; the misrouted-play override's span
+# extraction found "it now" -- "it" was already a stopword but "now" was
+# not, so the span carried apparent content and got searched literally,
+# queuing "New Edition - Cool It Now" at position 5 -- a real but totally
+# unrelated song. Same failure class as
+# docs/incidents/referential-play-query-searched-literally.md.
+
+
+def test_now_and_thing_are_not_song_content() -> None:
+    """'now'/'thing'/'things' are generic filler, not song-identifying
+    content -- same closed class as 'song'/'music'/'track' already here."""
+    from poob.brain.poob import _play_span_content_tokens
+
+    assert _play_span_content_tokens("it now") == set()
+    assert _play_span_content_tokens("that now") == set()
+    assert _play_span_content_tokens("the thing now") == set()
+    assert _play_span_content_tokens("things") == set()
+
+
+def test_referential_play_it_now_does_not_queue_a_literal_wrong_song() -> None:
+    """The exact prod regression: a referential 'play it now' must NOT be
+    'corrected' into a literal search for 'it now' -- with no real content
+    surviving, the misrouted-play override must decline to fire, leaving
+    the (still imperfect, but harmless) original routed action alone
+    rather than queuing an unrelated real song that happens to match."""
+    b = _brain()
+    assert b._music_safety_net(
+        "Hey, Poob. It's in your queue. You can play it now.",
+        "music_assistant",
+        {"action": "skip"},
+    ) == ("music_assistant", {"action": "skip"})
+
+
 def test_one_and_something_stay_searchable_documented_tradeoff() -> None:
     """Deliberate exclusion: 'one' and 'something' are NOT treated as
     content-free. 'One' is a real title (U2/Metallica) and poob.py already

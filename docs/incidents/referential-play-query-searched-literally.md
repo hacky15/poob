@@ -144,3 +144,34 @@ not attempted here — evidence-first, and this fix stands on its own.
 Open-class referential phrasing (`"what we were listening to"` — `listening`
 survives) is likewise out of scope by design. Extend only with production
 evidence.
+
+## Addendum (2026-09-13) — "now"/"thing" hit the exact same gap, with real evidence
+
+Live production: *"Hey, Poob. It's in your queue. You can play it now."* — a
+referential request to resume/advance to an already-queued track — was
+misrouted to `{action: skip}`. The misrouted-play override tried to
+"correct" it, extracted the span `"it now"`, and found apparent content:
+`"it"` was already a stopword, but `"now"` was not, so the span survived
+the content check and got searched literally — queuing **"New Edition -
+Cool It Now"**, a real but completely unrelated song, at position 5.
+Same failure class this note already fixed for `"the music that we"` and
+`"the song"`: a function word slipping through the stopword set gets
+mistaken for song-identifying content.
+
+Added `"now"`, `"thing"`, `"things"` to `_PLAY_SPAN_STOPWORDS` — same
+closed generic-filler class as `"song"`/`"music"`/`"track"` already there.
+With no content surviving, the misrouted-play override now declines to
+fire at all, leaving the original (still-imperfect, but harmless) routed
+action alone rather than queuing an unrelated real song — `skip` is a
+reversible no-op; a wrong song polluting the queue is not.
+
+### Validation
+
+- `tests/unit/test_routing_rules.py`: `_play_span_content_tokens` returns
+  empty for `"it now"`, `"that now"`, `"the thing now"`, `"things"`; the
+  exact prod transcript through `_music_safety_net` no longer queues the
+  literal-search result, leaving the router's original `skip` untouched.
+- Mutation-verified: removed the three new stopwords, confirmed both new
+  tests failed (one reproducing the exact "Cool It Now" queue-junk
+  outcome), restored, confirmed all 126 tests in the file pass.
+- Full unit suite: 2053 passed, 1 skipped, no regressions.
