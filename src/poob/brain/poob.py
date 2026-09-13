@@ -682,7 +682,7 @@ _PLAY_SPAN_STOPWORDS = frozenset(
         # generic music / command filler
         "the", "a", "an", "by", "of", "and", "or", "some", "any", "song",
         "songs", "music", "track", "play", "put", "on", "it", "that", "this",
-        "please", "up", "actually", "just",
+        "please", "up", "actually", "just", "now", "thing", "things",
         # pronouns
         "you", "me", "us", "we", "i", "he", "she", "they", "them", "him",
         "her", "my", "your", "our", "their", "his",
